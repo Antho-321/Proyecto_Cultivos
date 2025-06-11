@@ -238,7 +238,7 @@ class MeanIoU(tf.keras.metrics.Metric):
 GPU_DEVICE = '/GPU:0' if gpus else '/CPU:0'
 print(f"\n--- Iniciando entrenamiento en el dispositivo: {GPU_DEVICE} ---")
 with tf.device(GPU_DEVICE):
-    model = build_model(input_shape=train_X.shape[1:])
+    model = build_model(train_X.shape[1:])
     model.summary() # Imprime un resumen para verificar las formas
     print("Modelo construido y ubicado en el dispositivo.")
 
