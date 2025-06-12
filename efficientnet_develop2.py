@@ -20,6 +20,7 @@ import os
 os.environ['MPLBACKEND'] = 'agg'  # matplotlib backend
 
 import tensorflow as tf
+import keras
 print("Versión de TensorFlow:", tf.__version__)
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
@@ -343,15 +344,19 @@ with tf.device(device):
 
     cbs1 = [
         EarlyStopping('val_mean_iou',mode='max',patience=15,restore_best_weights=True),
-        ModelCheckpoint('best_model_phase1.keras', save_best_only=True, monitor='val_mean_iou', mode='max'),
-        LearningRateScheduler(one_cycle_lr),
+        ModelCheckpoint(
+            filepath='best_model_phase1.weights.h5',
+            save_best_only=True,
+            save_weights_only=True,
+            monitor='val_mean_iou', mode='max'),
+            LearningRateScheduler(one_cycle_lr),
         ReduceLROnPlateau('val_mean_iou',mode='max',factor=0.5,patience=5,min_lr=1e-7)
     ]
     model.fit(train_X,train_y, batch_size=12, epochs=25,
               validation_data=val_gen, callbacks=cbs1)
 
     # Cargar fase 1 (skip mismatches)
-    model.load_weights('best_model_phase1.keras', by_name=True, skip_mismatch=True)
+    model.load_weights('best_model_phase1.weights.h5', skip_mismatch=True)
 
     # Fase 2: fine-tune parcial
     # liberar últimas capas del backbone
@@ -367,7 +372,7 @@ with tf.device(device):
     )
     cbs2 = [
         EarlyStopping('val_mean_iou',mode='max',patience=10,restore_best_weights=True),
-        ModelCheckpoint('final_efficientnetv2_deeplab.keras', save_best_only=True, monitor='val_mean_iou', mode='max'),
+        ModelCheckpoint('final_efficientnetv2_deeplab.weights.h5', save_best_only=True, monitor='val_mean_iou', mode='max'),
         TensorBoard(log_dir='./logs/phase2_finetune'),
         ReduceLROnPlateau('val_mean_iou',mode='max',factor=0.6,patience=6,min_lr=1e-8)
     ]
@@ -375,7 +380,7 @@ with tf.device(device):
               validation_data=val_gen, callbacks=cbs2)
 
     # Cargar fase 2
-    model.load_weights('final_efficientnetv2_deeplab.keras', by_name=True, skip_mismatch=True)
+    model.load_weights('final_efficientnetv2_deeplab.weights.h5', by_name=True, skip_mismatch=True)
 
     # Fase 3: full fine-tune
     for l in model.layers:
@@ -388,7 +393,7 @@ with tf.device(device):
     )
     cbs3 = [
         EarlyStopping('val_mean_iou',mode='max',patience=10,restore_best_weights=True),
-        ModelCheckpoint('final_full_finetune.keras', save_best_only=True, monitor='val_mean_iou', mode='max'),
+        ModelCheckpoint('final_full_finetune.weights.h5', save_best_only=True, monitor='val_mean_iou', mode='max'),
         TensorBoard(log_dir='./logs/phase3_full'),
         ReduceLROnPlateau('val_mean_iou',mode='max',factor=0.6,patience=8,min_lr=1e-9)
     ]
@@ -396,7 +401,61 @@ with tf.device(device):
               validation_data=val_gen, callbacks=cbs3)
 
     # Cargar modelo final
-    model.load_weights('final_full_finetune.keras', by_name=True, skip_mismatch=True)
+    model.load_weights('final_full_finetune.weights.h5', by_name=True, skip_mismatch=True)
+
+def evaluate_model_with_tta(model, X, y,
+                            num_classes=num_classes,
+                            batch_size=8):
+    """
+    Evalúa el modelo con Test-Time Augmentation (TTA).
+
+    • X, y  :  N × H × W × C y N × H × W  (int)
+    • Devuelve: dict con mean IoU, IoU por clase y pixel accuracy
+    """
+    # ---------- 1. Definir transformaciones y sus inversas ----------
+    def _hflip(a):  return np.flip(a, axis=2)          # ancho  ↔
+    def _vflip(a):  return np.flip(a, axis=1)          # alto   ↕
+    def _rot90(a):  return np.rot90(a, k=1, axes=(1, 2))
+    def _rot180(a): return np.rot90(a, k=2, axes=(1, 2))
+    def _rot270(a): return np.rot90(a, k=3, axes=(1, 2))
+
+    tfs = [
+        (lambda a: a,           lambda a: a),        # identidad
+        (_hflip,                _hflip),
+        (_vflip,                _vflip),
+        (_hflip,                _hflip),             # hv-flip == h después de v
+        (_rot90,                _rot270),
+        (_rot180,               _rot180),
+        (_rot270,               _rot90),
+        (lambda a: _hflip(_rot90(a)),  lambda a: _rot270(_hflip(a)))
+    ]
+
+    # ---------- 2. Generar predicciones con TTA ----------
+    probs_sum = np.zeros((len(X), *X.shape[1:-1], num_classes), dtype=np.float32)
+
+    for tf_in, tf_inv in tfs:
+        X_aug = tf_in(X)                      # aplicar aumento
+        preds = model.predict(X_aug, batch_size=batch_size, verbose=0)
+        preds = tf_inv(preds)                 # des-aumentar
+        probs_sum += preds                    # acumulamos probabilidades
+
+    probs_mean = probs_sum / len(tfs)         # media sobre las 8 vistas
+    y_pred = np.argmax(probs_mean, axis=-1)   # máscara final
+
+    # ---------- 3. Métricas ----------
+    ious, eps = [], 1e-7
+    for cls in range(num_classes):
+        yt = (y == cls)
+        yp = (y_pred == cls)
+        inter = np.logical_and(yt, yp).sum()
+        union = yt.sum() + yp.sum() - inter
+        ious.append(inter / (union + eps) if union else 0.0)
+
+    return {
+        "mean_iou": np.mean(ious),
+        "class_ious": ious,
+        "pixel_accuracy": (y_pred == y).mean()
+    }
 # -------------------------------------------------------------------------------
 # 9) Evaluación y visualización
 # -------------------------------------------------------------------------------
@@ -449,7 +508,11 @@ print(f"Mean IoU (final): {metrics['mean_iou']:.4f}")
 print(f"Pixel Accuracy (final): {metrics['pixel_accuracy']:.4f}")
 for i, iou in enumerate(metrics['class_ious']): print(f" IoU Clase {i}: {iou:.4f}")
 
-evaluate_model_with_tta(model, val_X, val_y)
+metrics_tta = evaluate_model_with_tta(model, val_X, val_y)
+print(f"Mean IoU (TTA): {metrics_tta['mean_iou']:.4f}")
+print(f"Pixel Acc. (TTA): {metrics_tta['pixel_accuracy']:.4f}")
+for i, iou in enumerate(metrics_tta['class_ious']):
+    print(f"  IoU clase {i}: {iou:.4f}")
 
 visualize_predictions(model, val_X, val_y)
 print("\nEntrenamiento y evaluación completados.")
