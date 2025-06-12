@@ -561,35 +561,35 @@ with tf.device(device):
     
     MONITOR_METRIC = 'val_enhanced_mean_iou'
     
-    # model.compile(
-    #     optimizer=tf.keras.optimizers.AdamW(5e-4, weight_decay=1e-4),
-    #     loss=enhanced_combined_loss,
-    #     metrics=[MeanIoU(num_classes=num_classes)],
-    #     jit_compile=False  # <-- Add this line
-    # )
+    model.compile(
+        optimizer=tf.keras.optimizers.AdamW(5e-4, weight_decay=1e-4),
+        loss=enhanced_combined_loss,
+        metrics=[MeanIoU(num_classes=num_classes)],
+        jit_compile=False  # <-- Add this line
+    )
 
-    # # Fase 1: entrenar cabeza
-    # print("\n--- Fase 1: Entrenando solo el decoder (backbone congelado) ---")
-    # backbone.trainable = False
+    # Fase 1: entrenar cabeza
+    print("\n--- Fase 1: Entrenando solo el decoder (backbone congelado) ---")
+    backbone.trainable = False
     
-    # def one_cycle_lr(ep, lr_unused, max_epochs=20, max_lr=5e-4, min_lr=1e-6): # Epochs increased
-    #     half = max_epochs//2
-    #     return (min_lr + (max_lr-min_lr)*ep/half) if ep<half \
-    #            else (max_lr - (max_lr-min_lr)*(ep-half)/half)
+    def one_cycle_lr(ep, lr_unused, max_epochs=20, max_lr=5e-4, min_lr=1e-6): # Epochs increased
+        half = max_epochs//2
+        return (min_lr + (max_lr-min_lr)*ep/half) if ep<half \
+               else (max_lr - (max_lr-min_lr)*(ep-half)/half)
 
     ckpt1_path = os.path.join(checkpoint_dir, 'best_model_phase1.weights.h5')
-    # cbs1 = [
-    #     EarlyStopping(MONITOR_METRIC,mode='max',patience=15,restore_best_weights=True),
-    #     ModelCheckpoint(
-    #         filepath=ckpt1_path,
-    #         save_best_only=True,
-    #         save_weights_only=True,
-    #         monitor=MONITOR_METRIC, mode='max'),
-    #     LearningRateScheduler(one_cycle_lr),
-    #     ReduceLROnPlateau(MONITOR_METRIC,mode='max',factor=0.5,patience=5,min_lr=1e-7)
-    # ]
-    # model.fit(train_X,train_y, batch_size=12, epochs=20,
-    #           validation_data=val_gen, callbacks=cbs1)
+    cbs1 = [
+        EarlyStopping(MONITOR_METRIC,mode='max',patience=15,restore_best_weights=True),
+        ModelCheckpoint(
+            filepath=ckpt1_path,
+            save_best_only=True,
+            save_weights_only=True,
+            monitor=MONITOR_METRIC, mode='max'),
+        LearningRateScheduler(one_cycle_lr),
+        ReduceLROnPlateau(MONITOR_METRIC,mode='max',factor=0.5,patience=5,min_lr=1e-7)
+    ]
+    model.fit(train_X,train_y, batch_size=12, epochs=20,
+              validation_data=val_gen, callbacks=cbs1)
 
     # Cargar fase 1 (skip mismatches)
     print(f"Cargando pesos de la fase 1 desde: {ckpt1_path}")
