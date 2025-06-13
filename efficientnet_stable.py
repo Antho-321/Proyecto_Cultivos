@@ -168,7 +168,7 @@ def ASPP(tensor):
     Retorna:
         Un tensor que es el resultado de la fusión de las diferentes ramas de ASPP.
     """
-    dims = tf.shape(tensor)
+    dims = K.shape(tensor)
     input_shape = (dims[1], dims[2]) # Altura, Ancho
 
     # Obtiene el número de filtros del tensor de entrada para usarlo en las capas de 1x1
