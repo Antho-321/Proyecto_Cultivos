@@ -12,7 +12,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
 from tqdm import tqdm
 from tensorflow.keras import layers
-import tensorflow_addons as tfa # For AdamW optimizer
 
 # Recommendation: Specific data augmentation for UAVs. 
 # This layer applies random rotations, flips, and color adjustments.
@@ -102,7 +101,12 @@ def build_custom_deeplab(input_shape=(256, 256, 3), num_classes=6):
     augmented_inputs = data_augmentation(inputs)
 
     # Backbone: EfficientNetV2-S (lightweight and powerful) 
-    backbone = EfficientNetV2S(include_top=False, weights='imagenet', input_tensor=augmented_inputs)
+    backbone = EfficientNetV2S(
+        include_top=False, 
+        weights='imagenet', 
+        input_tensor=augmented_inputs,
+        name='efficientnetv2-s'  # Add this line
+    )
     
     # Feature extraction points
     # Using endpoints that provide good low-level and high-level features
@@ -114,7 +118,8 @@ def build_custom_deeplab(input_shape=(256, 256, 3), num_classes=6):
     x = ASPP(high_level, out_channels=256, rates=[6, 12, 18])
     
     # Upsample ASPP features to match low-level feature dimensions
-    x = UpSampling2D(size=(high_level.shape[1] // low_level.shape[1]), interpolation='bilinear')(x)
+    upsampling_factor = low_level.shape[1] // high_level.shape[1]  # This will be 64 // 8 = 8
+    x = UpSampling2D(size=(upsampling_factor, upsampling_factor), interpolation='bilinear')(x)
     
     # Project low-level features
     low = Conv2D(48, 1, padding='same', use_bias=False)(low_level)
@@ -158,12 +163,11 @@ model.summary()
 
 # 5) Two-phase training process
 # Phase 1: Train the decoder and newly added layers
-for layer in model.get_layer('efficientnetv2-s').layers:
-    layer.trainable = False
+model.get_layer('efficientnetv2-s').trainable = False
 
 # Using AdamW optimizer as recommended for better weight decay 
 model.compile(
-    optimizer=tfa.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-5),
+    optimizer=tf.keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-5),
     loss=combined_loss,
     metrics=[mean_iou]
 )
@@ -183,11 +187,10 @@ model.fit(
 )
 
 # Phase 2: Fine-tune the entire model
-for layer in model.get_layer('efficientnetv2-s').layers:
-    layer.trainable = True
+model.get_layer('efficientnetv2-s').trainable = True
 
 model.compile(
-    optimizer=tfa.optimizers.AdamW(learning_rate=1e-4, weight_decay=1e-6), # Lower learning rate for fine-tuning
+    optimizer=tf.keras.optimizers.AdamW(learning_rate=1e-4, weight_decay=1e-6), # Lower learning rate for fine-tuning
     loss=combined_loss,
     metrics=[mean_iou]
 )
