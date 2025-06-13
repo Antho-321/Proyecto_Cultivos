@@ -207,7 +207,7 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
     y un ASPP_mejorado.
     """
     # --- Definición del backbone ---
-    backbone = tf.keras.applications.EfficientNetV2S(
+    backbone = EfficientNetV2S(  # Remove tf.keras.applications.
         input_shape=shape,
         num_classes=0,
         pretrained='imagenet',
