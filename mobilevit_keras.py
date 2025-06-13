@@ -3,6 +3,7 @@
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
+from tensorflow.keras.layers import Activation
 
 def conv_block(x, filters=16, kernel_size=3, strides=2):
     """Bloque convolucional estándar."""
@@ -15,13 +16,13 @@ def inverted_residual_block(x, expanded_channels, output_channels):
     """Bloque residual invertido (como en MobileNetV2)."""
     m = layers.Conv2D(expanded_channels, 1, padding="same", use_bias=False)(x)
     m = layers.BatchNormalization()(m)
-    m = tf.nn.swish(m)
+    m = Activation('swish')(m)
 
     m = layers.DepthwiseConv2D(
         3, strides=1, padding="same", use_bias=False
     )(m)
     m = layers.BatchNormalization()(m)
-    m = tf.nn.swish(m)
+    m = Activation('swish')(m)
 
     m = layers.Conv2D(output_channels, 1, padding="same", use_bias=False)(m)
     m = layers.BatchNormalization()(m)
