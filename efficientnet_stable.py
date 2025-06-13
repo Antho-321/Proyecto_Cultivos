@@ -234,7 +234,7 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
                 s4 = layer.output  # 16x16
     
     # Verificar que todas las capas fueron encontradas
-    if not all([s1, s2, s3, s4]):
+    if any(s is None for s in [s1, s2, s3, s4]):
         raise ValueError("No se pudieron encontrar todas las capas de skip connection requeridas.")
         
     # --- Cuello de botella con ASPP Mejorado ---
