@@ -149,20 +149,21 @@ def ASPP(x, out=128, rates=(6,12,18,24)):
     return y
 
 def build_model(shape=(256,256,3), num_classes_arg=None):
-    # Usar num_classes_arg para evitar conflictos con la variable global
-    if num_classes_arg is None:
-        raise ValueError("num_classes_arg must be provided to build_model")
-
-    backbone = EfficientNetV2S(input_shape=shape, num_classes=0, pretrained='imagenet', include_preprocessing=False)
-    for l in backbone.layers:
-        if isinstance(l,(Conv2D,SeparableConv2D)):
-            l.kernel_regularizer = tf.keras.regularizers.l2(1e-4)
-
+    backbone = EfficientNetV2S(input_shape=shape, num_classes=0,
+                                         pretrained='imagenet', include_preprocessing=False)
+    for layer in backbone.layers:
+        if isinstance(layer, (Conv2D, SeparableConv2D)):
+            layer.kernel_regularizer = tf.keras.regularizers.l2(2e-4)
     inp = backbone.input
-    high     = backbone.get_layer('post_swish').output   # 8×8 en un input de 256x256
-    mid      = backbone.get_layer('add_6').output       # 16×16
-    low      = backbone.get_layer('add_2').output       # 32×32
-    very_low = backbone.get_layer('stem_swish').output  # 64x64
+    high = backbone.get_layer('post_swish').output
+    mid, low, very_low = None, None, None
+    for layer in reversed(backbone.layers):
+        if 'add' in layer.name:
+            if layer.output.shape[1] == 16 and mid is None: mid = layer.output
+            elif layer.output.shape[1] == 32 and low is None: low = layer.output
+            elif layer.output.shape[1] == 64 and very_low is None: very_low = layer.output
+    if mid is None or low is None or very_low is None:
+        raise ValueError("No se pudieron encontrar todas las capas de skip connection requeridas.")
 
     x = ASPP(high)                                                      # 8×8 → 8×8
     x = Activation('relu')(BatchNormalization()(Conv2DTranspose(256,4,strides=4,padding='same',use_bias=False)(x))) # 8→32
@@ -336,9 +337,15 @@ ckpt3_path = os.path.join(checkpoint_dir, 'phase3_iou_model.keras')
 val_gen = (val_X, val_y)
 
 with tf.device(device):
+    # 1. Instantiate the model
     iou_aware_model = IoUOptimizedModel(shape=train_X.shape[1:], num_classes=num_classes)
     
-    # Referencias para compatibilidad con la lógica de congelamiento
+    # 2. Add this line to explicitly build the model
+    # The input shape is (batch_size, height, width, channels). We use None for the batch size
+    # to indicate it can be flexible.
+    iou_aware_model.build(input_shape=(None, *train_X.shape[1:]))
+    
+    # 3. Now the rest of your code will work as expected
     model = iou_aware_model.seg_model
     backbone = iou_aware_model.backbone
     
@@ -358,7 +365,7 @@ with tf.device(device):
         TensorBoard(log_dir='./logs/iou_phase1_head', update_freq='epoch')
     ]
     
-    iou_aware_model.fit(train_X, train_y, batch_size=12, epochs=30,
+    iou_aware_model.fit(train_X, train_y, batch_size=12, epochs=20,
                         validation_data=val_gen, callbacks=cbs1)
     
     print(f"Cargando mejores pesos de la fase 1 desde: {ckpt1_path}")
@@ -379,7 +386,7 @@ with tf.device(device):
         TensorBoard(log_dir='./logs/iou_phase2_partial', update_freq='epoch')
     ]
 
-    iou_aware_model.fit(train_X, train_y, batch_size=6, epochs=40,
+    iou_aware_model.fit(train_X, train_y, batch_size=6, epochs=20,
                         validation_data=val_gen, callbacks=cbs2)
 
     print(f"Cargando mejores pesos de la fase 2 desde: {ckpt2_path}")
@@ -399,7 +406,7 @@ with tf.device(device):
         TensorBoard(log_dir='./logs/iou_phase3_full', update_freq='epoch')
     ]
     
-    iou_aware_model.fit(train_X, train_y, batch_size=4, epochs=50,
+    iou_aware_model.fit(train_X, train_y, batch_size=4, epochs=20,
                         validation_data=val_gen, callbacks=cbs3)
     
     print(f"Cargando pesos finales desde: {ckpt3_path}")
