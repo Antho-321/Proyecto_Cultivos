@@ -148,45 +148,75 @@ def ASPP(x, out=128, rates=(6,12,18,24)):
     y = Activation('relu')(BatchNormalization()(Conv2D(out,1,use_bias=False)(Concatenate()(branches))))
     return y
 
-def build_model(shape=(256,256,3), num_classes_arg=None):
-    backbone = EfficientNetV2S(input_shape=shape, num_classes=0,
-                                         pretrained='imagenet', include_preprocessing=False)
+def build_model(shape=(256, 256, 3), num_classes_arg=None):
+    """
+    Construye el modelo de segmentación U-Net con un backbone EfficientNetV2S.
+    """
+    # Definición del backbone
+    backbone = EfficientNetV2S(
+        input_shape=shape,
+        num_classes=0,  # 0 para no incluir el clasificador final
+        pretrained='imagenet',
+        include_preprocessing=False
+    )
+
+    # Aplicar regularización L2 a las capas convolucionales del backbone
     for layer in backbone.layers:
         if isinstance(layer, (Conv2D, SeparableConv2D)):
             layer.kernel_regularizer = tf.keras.regularizers.l2(2e-4)
+
+    # --- Extracción de las skip connections ---
     inp = backbone.input
-    high = backbone.get_layer('post_swish').output
+    high = backbone.get_layer('post_swish').output  # Salida de alta resolución (8x8)
+
     mid, low, very_low = None, None, None
     for layer in reversed(backbone.layers):
         if 'add' in layer.name:
-            if layer.output.shape[1] == 16 and mid is None: mid = layer.output
-            elif layer.output.shape[1] == 32 and low is None: low = layer.output
-            elif layer.output.shape[1] == 64 and very_low is None: very_low = layer.output
+            if layer.output.shape[1] == 16 and mid is None:
+                mid = layer.output
+            elif layer.output.shape[1] == 32 and low is None:
+                low = layer.output
+            elif layer.output.shape[1] == 64 and very_low is None:
+                very_low = layer.output
+
     if mid is None or low is None or very_low is None:
         raise ValueError("No se pudieron encontrar todas las capas de skip connection requeridas.")
 
-    x = ASPP(high)                                                      # 8×8 → 8×8
-    x = Activation('relu')(BatchNormalization()(Conv2DTranspose(256,4,strides=4,padding='same',use_bias=False)(x))) # 8→32
+    # --- Rama del decodificador (upsampling) ---
 
-    mid_p = Activation('relu')(BatchNormalization()(Conv2D(128,1,padding='same',use_bias=False)(mid)))
-    x = Activation('relu')(BatchNormalization()(SeparableConv2D(256,3,padding='same',use_bias=False)(Concatenate()([x,mid_p]))))
+    # Bloque 1: ASPP y upsampling inicial
+    x = ASPP(high)  # 8x8 -> 8x8
+    x = Activation('relu')(BatchNormalization()(Conv2DTranspose(256, 4, strides=4, padding='same', use_bias=False)(x)))  # 8x8 -> 32x32
 
-    x = Activation('relu')(BatchNormalization()(Conv2DTranspose(128,2,strides=2,padding='same',use_bias=False)(x))) # 32→64
-    low_p = Activation('relu')(BatchNormalization()(Conv2D(64,1,padding='same',use_bias=False)(low)))
-    x = Activation('relu')(BatchNormalization()(SeparableConv2D(128,3,padding='same',use_bias=False)(Concatenate()([x,low_p]))))
-
-    x = Activation('relu')(BatchNormalization()(Conv2DTranspose(64,2,strides=2,padding='same',use_bias=False)(x)))  # 64→128
-    very_low_p = Activation('relu')(BatchNormalization()(Conv2D(48,1,padding='same',use_bias=False)(very_low)))
-    x = Activation('relu')(BatchNormalization()(SeparableConv2D(96,3,padding='same',use_bias=False)(Concatenate()([x,very_low_p]))))
+    # Bloque 2: Conexión con 'mid' (16x16)
+    mid_p = Activation('relu')(BatchNormalization()(Conv2D(128, 1, padding='same', use_bias=False)(mid)))
 
     # =========================================================================
-    # SOLUCIÓN IMPLEMENTADA AQUÍ
-    # El tensor llega con 128x128. Para llegar a 256x256 se necesita un factor x2.
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)   # 128→256
+    # SOLUCIÓN: Hacer upsample a la skip connection 'mid' para que coincida con 'x'
     # =========================================================================
-    
-    out = Conv2D(num_classes_arg,1,padding='same',dtype='float32')(x)
-    return Model(inp,out), backbone
+    mid_p_upsampled = UpSampling2D(size=(2, 2), interpolation='bilinear')(mid_p)  # 16x16 -> 32x32
+
+    # Ahora la concatenación es posible
+    x = Concatenate()([x, mid_p_upsampled])
+    x = Activation('relu')(BatchNormalization()(SeparableConv2D(256, 3, padding='same', use_bias=False)(x)))
+
+    # Bloque 3: Conexión con 'low' (32x32)
+    x = Activation('relu')(BatchNormalization()(Conv2DTranspose(128, 2, strides=2, padding='same', use_bias=False)(x)))  # 32x32 -> 64x64
+    low_p = Activation('relu')(BatchNormalization()(Conv2D(64, 1, padding='same', use_bias=False)(low)))
+    x = Activation('relu')(BatchNormalization()(SeparableConv2D(128, 3, padding='same', use_bias=False)(Concatenate()([x, low_p]))))
+
+    # Bloque 4: Conexión con 'very_low' (64x64)
+    x = Activation('relu')(BatchNormalization()(Conv2DTranspose(64, 2, strides=2, padding='same', use_bias=False)(x)))  # 64x64 -> 128x128
+    very_low_p = Activation('relu')(BatchNormalization()(Conv2D(48, 1, padding='same', use_bias=False)(very_low)))
+    x = Activation('relu')(BatchNormalization()(SeparableConv2D(96, 3, padding='same', use_bias=False)(Concatenate()([x, very_low_p]))))
+
+    # Upsampling final para alcanzar la resolución de entrada
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)  # 128x128 -> 256x256
+
+    # Capa de salida
+    out = Conv2D(num_classes_arg, 1, padding='same', dtype='float32')(x)
+
+    return Model(inp, out), backbone
 
 
 # 7) Pérdidas Mejoradas y Métricas Personalizadas ------------------------------
