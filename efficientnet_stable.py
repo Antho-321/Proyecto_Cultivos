@@ -44,7 +44,7 @@ from tensorflow.keras import layers, backend as K
 from tensorflow.keras.layers import (
     Input, Conv2D, SeparableConv2D, Conv2DTranspose,
     BatchNormalization, Activation, Dropout,
-    Lambda, Concatenate, UpSampling2D
+    Lambda, Concatenate, UpSampling2D, ReLU
 )
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import (
@@ -136,151 +136,144 @@ print(f"\nNúmero de clases detectado: {num_classes}")
 
 # 6) Definición del Modelo (Arquitectura) ------------------------------------
 
-def conv_block(tensor, filters, kernel_size=3, strides=1, dilation_rate=1, use_bias=False):
+def SqueezeAndExcitation(tensor, ratio=16):
     """
-    Bloque convolucional estándar con Convolución, Normalización por Lotes y ReLU.
+    Módulo de atención Squeeze-and-Excitation (SE).
+    Re-calibra la importancia de los canales del mapa de características.
     """
-    x = Conv2D(
-        filters,
-        kernel_size=kernel_size,
-        strides=strides,
-        dilation_rate=dilation_rate,
-        padding='same',
-        use_bias=use_bias,
-        kernel_initializer='he_normal'
-    )(tensor)
+    # Obtiene el número de filtros (canales)
+    filters = tensor.shape[-1]
+    
+    # Squeeze: Pooling promedio global
+    se = GlobalAveragePooling2D()(tensor)
+    
+    # Excitation: Dos capas densas para aprender los pesos de los canales
+    se = Dense(filters // ratio, activation='relu', use_bias=False)(se)
+    se = Dense(filters, activation='sigmoid', use_bias=False)(se)
+    
+    # Re-escala el tensor original con los pesos aprendidos
+    return Multiply()([tensor, se])
+
+
+def conv_block(x, filters, kernel_size, strides=1, padding='same'):
+    """Un bloque convolucional simple con Conv2D, BatchNorm y activación Swish."""
+    x = Conv2D(filters, kernel_size, strides=strides, padding=padding, use_bias=False)(x)
     x = BatchNormalization()(x)
-    x = ReLU()(x)
+    x = Activation('swish')(x)
     return x
 
-def ASPP(tensor):
+def ASPP_mejorado(x, dilation_rates, use_attention=False):
     """
-    Implementación del módulo Atrous Spatial Pyramid Pooling (ASPP)
-    basado en el paper de DeepLab (Chen et al., 2017).
-
-    Este módulo aplica convoluciones paralelas con diferentes tasas de dilatación
-    para capturar información de múltiples escalas. Se basa en la variante
-    ASPP-L descrita en la Tabla 3 y Figura 7 del documento.
-
-    Argumentos:
-        tensor: El tensor de entrada (mapa de características de una red troncal).
-
-    Retorna:
-        Un tensor que es el resultado de la fusión de las diferentes ramas de ASPP.
+    Pirámide de Agrupamiento Espacial Atrous (ASPP) con un canal de atención opcional.
     """
-    # Obtiene el número de filtros del tensor de entrada para usarlo en las capas de 1x1
-    # This line correctly uses the .shape attribute, which works with symbolic KerasTensors.
-    filters = tensor.shape[-1]
+    input_shape = x.shape
+    input_filters = input_shape[-1]
+    
+    # --- Ramas de ASPP ---
+    # 1. Agrupamiento de Imagen Global
+    image_pooling = GlobalAveragePooling2D()(x)
+    image_pooling = Reshape((1, 1, input_filters))(image_pooling)
+    image_pooling = Conv2D(input_filters, 1, padding='same', use_bias=False)(image_pooling)
+    image_pooling = BatchNormalization()(image_pooling)
+    image_pooling = Activation('swish')(image_pooling)
+    image_pooling = UpSampling2D(size=(input_shape[1], input_shape[2]), interpolation='bilinear')(image_pooling)
 
-    # Ramas paralelas de ASPP como se describe en las Figuras 4 y 7.
-    # El paper describe tasas de {6, 12, 18, 24} para la variante ASPP-L.
-    # Cada rama usa una convolución atrous de 3x3.
-    # Se añade una convolución de 1x1 para coherencia con implementaciones modernas
-    # y para refinar las características.
+    # 2. Convolución 1x1
+    conv_1x1 = conv_block(x, input_filters, 1)
 
-    # Rama 1: Convolución Atrous con tasa = 6
-    branch_a = conv_block(tensor, filters, kernel_size=3, dilation_rate=6)
+    # 3. Convoluciones Atrous
+    atrous_convs = [conv_block(x, input_filters, 3, dilation_rate=rate) for rate in dilation_rates]
 
-    # Rama 2: Convolución Atrous con tasa = 12
-    branch_b = conv_block(tensor, filters, kernel_size=3, dilation_rate=12)
+    # Concatenar todas las ramas
+    concatenated = Concatenate()([image_pooling, conv_1x1] + atrous_convs)
+    
+    # Proyección final
+    projected = conv_block(concatenated, input_filters, 1)
 
-    # Rama 3: Convolución Atrous con tasa = 18
-    branch_c = conv_block(tensor, filters, kernel_size=3, dilation_rate=18)
+    # --- Canal de Atención (Opcional) ---
+    if use_attention:
+        attention = GlobalAveragePooling2D()(projected)
+        attention = Reshape((1, 1, input_filters))(attention)
+        attention = Conv2D(input_filters // 4, 1, activation='relu', padding='same')(attention)
+        attention = Conv2D(input_filters, 1, activation='sigmoid', padding='same')(attention)
+        projected = Multiply()([projected, attention])
 
-    # Rama 4: Convolución Atrous con tasa = 24
-    branch_d = conv_block(tensor, filters, kernel_size=3, dilation_rate=24)
-
-    # Fusión de características. El documento menciona "Sum-Fusion", pero la
-    # concatenación seguida de una convolución de 1x1 es un método de fusión más robusto
-    # y común en las arquitecturas DeepLab más recientes.
-    concat_features = Concatenate()([branch_a, branch_b, branch_c, branch_d])
-
-    # Capa de fusión final para combinar las características concatenadas
-    fusion = conv_block(concat_features, filters, kernel_size=1)
-
-    return fusion
+    return projected
 
 def build_model(shape=(256, 256, 3), num_classes_arg=None):
     """
-    Construye el modelo de segmentación tipo U-Net con un backbone EfficientNetV2S
-    y un decodificador que utiliza los bloques `conv_block` y `ASPP`.
+    Construye un modelo de segmentación con un backbone EfficientNetV2S
+    y un decodificador tipo U-Net que usa una búsqueda dinámica de capas
+    y un ASPP_mejorado.
     """
     # --- Definición del backbone ---
-    backbone = EfficientNetV2S(
+    backbone = tf.keras.applications.EfficientNetV2S(
         input_shape=shape,
-        num_classes=0,  # 0 para no incluir el clasificador final
+        num_classes=0,
         pretrained='imagenet',
         include_preprocessing=False
     )
 
-    # Aplicar regularización L2 a las capas convolucionales del backbone
-    for layer in backbone.layers:
-        if isinstance(layer, (Conv2D, SeparableConv2D)):
-            layer.kernel_regularizer = tf.keras.regularizers.l2(2e-4)
-
-    # --- Extracción de las skip connections ---
+    # --- Extracción dinámica de las skip connections ---
     inp = backbone.input
-    high = backbone.get_layer('post_swish').output  # Salida de alta resolución (8x8)
+    bottleneck = backbone.get_layer('post_swish').output  # Salida del encoder, 8x8
 
-    mid, low, very_low = None, None, None
+    s1, s2, s3, s4 = None, None, None, None
+
+    # Búsqueda hacia atrás para encontrar las últimas capas 'add' de cada tamaño
     for layer in reversed(backbone.layers):
         if 'add' in layer.name:
-            if layer.output.shape[1] == 16 and mid is None:
-                mid = layer.output
-            elif layer.output.shape[1] == 32 and low is None:
-                low = layer.output
-            elif layer.output.shape[1] == 64 and very_low is None:
-                very_low = layer.output
-
-    if mid is None or low is None or very_low is None:
+            shape = layer.output.shape[1]
+            if shape == 128 and s1 is None:
+                s1 = layer.output  # 128x128
+            elif shape == 64 and s2 is None:
+                s2 = layer.output  # 64x64
+            elif shape == 32 and s3 is None:
+                s3 = layer.output  # 32x32
+            elif shape == 16 and s4 is None:
+                s4 = layer.output  # 16x16
+    
+    # Verificar que todas las capas fueron encontradas
+    if not all([s1, s2, s3, s4]):
         raise ValueError("No se pudieron encontrar todas las capas de skip connection requeridas.")
+        
+    # --- Cuello de botella con ASPP Mejorado ---
+    # Se aplican tasas de dilatación pequeñas, adecuadas para el mapa de 8x8
+    x = ASPP_mejorado(bottleneck, dilation_rates=[2, 4, 6], use_attention=True) # 8x8 -> 8x8
 
-    # --- Rama del decodificador (upsampling) ---
+    # --- Rama del decodificador (Upsampling con lógica U-Net) ---
 
-    # Bloque 1: ASPP y upsampling inicial
-    x = ASPP(high)  # 8x8 -> 8x8
-
-    # El upsampling con Conv2DTranspose no encaja en el `conv_block`, se mantiene por separado.
-    x = Conv2DTranspose(256, kernel_size=4, strides=4, padding='same', use_bias=False)(x)  # 8x8 -> 32x32
-    x = BatchNormalization()(x)
-    x = ReLU()(x)
-
-    # Bloque 2: Conexión con 'mid' (16x16)
-    # Se procesa la skip connection 'mid' usando conv_block.
-    mid_p = conv_block(mid, filters=128, kernel_size=1)
-    
-    # Se hace upsample a la skip connection procesada para que coincida con 'x'.
-    mid_p_upsampled = UpSampling2D(size=(2, 2), interpolation='bilinear')(mid_p)  # 16x16 -> 32x32
-
-    # Se concatenan las características y se procesan con conv_block.
-    x = Concatenate()([x, mid_p_upsampled])
-    x = conv_block(x, filters=256, kernel_size=3)
-
-    # Bloque 3: Conexión con 'low' (32x32)
-    x = Conv2DTranspose(128, kernel_size=2, strides=2, padding='same', use_bias=False)(x)  # 32x32 -> 64x64
-    x = BatchNormalization()(x)
-    x = ReLU()(x)
-    low_p = conv_block(low, filters=64, kernel_size=1)
-    
-    x = Concatenate()([x, low_p])
+    # Bloque 1: De 8x8 a 16x16
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    x = Concatenate()([x, s4]) # Concatenar con la skip connection de 16x16
+    x = conv_block(x, filters=128, kernel_size=3)
     x = conv_block(x, filters=128, kernel_size=3)
 
-    # Bloque 4: Conexión con 'very_low' (64x64)
-    x = Conv2DTranspose(64, kernel_size=2, strides=2, padding='same', use_bias=False)(x)  # 64x64 -> 128x128
-    x = BatchNormalization()(x)
-    x = ReLU()(x)
-    very_low_p = conv_block(very_low, filters=48, kernel_size=1)
+    # Bloque 2: De 16x16 a 32x32
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    x = Concatenate()([x, s3]) # Concatenar con la skip connection de 32x32
+    x = conv_block(x, filters=64, kernel_size=3)
+    x = conv_block(x, filters=64, kernel_size=3)
 
-    x = Concatenate()([x, very_low_p])
-    x = conv_block(x, filters=96, kernel_size=3)
+    # Bloque 3: De 32x32 a 64x64
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    x = Concatenate()([x, s2]) # Concatenar con la skip connection de 64x64
+    x = conv_block(x, filters=48, kernel_size=3)
+    x = conv_block(x, filters=48, kernel_size=3)
 
-    # Upsampling final para alcanzar la resolución de entrada
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)  # 128x128 -> 256x256
+    # Bloque 4: De 64x64 a 128x128
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    x = Concatenate()([x, s1]) # Concatenar con la skip connection de 128x128
+    x = conv_block(x, filters=32, kernel_size=3)
+    x = conv_block(x, filters=32, kernel_size=3)
 
-    # Capa de salida (no lleva normalización ni activación no lineal)
-    out = Conv2D(num_classes_arg, 1, padding='same', dtype='float32')(x)
+    # Upsampling final para alcanzar la resolución de entrada (256x256)
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    
+    # Capa de salida
+    out = Conv2D(num_classes_arg, 1, padding='same', activation='softmax', dtype='float32')(x)
 
-    return Model(inp, out), backbone
+    return Model(inp, out)
 
 
 # 7) Pérdidas Mejoradas y Métricas Personalizadas ------------------------------
