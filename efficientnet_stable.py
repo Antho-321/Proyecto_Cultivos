@@ -156,9 +156,16 @@ def SqueezeAndExcitation(tensor, ratio=16):
     return Multiply()([tensor, se])
 
 
-def conv_block(x, filters, kernel_size, strides=1, padding='same'):
-    """Un bloque convolucional simple con Conv2D, BatchNorm y activación Swish."""
-    x = Conv2D(filters, kernel_size, strides=strides, padding=padding, use_bias=False)(x)
+def conv_block(x, filters, kernel_size, strides=1, padding='same', dilation_rate=1): # <-- Add dilation_rate here
+    """Un bloque convolucional que soporta dilatación, con Conv2D, BatchNorm y Swish."""
+    x = Conv2D(
+        filters, 
+        kernel_size, 
+        strides=strides, 
+        padding=padding, 
+        dilation_rate=dilation_rate, # <-- Pass it to Conv2D
+        use_bias=False
+    )(x)
     x = BatchNormalization()(x)
     x = Activation('swish')(x)
     return x
