@@ -14,6 +14,12 @@ os.environ['MPLBACKEND'] = 'agg'
 # --- PRIMERO TENSORFLOW ---
 import tensorflow as tf
 
+from tensorflow.keras import mixed_precision
+
+# Add this at the beginning of your script, after your imports
+policy = mixed_precision.Policy('mixed_float16')
+mixed_precision.set_global_policy(policy)
+
 # --- Verificación de GPU ---
 print("Versión de TensorFlow:", tf.__version__)
 gpus = tf.config.list_physical_devices('GPU')
@@ -44,6 +50,7 @@ from tensorflow.keras.layers import (
     Dense, Multiply, Reshape, GlobalAveragePooling2D
 )
 from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Activation
 from tensorflow.keras.callbacks import (
     EarlyStopping, ModelCheckpoint, TensorBoard, ReduceLROnPlateau
 )
@@ -212,7 +219,11 @@ def build_mobilevit_model(shape=(256, 256, 3), num_classes_arg=None):
     x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
     
     # Capa de salida
-    out = Conv2D(num_classes_arg, 1, padding='same', activation='softmax', dtype='float32')(x)
+
+    # 1. Perform the convolution in float32 without an activation
+    x = Conv2D(num_classes_arg, 1, padding='same', activation=None, dtype='float32')(x)
+    # 2. Apply the softmax activation, also ensuring it is done in float32
+    out = Activation('softmax', dtype='float32')(x)
 
     return Model(inp, out), backbone
 
