@@ -136,23 +136,78 @@ print(f"\nNúmero de clases detectado: {num_classes}")
 
 # 6) Definición del Modelo (Arquitectura) ------------------------------------
 
-def ASPP(x, out=128, rates=(6,12,18,24)):
-    branches = [Activation('relu')(BatchNormalization()(Conv2D(out,1,use_bias=False)(x)))]
-    for r in rates:
-        d = Activation('relu')(BatchNormalization()(SeparableConv2D(out,3,dilation_rate=r,padding='same',use_bias=False)(x)))
-        branches.append(d)
-    pool = layers.GlobalAveragePooling2D(keepdims=True)(x)
-    pool = Activation('relu')(BatchNormalization()(Conv2D(out,1,use_bias=False)(pool)))
-    pool = Lambda(lambda a: tf.image.resize(a[0], tf.shape(a[1])[1:3]))([pool,x])
-    branches.append(pool)
-    y = Activation('relu')(BatchNormalization()(Conv2D(out,1,use_bias=False)(Concatenate()(branches))))
-    return y
+def conv_block(tensor, filters, kernel_size=3, strides=1, dilation_rate=1, use_bias=False):
+    """
+    Bloque convolucional estándar con Convolución, Normalización por Lotes y ReLU.
+    """
+    x = Conv2D(
+        filters,
+        kernel_size=kernel_size,
+        strides=strides,
+        dilation_rate=dilation_rate,
+        padding='same',
+        use_bias=use_bias,
+        kernel_initializer='he_normal'
+    )(tensor)
+    x = BatchNormalization()(x)
+    x = ReLU()(x)
+    return x
+
+def ASPP(tensor):
+    """
+    Implementación del módulo Atrous Spatial Pyramid Pooling (ASPP)
+    basado en el paper de DeepLab (Chen et al., 2017).
+
+    Este módulo aplica convoluciones paralelas con diferentes tasas de dilatación
+    para capturar información de múltiples escalas. Se basa en la variante
+    ASPP-L descrita en la Tabla 3 y Figura 7 del documento.
+
+    Argumentos:
+        tensor: El tensor de entrada (mapa de características de una red troncal).
+
+    Retorna:
+        Un tensor que es el resultado de la fusión de las diferentes ramas de ASPP.
+    """
+    dims = tf.shape(tensor)
+    input_shape = (dims[1], dims[2]) # Altura, Ancho
+
+    # Obtiene el número de filtros del tensor de entrada para usarlo en las capas de 1x1
+    filters = tensor.shape[-1]
+
+    # Ramas paralelas de ASPP como se describe en las Figuras 4 y 7.
+    # El paper describe tasas de {6, 12, 18, 24} para la variante ASPP-L.
+    # Cada rama usa una convolución atrous de 3x3.
+    # Se añade una convolución de 1x1 para coherencia con implementaciones modernas
+    # y para refinar las características.
+
+    # Rama 1: Convolución Atrous con tasa = 6
+    branch_a = conv_block(tensor, filters, kernel_size=3, dilation_rate=6)
+
+    # Rama 2: Convolución Atrous con tasa = 12
+    branch_b = conv_block(tensor, filters, kernel_size=3, dilation_rate=12)
+
+    # Rama 3: Convolución Atrous con tasa = 18
+    branch_c = conv_block(tensor, filters, kernel_size=3, dilation_rate=18)
+
+    # Rama 4: Convolución Atrous con tasa = 24
+    branch_d = conv_block(tensor, filters, kernel_size=3, dilation_rate=24)
+
+    # Fusión de características. El documento menciona "Sum-Fusion", pero la
+    # concatenación seguida de una convolución de 1x1 es un método de fusión más robusto
+    # y común en las arquitecturas DeepLab más recientes.
+    concat_features = Concatenate()([branch_a, branch_b, branch_c, branch_d])
+
+    # Capa de fusión final para combinar las características concatenadas
+    fusion = conv_block(concat_features, filters, kernel_size=1)
+
+    return fusion
 
 def build_model(shape=(256, 256, 3), num_classes_arg=None):
     """
-    Construye el modelo de segmentación U-Net con un backbone EfficientNetV2S.
+    Construye el modelo de segmentación tipo U-Net con un backbone EfficientNetV2S
+    y un decodificador que utiliza los bloques `conv_block` y `ASPP`.
     """
-    # Definición del backbone
+    # --- Definición del backbone ---
     backbone = EfficientNetV2S(
         input_shape=shape,
         num_classes=0,  # 0 para no incluir el clasificador final
@@ -186,34 +241,45 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
 
     # Bloque 1: ASPP y upsampling inicial
     x = ASPP(high)  # 8x8 -> 8x8
-    x = Activation('relu')(BatchNormalization()(Conv2DTranspose(256, 4, strides=4, padding='same', use_bias=False)(x)))  # 8x8 -> 32x32
+
+    # El upsampling con Conv2DTranspose no encaja en el `conv_block`, se mantiene por separado.
+    x = Conv2DTranspose(256, kernel_size=4, strides=4, padding='same', use_bias=False)(x)  # 8x8 -> 32x32
+    x = BatchNormalization()(x)
+    x = ReLU()(x)
 
     # Bloque 2: Conexión con 'mid' (16x16)
-    mid_p = Activation('relu')(BatchNormalization()(Conv2D(128, 1, padding='same', use_bias=False)(mid)))
-
-    # =========================================================================
-    # SOLUCIÓN: Hacer upsample a la skip connection 'mid' para que coincida con 'x'
-    # =========================================================================
+    # Se procesa la skip connection 'mid' usando conv_block.
+    mid_p = conv_block(mid, filters=128, kernel_size=1)
+    
+    # Se hace upsample a la skip connection procesada para que coincida con 'x'.
     mid_p_upsampled = UpSampling2D(size=(2, 2), interpolation='bilinear')(mid_p)  # 16x16 -> 32x32
 
-    # Ahora la concatenación es posible
+    # Se concatenan las características y se procesan con conv_block.
     x = Concatenate()([x, mid_p_upsampled])
-    x = Activation('relu')(BatchNormalization()(SeparableConv2D(256, 3, padding='same', use_bias=False)(x)))
+    x = conv_block(x, filters=256, kernel_size=3)
 
     # Bloque 3: Conexión con 'low' (32x32)
-    x = Activation('relu')(BatchNormalization()(Conv2DTranspose(128, 2, strides=2, padding='same', use_bias=False)(x)))  # 32x32 -> 64x64
-    low_p = Activation('relu')(BatchNormalization()(Conv2D(64, 1, padding='same', use_bias=False)(low)))
-    x = Activation('relu')(BatchNormalization()(SeparableConv2D(128, 3, padding='same', use_bias=False)(Concatenate()([x, low_p]))))
+    x = Conv2DTranspose(128, kernel_size=2, strides=2, padding='same', use_bias=False)(x)  # 32x32 -> 64x64
+    x = BatchNormalization()(x)
+    x = ReLU()(x)
+    low_p = conv_block(low, filters=64, kernel_size=1)
+    
+    x = Concatenate()([x, low_p])
+    x = conv_block(x, filters=128, kernel_size=3)
 
     # Bloque 4: Conexión con 'very_low' (64x64)
-    x = Activation('relu')(BatchNormalization()(Conv2DTranspose(64, 2, strides=2, padding='same', use_bias=False)(x)))  # 64x64 -> 128x128
-    very_low_p = Activation('relu')(BatchNormalization()(Conv2D(48, 1, padding='same', use_bias=False)(very_low)))
-    x = Activation('relu')(BatchNormalization()(SeparableConv2D(96, 3, padding='same', use_bias=False)(Concatenate()([x, very_low_p]))))
+    x = Conv2DTranspose(64, kernel_size=2, strides=2, padding='same', use_bias=False)(x)  # 64x64 -> 128x128
+    x = BatchNormalization()(x)
+    x = ReLU()(x)
+    very_low_p = conv_block(very_low, filters=48, kernel_size=1)
+
+    x = Concatenate()([x, very_low_p])
+    x = conv_block(x, filters=96, kernel_size=3)
 
     # Upsampling final para alcanzar la resolución de entrada
     x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)  # 128x128 -> 256x256
 
-    # Capa de salida
+    # Capa de salida (no lleva normalización ni activación no lineal)
     out = Conv2D(num_classes_arg, 1, padding='same', dtype='float32')(x)
 
     return Model(inp, out), backbone
