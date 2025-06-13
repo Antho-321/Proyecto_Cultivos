@@ -220,10 +220,11 @@ def adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0, smooth=1e
     y_pred_probs = tf.nn.softmax(y_pred, axis=-1)
 
     # El kernel debe ser [alto, ancho, canales]
-    kernel = tf.ones((3, 3, 1), dtype=tf.float32)
+    kernel = tf.ones((3, 3, num_classes), dtype=tf.float32) # Correction for filter depth
 
-    y_true_dilated = tf.nn.dilation2d(y_true_one_hot, filters=kernel, strides=(1, 1, 1, 1), padding="SAME", data_format="NHWC")
-    y_true_eroded = tf.nn.erosion2d(y_true_one_hot, filters=kernel, strides=(1, 1, 1, 1), padding="SAME", data_format="NHWC")
+    # Corrected function calls with the 'dilations' argument
+    y_true_dilated = tf.nn.dilation2d(y_true_one_hot, filters=kernel, strides=(1, 1, 1, 1), padding="SAME", data_format="NHWC", dilations=(1, 1, 1, 1))
+    y_true_eroded = tf.nn.erosion2d(y_true_one_hot, filters=kernel, strides=(1, 1, 1, 1), padding="SAME", data_format="NHWC", dilations=(1, 1, 1, 1))
     y_true_boundary = y_true_dilated - y_true_eroded
 
     y_pred_boundary = tf.nn.max_pool2d(y_pred_probs, ksize=3, strides=1, padding='SAME') - y_pred_probs
