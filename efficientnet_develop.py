@@ -7,6 +7,10 @@ EfficientNetV2S como backbone. Esta versión implementa un bucle de entrenamient
 personalizado con la clase IoUOptimizedModel para optimizar directamente una 
 pérdida combinada centrada en IoU (Lovasz, Tversky, Boundary Loss) a través
 de un entrenamiento en tres fases.
+
+*** SCRIPT MODIFICADO PARA INCLUIR PREPROCESAMIENTO ADICIONAL ***
+Se ha integrado la técnica compuesta (FancyPCA, Bilateral, Gabor) del primer
+script como un paso de preprocesamiento fijo en el pipeline de carga de datos.
 """
 
 # 1) Imports ------------------------------------------------------------------
@@ -53,6 +57,7 @@ from tensorflow.keras.callbacks import (
 )
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
 import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA # <-- IMPORTADO PARA FANCYPCA
 
 # -------------------------------------------------------------------------------
 # Monkey-patch para usar un Lambda layer en SE module de keras_efficientnet_v2
@@ -76,7 +81,81 @@ def patched_se_module(inputs, se_ratio=0.25, name=""):
 _efn2.se_module = patched_se_module
 from keras_efficientnet_v2 import EfficientNetV2S
 
-# 2) Augmentation pipelines --------------------------------------------------
+
+# 2) FUNCIONES DE PREPROCESAMIENTO INTEGRADAS ----------------------------------
+
+def fancy_pca(img):
+    """
+    Aplica FancyPCA a una imagen.
+    Argumentos:
+        img: Imagen de entrada (NumPy array). Se espera que sea en formato BGR de OpenCV.
+    Retorna:
+        Imagen con FancyPCA aplicado.
+    """
+    # Normalizar los valores de los píxeles a [0, 1]
+    img_rescaled = img / 255.0
+    
+    # Aplanar la imagen para que cada píxel (con sus 3 canales) sea una fila
+    img_reshaped = img_rescaled.reshape(-1, 3)
+    
+    # Calcular PCA sobre los canales de color
+    pca = PCA(n_components=3)
+    pca.fit(img_reshaped)
+    
+    # Componentes principales (eigenvectors) y sus valores (eigenvalues)
+    eigenvectors = pca.components_
+    eigenvalues = pca.explained_variance_
+    
+    # Generar un vector de ruido aleatorio gaussiano escalado por los eigenvalues
+    alpha = np.random.normal(0, 0.1, 3)
+    noise_offset = eigenvectors.T @ (alpha * eigenvalues)
+    
+    # Añadir el offset de ruido a cada píxel
+    img_fancy_pca = img_rescaled + noise_offset
+    
+    # Asegurarse de que los valores de los píxeles estén en el rango [0, 1]
+    img_fancy_pca = np.clip(img_fancy_pca, 0, 1)
+    
+    # Desnormalizar la imagen de vuelta a [0, 255] y convertir a 8-bit
+    return (img_fancy_pca * 255).astype(np.uint8)
+
+def apply_preprocessing_filters(image_rgb):
+    """
+    Aplica la técnica compuesta (FancyPCA + Bilateral + Gabor) a un array de imagen.
+    Argumentos:
+        image_rgb: Array de NumPy de la imagen en formato RGB.
+    Retorna:
+        Array de NumPy de la imagen procesada en formato RGB.
+    """
+    # El pipeline original fue diseñado para imágenes en escala de grises. Lo adaptamos
+    # para que se aplique a una imagen a color y devuelva una imagen a color.
+    if image_rgb is None:
+        return None
+
+    # 1. FancyPCA (trabaja sobre BGR)
+    bgr_image = cv2.cvtColor(image_rgb.astype(np.uint8), cv2.COLOR_RGB2BGR)
+    fancy_pca_image_bgr = fancy_pca(bgr_image)
+    
+    # Convertir a escala de grises para los siguientes filtros
+    processed_image = cv2.cvtColor(fancy_pca_image_bgr, cv2.COLOR_BGR2GRAY)
+    
+    # 2. Filtro Bilateral
+    processed_image = cv2.bilateralFilter(processed_image, d=9, sigmaColor=75, sigmaSpace=75)
+
+    # 3. Filtro de Gabor
+    gabor_kernel = cv2.getGaborKernel(ksize=(11, 11), sigma=5, theta=np.pi/4, lambd=10, gamma=0.5, psi=0, ktype=cv2.CV_32F)
+    processed_image = cv2.filter2D(processed_image, cv2.CV_8UC3, gabor_kernel)
+
+    # Convertir la imagen final de vuelta a 3 canales (BGR)
+    final_bgr = cv2.cvtColor(processed_image, cv2.COLOR_GRAY2BGR)
+    
+    # Convertir de vuelta a RGB para el resto del pipeline de TensorFlow/Albumentations
+    final_rgb = cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB)
+
+    return final_rgb.astype(np.float32)
+
+
+# 3) Augmentation pipelines --------------------------------------------------
 def get_training_augmentation():
     return A.Compose([
         A.RandomScale(scale_limit=0.2, p=0.5),
@@ -97,7 +176,7 @@ def get_training_augmentation():
 def get_validation_augmentation():
     return A.Compose([])
 
-# 3) Data loading -------------------------------------------------------------
+# 4) Data loading -------------------------------------------------------------
 def load_augmented_dataset(img_dir, mask_dir, target_size=(256,256), augment=False):
     images, masks = [], []
     files = [f for f in os.listdir(img_dir) if f.lower().endswith(('.jpg','.png'))]
@@ -113,6 +192,12 @@ def load_augmented_dataset(img_dir, mask_dir, target_size=(256,256), augment=Fal
         ), fn): fn for fn in files}
         for future in tqdm(as_completed(futures), total=len(futures), desc=f"Loading {'train' if augment else 'val'} data"):
             img_arr, mask_arr = future.result()
+            
+            # --- *** INICIO DE LA INTEGRACIÓN *** ---
+            # Aplicar el preprocesamiento fijo (FancyPCA, Bilateral, Gabor)
+            img_arr = apply_preprocessing_filters(img_arr)
+            # --- *** FIN DE LA INTEGRACIÓN *** ---
+            
             if augment:
                 augm = aug(image=img_arr.astype('uint8'), mask=mask_arr)
                 img_arr, mask_arr = augm['image'], augm['mask']
@@ -127,43 +212,36 @@ def load_augmented_dataset(img_dir, mask_dir, target_size=(256,256), augment=Fal
         
     return X, y
 
-# 4) Load / split ------------------------------------------------------------
+# 5) Load / split ------------------------------------------------------------
 train_X, train_y = load_augmented_dataset('Balanced/train/images', 'Balanced/train/masks', target_size=(256, 256), augment=True)
 val_X,   val_y   = load_augmented_dataset('Balanced/val/images',   'Balanced/val/masks',   target_size=(256, 256), augment=False)
 
-# 5) Número de clases & modelo ----------------------------------------------
+# 6) Número de clases & modelo ----------------------------------------------
 num_classes = int(np.max(train_y) + 1)
 print(f"\nNúmero de clases detectado: {num_classes}")
 
-# 6) Definición del Modelo (Arquitectura) ------------------------------------
+# 7) Definición del Modelo (Arquitectura) ------------------------------------
 
 def SqueezeAndExcitation(tensor, ratio=16):
     """
     Módulo de atención Squeeze-and-Excitation (SE).
     Re-calibra la importancia de los canales del mapa de características.
     """
-    # Obtiene el número de filtros (canales)
     filters = tensor.shape[-1]
-    
-    # Squeeze: Pooling promedio global
     se = GlobalAveragePooling2D()(tensor)
-    
-    # Excitation: Dos capas densas para aprender los pesos de los canales
     se = Dense(filters // ratio, activation='relu', use_bias=False)(se)
     se = Dense(filters, activation='sigmoid', use_bias=False)(se)
-    
-    # Re-escala el tensor original con los pesos aprendidos
     return Multiply()([tensor, se])
 
 
-def conv_block(x, filters, kernel_size, strides=1, padding='same', dilation_rate=1): # <-- Add dilation_rate here
+def conv_block(x, filters, kernel_size, strides=1, padding='same', dilation_rate=1):
     """Un bloque convolucional que soporta dilatación, con Conv2D, BatchNorm y Swish."""
     x = Conv2D(
         filters, 
         kernel_size, 
         strides=strides, 
         padding=padding, 
-        dilation_rate=dilation_rate, # <-- Pass it to Conv2D
+        dilation_rate=dilation_rate,
         use_bias=False
     )(x)
     x = BatchNormalization()(x)
@@ -178,7 +256,6 @@ def ASPP_mejorado(x, dilation_rates, use_attention=False):
     input_filters = input_shape[-1]
     
     # --- Ramas de ASPP ---
-    # 1. Agrupamiento de Imagen Global
     image_pooling = GlobalAveragePooling2D()(x)
     image_pooling = Reshape((1, 1, input_filters))(image_pooling)
     image_pooling = Conv2D(input_filters, 1, padding='same', use_bias=False)(image_pooling)
@@ -186,16 +263,9 @@ def ASPP_mejorado(x, dilation_rates, use_attention=False):
     image_pooling = Activation('swish')(image_pooling)
     image_pooling = UpSampling2D(size=(input_shape[1], input_shape[2]), interpolation='bilinear')(image_pooling)
 
-    # 2. Convolución 1x1
     conv_1x1 = conv_block(x, input_filters, 1)
-
-    # 3. Convoluciones Atrous
     atrous_convs = [conv_block(x, input_filters, 3, dilation_rate=rate) for rate in dilation_rates]
-
-    # Concatenar todas las ramas
     concatenated = Concatenate()([image_pooling, conv_1x1] + atrous_convs)
-    
-    # Proyección final
     projected = conv_block(concatenated, input_filters, 1)
 
     # --- Canal de Atención (Opcional) ---
@@ -214,135 +284,88 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
     y un decodificador tipo U-Net que usa una búsqueda dinámica de capas
     y un ASPP_mejorado.
     """
-    # --- Definición del backbone ---
-    backbone = EfficientNetV2S(  # Remove tf.keras.applications.
+    backbone = EfficientNetV2S(
         input_shape=shape,
         num_classes=0,
         pretrained='imagenet',
         include_preprocessing=False
     )
 
-    # --- Extracción dinámica de las skip connections ---
     inp = backbone.input
-    bottleneck = backbone.get_layer('post_swish').output  # Salida del encoder, 8x8
+    bottleneck = backbone.get_layer('post_swish').output
 
     s1, s2, s3, s4 = None, None, None, None
-
-    # Búsqueda hacia atrás para encontrar las últimas capas 'add' de cada tamaño
     for layer in reversed(backbone.layers):
         if 'add' in layer.name:
-            shape = layer.output.shape[1]
-            if shape == 128 and s1 is None:
-                s1 = layer.output  # 128x128
-            elif shape == 64 and s2 is None:
-                s2 = layer.output  # 64x64
-            elif shape == 32 and s3 is None:
-                s3 = layer.output  # 32x32
-            elif shape == 16 and s4 is None:
-                s4 = layer.output  # 16x16
-    
-    # Verificar que todas las capas fueron encontradas
+            shape_val = layer.output.shape[1]
+            if shape_val == 128 and s1 is None: s1 = layer.output
+            elif shape_val == 64 and s2 is None: s2 = layer.output
+            elif shape_val == 32 and s3 is None: s3 = layer.output
+            elif shape_val == 16 and s4 is None: s4 = layer.output
+            
     if any(s is None for s in [s1, s2, s3, s4]):
         raise ValueError("No se pudieron encontrar todas las capas de skip connection requeridas.")
         
-    # --- Cuello de botella con ASPP Mejorado ---
-    # Se aplican tasas de dilatación pequeñas, adecuadas para el mapa de 8x8
-    x = ASPP_mejorado(bottleneck, dilation_rates=[2, 4, 6], use_attention=True) # 8x8 -> 8x8
+    x = ASPP_mejorado(bottleneck, dilation_rates=[2, 4, 6], use_attention=True)
 
-    # --- Rama del decodificador (Upsampling con lógica U-Net) ---
-
-    # Bloque 1: De 8x8 a 16x16
     x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
-    x = Concatenate()([x, s4]) # Concatenar con la skip connection de 16x16
+    x = Concatenate()([x, s4])
     x = conv_block(x, filters=128, kernel_size=3)
     x = conv_block(x, filters=128, kernel_size=3)
 
-    # Bloque 2: De 16x16 a 32x32
     x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
-    x = Concatenate()([x, s3]) # Concatenar con la skip connection de 32x32
+    x = Concatenate()([x, s3])
     x = conv_block(x, filters=64, kernel_size=3)
     x = conv_block(x, filters=64, kernel_size=3)
 
-    # Bloque 3: De 32x32 a 64x64
     x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
-    x = Concatenate()([x, s2]) # Concatenar con la skip connection de 64x64
+    x = Concatenate()([x, s2])
     x = conv_block(x, filters=48, kernel_size=3)
     x = conv_block(x, filters=48, kernel_size=3)
 
-    # Bloque 4: De 64x64 a 128x128
     x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
-    x = Concatenate()([x, s1]) # Concatenar con la skip connection de 128x128
+    x = Concatenate()([x, s1])
     x = conv_block(x, filters=32, kernel_size=3)
     x = conv_block(x, filters=32, kernel_size=3)
 
-    # Upsampling final para alcanzar la resolución de entrada (256x256)
     x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
     
-    # Capa de salida
     out = Conv2D(num_classes_arg, 1, padding='same', activation='softmax', dtype='float32')(x)
 
     return Model(inp, out), backbone
 
 
-# 7) Pérdidas Mejoradas y Métricas Personalizadas ------------------------------
+# 8) Pérdidas Mejoradas y Métricas Personalizadas ------------------------------
 
 def tversky_loss(y_true, y_pred, alpha=0.7, beta=0.3, smooth=1e-7):
-    """
-    Tversky Loss para segmentación.
-    - alpha: Peso para Falsos Positivos (FP).
-    - beta:  Peso para Falsos Negativos (FN).
-    - alpha + beta = 1. Para penalizar más los FN (clases pequeñas), usar alpha < 0.5.
-    """
     y_true_one_hot = tf.one_hot(tf.cast(y_true, tf.int32), depth=num_classes, axis=-1)
     y_pred_probs = tf.nn.softmax(y_pred, axis=-1)
-
     y_true_flat = tf.reshape(y_true_one_hot, [-1, num_classes])
     y_pred_flat = tf.reshape(y_pred_probs, [-1, num_classes])
-    
     tp = tf.reduce_sum(y_true_flat * y_pred_flat, axis=0)
     fn = tf.reduce_sum(y_true_flat * (1 - y_pred_flat), axis=0)
     fp = tf.reduce_sum((1 - y_true_flat) * y_pred_flat, axis=0)
-    
     tversky_index = (tp + smooth) / (tp + alpha * fp + beta * fn + smooth)
-    
     return 1.0 - tf.reduce_mean(tversky_index)
 
-# Replace your existing function with this one
 def adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0, smooth=1e-7):
-    """
-    Pérdida de bordes basada en el Dice score, calculado sobre el gradiente
-    morfológico de las máscaras.
-    VERSIÓN COMPATIBLE CON XLA usando Max-Pooling en lugar de dilation/erosion.
-    """
     y_true_one_hot = tf.one_hot(tf.cast(y_true, tf.int32), depth=num_classes, axis=-1)
     y_pred_probs = tf.nn.softmax(y_pred, axis=-1)
-
-    # Usar max_pool2d para aproximar la dilatación (XLA-friendly)
     y_true_dilated = tf.nn.max_pool2d(y_true_one_hot, ksize=3, strides=1, padding='SAME')
-    
-    # Usar max_pool2d con input negado para aproximar la erosión (XLA-friendly)
     y_true_eroded = -tf.nn.max_pool2d(-y_true_one_hot, ksize=3, strides=1, padding='SAME')
-
     y_true_boundary = y_true_dilated - y_true_eroded
     y_pred_boundary = tf.nn.max_pool2d(y_pred_probs, ksize=3, strides=1, padding='SAME') - y_pred_probs
-    
     y_true_boundary_flat = tf.reshape(y_true_boundary, [-1])
     y_pred_boundary_flat = tf.reshape(y_pred_boundary, [-1])
-    
     intersection = tf.reduce_sum(y_true_boundary_flat * y_pred_boundary_flat)
     union = tf.reduce_sum(y_true_boundary_flat) + tf.reduce_sum(y_pred_boundary_flat)
-    
     dice_score = (2. * intersection + smooth) / (union + smooth)
     return 1.0 - dice_score
 
 def ultimate_iou_loss(y_true, y_pred):
-    """
-    Pérdida combinada que optimiza directamente IoU y los bordes.
-    """
     lov = 0.50 * lovasz_softmax(y_pred, tf.cast(y_true, tf.int32), per_image=True)
     abe_dice = 0.30 * adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0)
-    tver = 0.20 * tversky_loss(y_true, y_pred, alpha=0.4, beta=0.6) # beta > alpha penaliza más los FNs
-    
+    tver = 0.20 * tversky_loss(y_true, y_pred, alpha=0.4, beta=0.6)
     return lov + abe_dice + tver
 
 class MeanIoU(tf.keras.metrics.Metric):
@@ -358,7 +381,6 @@ class MeanIoU(tf.keras.metrics.Metric):
         preds = tf.argmax(y_pred,axis=-1)
         if len(y_true.shape) == 4 and y_true.shape[-1] == 1:
             y_true = tf.squeeze(y_true, axis=-1)
-            
         y_t = tf.reshape(tf.cast(y_true,tf.int32),[-1])
         y_p = tf.reshape(preds,[-1])
         cm = tf.math.confusion_matrix(y_t,y_p,num_classes=self.num_classes,dtype=tf.float32)
@@ -374,13 +396,12 @@ class MeanIoU(tf.keras.metrics.Metric):
     def reset_states(self):
         self.total_cm.assign(tf.zeros_like(self.total_cm))
 
-# 8) Modelo Personalizado con Bucle de Entrenamiento Optimizado para IoU -----
+# 9) Modelo Personalizado con Bucle de Entrenamiento Optimizado para IoU -----
 class IoUOptimizedModel(keras.Model):
     def __init__(self, shape, num_classes, **kwargs):
         super().__init__(**kwargs)
         self.num_classes = num_classes
         self.seg_model, self.backbone = build_model(shape, num_classes_arg=num_classes)
-        
         self.loss_tracker = keras.metrics.Mean(name="loss")
         self.iou_metric = MeanIoU(num_classes=num_classes, name='enhanced_mean_iou')
 
@@ -393,76 +414,52 @@ class IoUOptimizedModel(keras.Model):
 
     def train_step(self, data):
         x, y_true = data
-
         with tf.GradientTape() as tape:
             y_pred = self.seg_model(x, training=True)
             loss = ultimate_iou_loss(y_true, y_pred)
-
         trainable_vars = self.seg_model.trainable_variables
         grads = tape.gradient(loss, trainable_vars)
         self.optimizer.apply_gradients(zip(grads, trainable_vars))
-
         self.loss_tracker.update_state(loss)
         self.iou_metric.update_state(y_true, y_pred)
-        
         return {m.name: m.result() for m in self.metrics}
         
     def test_step(self, data):
         x, y_true = data
         y_pred = self.seg_model(x, training=False)
-        
         loss = ultimate_iou_loss(y_true, y_pred)
-        
         self.loss_tracker.update_state(loss)
         self.iou_metric.update_state(y_true, y_pred)
-        
         return {m.name: m.result() for m in self.metrics}
 
-# 9) Entrenamiento por Fases con el Modelo Personalizado ---------------------
+# 10) Entrenamiento por Fases con el Modelo Personalizado ---------------------
 print(f"\n--- Iniciando entrenamiento en el dispositivo: {device} ---")
 
-# Directorio para guardar los checkpoints
 checkpoint_dir = './checkpoints'
 os.makedirs(checkpoint_dir, exist_ok=True)
 ckpt1_path = os.path.join(checkpoint_dir, 'phase1_iou_model.keras')
 ckpt2_path = os.path.join(checkpoint_dir, 'phase2_iou_model.keras')
 ckpt3_path = os.path.join(checkpoint_dir, 'phase3_iou_model.keras')
-
-# Generador de validación simple
 val_gen = (val_X, val_y)
 
 with tf.device(device):
-    # 1. Instantiate the model
     iou_aware_model = IoUOptimizedModel(shape=train_X.shape[1:], num_classes=num_classes)
-    
-    # 2. Add this line to explicitly build the model
-    # The input shape is (batch_size, height, width, channels). We use None for the batch size
-    # to indicate it can be flexible.
     iou_aware_model.build(input_shape=(None, *train_X.shape[1:]))
-    
-    # 3. Now the rest of your code will work as expected
     model = iou_aware_model.seg_model
     backbone = iou_aware_model.backbone
-    
     iou_aware_model.seg_model.summary()
-    
     MONITOR_METRIC = 'val_enhanced_mean_iou'
     
     # --- Fase 1: entrenar cabeza ---
     print("\n--- Fase 1: Entrenando solo el decoder (backbone congelado) ---")
     backbone.trainable = False
-    
     iou_aware_model.compile(optimizer=tf.keras.optimizers.AdamW(5e-4, weight_decay=1e-4))
-    
     cbs1 = [
         ModelCheckpoint(ckpt1_path, save_best_only=True, monitor=MONITOR_METRIC, mode='max', verbose=1),
         EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=10, restore_best_weights=False),
         TensorBoard(log_dir='./logs/iou_phase1_head', update_freq='epoch')
     ]
-    
-    iou_aware_model.fit(train_X, train_y, batch_size=12, epochs=20,
-                        validation_data=val_gen, callbacks=cbs1)
-    
+    iou_aware_model.fit(train_X, train_y, batch_size=12, epochs=20, validation_data=val_gen, callbacks=cbs1)
     print(f"Cargando mejores pesos de la fase 1 desde: {ckpt1_path}")
     iou_aware_model.load_weights(ckpt1_path)
 
@@ -472,18 +469,13 @@ with tf.device(device):
     fine_tune_at = int(len(backbone.layers) * 0.80)
     for layer in backbone.layers[:fine_tune_at]:
         layer.trainable = False
-
     iou_aware_model.compile(optimizer=tf.keras.optimizers.AdamW(2e-5, weight_decay=1e-4))
-    
     cbs2 = [
         ModelCheckpoint(ckpt2_path, save_best_only=True, monitor=MONITOR_METRIC, mode='max', verbose=1),
         EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=12, restore_best_weights=False),
         TensorBoard(log_dir='./logs/iou_phase2_partial', update_freq='epoch')
     ]
-
-    iou_aware_model.fit(train_X, train_y, batch_size=6, epochs=20,
-                        validation_data=val_gen, callbacks=cbs2)
-
+    iou_aware_model.fit(train_X, train_y, batch_size=6, epochs=20, validation_data=val_gen, callbacks=cbs2)
     print(f"Cargando mejores pesos de la fase 2 desde: {ckpt2_path}")
     iou_aware_model.load_weights(ckpt2_path)
 
@@ -491,26 +483,19 @@ with tf.device(device):
     print("\n--- Fase 3: Fine-tuning de todo el modelo (backbone + decoder) ---")
     for layer in backbone.layers:
         layer.trainable = True
-        
     iou_aware_model.compile(optimizer=tf.keras.optimizers.AdamW(5e-6, weight_decay=5e-5))
-    
     cbs3 = [
         ModelCheckpoint(ckpt3_path, save_best_only=True, monitor=MONITOR_METRIC, mode='max', verbose=1),
         EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=15, restore_best_weights=False),
         ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1),
         TensorBoard(log_dir='./logs/iou_phase3_full', update_freq='epoch')
     ]
-    
-    iou_aware_model.fit(train_X, train_y, batch_size=4, epochs=20,
-                        validation_data=val_gen, callbacks=cbs3)
-    
+    iou_aware_model.fit(train_X, train_y, batch_size=4, epochs=20, validation_data=val_gen, callbacks=cbs3)
     print(f"Cargando pesos finales desde: {ckpt3_path}")
     iou_aware_model.load_weights(ckpt3_path)
-    
-    # Asignar el modelo interno final para la evaluación
     eval_model = iou_aware_model.seg_model
 
-# 10) Evaluación & visualización ----------------------------------------------
+# 11) Evaluación & visualización ----------------------------------------------
 print("\n--- Evaluación del modelo final en CPU/GPU disponible ---")
 def evaluate_model(model_to_eval,X,y):
     preds = model_to_eval.predict(X)
