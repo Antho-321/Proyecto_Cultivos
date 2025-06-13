@@ -44,7 +44,8 @@ from tensorflow.keras import layers, backend as K
 from tensorflow.keras.layers import (
     Input, Conv2D, SeparableConv2D, Conv2DTranspose,
     BatchNormalization, Activation, Dropout,
-    Lambda, Concatenate, UpSampling2D, ReLU
+    Lambda, Concatenate, UpSampling2D, ReLU, Add, GlobalAveragePooling2D,
+    Reshape, Dense, Multiply, GlobalMaxPooling2D
 )
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import (
