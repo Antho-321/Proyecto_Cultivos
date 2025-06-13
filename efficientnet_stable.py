@@ -211,22 +211,23 @@ def tversky_loss(y_true, y_pred, alpha=0.7, beta=0.3, smooth=1e-7):
     
     return 1.0 - tf.reduce_mean(tversky_index)
 
+# Replace your existing function with this one
 def adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0, smooth=1e-7):
     """
     Pérdida de bordes basada en el Dice score, calculado sobre el gradiente
     morfológico de las máscaras.
+    VERSIÓN COMPATIBLE CON XLA usando Max-Pooling en lugar de dilation/erosion.
     """
     y_true_one_hot = tf.one_hot(tf.cast(y_true, tf.int32), depth=num_classes, axis=-1)
     y_pred_probs = tf.nn.softmax(y_pred, axis=-1)
 
-    # El kernel debe ser [alto, ancho, canales]
-    kernel = tf.ones((3, 3, num_classes), dtype=tf.float32) # Correction for filter depth
+    # Usar max_pool2d para aproximar la dilatación (XLA-friendly)
+    y_true_dilated = tf.nn.max_pool2d(y_true_one_hot, ksize=3, strides=1, padding='SAME')
+    
+    # Usar max_pool2d con input negado para aproximar la erosión (XLA-friendly)
+    y_true_eroded = -tf.nn.max_pool2d(-y_true_one_hot, ksize=3, strides=1, padding='SAME')
 
-    # Corrected function calls with the 'dilations' argument
-    y_true_dilated = tf.nn.dilation2d(y_true_one_hot, filters=kernel, strides=(1, 1, 1, 1), padding="SAME", data_format="NHWC", dilations=(1, 1, 1, 1))
-    y_true_eroded = tf.nn.erosion2d(y_true_one_hot, filters=kernel, strides=(1, 1, 1, 1), padding="SAME", data_format="NHWC", dilations=(1, 1, 1, 1))
     y_true_boundary = y_true_dilated - y_true_eroded
-
     y_pred_boundary = tf.nn.max_pool2d(y_pred_probs, ksize=3, strides=1, padding='SAME') - y_pred_probs
     
     y_true_boundary_flat = tf.reshape(y_true_boundary, [-1])
