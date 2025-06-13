@@ -14,6 +14,7 @@ Implementa las siguientes recomendaciones:
 6. Aumentación en validación (TTA) durante el entrenamiento.
 7. Eliminación de la métrica de 'accuracy' durante la compilación del modelo.
 8. Carga explícita del mejor checkpoint entre fases de entrenamiento (skip mismatches).
+9. **Implementación de un modelo optimizado para IoU (IoUOptimizedModel).**
 """
 
 import os
@@ -170,78 +171,113 @@ def adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0, smooth=1e
     
     return 1 - tf.reduce_mean(dice)
 
-def cutpaste_augment_np(image, mask, background):
+def tversky_loss(y_true, y_pred, alpha=0.7, beta=0.3, smooth=1e-7):
     """
-    Cut-Paste (NumPy): recorta el objeto usando la máscara y pega sobre otro fondo.
-    - image, background: np.array HxWx3 (float32 en [0,1])
-    - mask: np.array HxW (0/1)
-    - devuelve: composite (HxWx3), mask (HxW)
+    Tversky Loss para segmentación.
+    - alpha: Peso para Falsos Positivos (FP).
+    - beta:  Peso para Falsos Negativos (FN).
+    - alpha + beta = 1. Para penalizar más los FN (clases pequeñas), usar alpha < 0.5.
     """
-    mask_expanded = np.expand_dims(mask, axis=-1)
-    fg = image * mask_expanded
-    bg = background * (1 - mask_expanded)
-    return fg + bg, mask
+    y_true_one_hot = tf.one_hot(tf.cast(y_true, tf.int32), depth=num_classes, axis=-1)
+    y_pred_probs = tf.nn.softmax(y_pred, axis=-1)
+
+    # Aplanar tensores
+    y_true_flat = tf.reshape(y_true_one_hot, [-1, num_classes])
+    y_pred_flat = tf.reshape(y_pred_probs, [-1, num_classes])
+    
+    tp = tf.reduce_sum(y_true_flat * y_pred_flat, axis=0)
+    fn = tf.reduce_sum(y_true_flat * (1 - y_pred_flat), axis=0)
+    fp = tf.reduce_sum((1 - y_true_flat) * y_pred_flat, axis=0)
+    
+    tversky_index = (tp + smooth) / (tp + alpha * fp + beta * fn + smooth)
+    
+    return 1.0 - tf.reduce_mean(tversky_index)
 
 class LoRAAdapterLayer(layers.Layer):
     """
-    Low-Rank Adapter para fine-tuning eficiente (LoRA) en Keras.
-    Se inserta en capas convolucionales.
+    Implementación de LoRA para una capa Conv2D que es eficiente en recursos.
     """
-    def __init__(self, original_layer, r=4, alpha=1.0, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, original_layer, r=8, alpha=8, **kwargs):
+        super().__init__(name=f"lora_{original_layer.name}", **kwargs)
+        
         self.original_layer = original_layer
+        self.original_layer.trainable = False  # Congelar la capa original
+        
         self.r = r
         self.alpha = alpha
         
-        # Extraer dims de la capa original
-        self.in_channels = original_layer.kernel.shape[-2]
-        self.out_channels = original_layer.kernel.shape[-1]
-        self.kernel_size = original_layer.kernel_size
+        original_kernel_shape = self.original_layer.kernel.shape
+        self.kernel_size = self.original_layer.kernel_size
+        self.strides = self.original_layer.strides
+        self.padding = self.original_layer.padding
+        self.in_channels = original_kernel_shape[-2]
+        self.out_channels = original_kernel_shape[-1]
+        
+        self.scaling = self.alpha / self.r
 
     def build(self, input_shape):
-        self.A = self.add_weight(
-            shape=(self.kernel_size[0], self.kernel_size[1], self.in_channels, self.r),
-            initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
-            trainable=True,
-            name="lora_A"
+        self.lora_down = layers.Conv2D(
+            filters=self.r,
+            kernel_size=self.kernel_size,
+            strides=self.strides,
+            padding=self.padding,
+            use_bias=False,
+            kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+            name="lora_down"
         )
-        self.B = self.add_weight(
-            shape=(self.r, self.out_channels),
-            initializer='zeros',
-            trainable=True,
-            name="lora_B"
+        
+        self.lora_up = layers.Conv2D(
+            filters=self.out_channels,
+            kernel_size=(1, 1),
+            strides=(1, 1),
+            padding='VALID',
+            use_bias=False,
+            kernel_initializer='zeros',
+            name="lora_up"
         )
-        self.scaling = self.alpha / self.r
-        self.original_layer.trainable = False # Congelar pesos originales
+        
+        self.lora_down.build(input_shape)
+        self.lora_up.build((input_shape[0], input_shape[1], input_shape[2], self.r))
+        self.built = True
 
     def call(self, x):
         original_output = self.original_layer(x)
-        
-        # Reconstruir el delta del peso: A @ B
-        # Esto es más complejo para Conv2D que para Dense.
-        # Simplificación: delta = (x @ A) @ B
-        # Para Conv, A y B deberían reconstruir un kernel.
-        # delta_W = A @ B. Esto es computacionalmente intensivo.
-        # Enfoque LoRA: h = h_orig + (dropout(x) @ A @ B) * scaling
-        # Para Conv2D, el delta se aplica a la salida.
-        # Esto requiere una convolución separada con el peso delta.
-        # Por simplicidad en este ejemplo, se omite la implementación convolucional completa
-        # y se devuelve la salida original, pero la estructura está aquí.
-        # Una implementación real requeriría reescribir la operación de conv.
-        
-        # delta_output = ... # convolución con A y B
-        # return original_output + delta_output * self.scaling
-        
-        return original_output
+        lora_output = self.lora_down(x)
+        lora_output = self.lora_up(lora_output)
+        return original_output + lora_output * self.scaling
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "r": self.r,
+            "alpha": self.alpha,
+        })
+        return config
 
 # ===============================================================================
 
 # -------------------------------------------------------------------------------
 # 1) Funciones de pérdida mejoradas (CAMBIOS #1, #2, #3, #4)
 # -------------------------------------------------------------------------------
-class_counts = None  # se inicializa después de cargar datos
-num_classes = 0      # se inicializa después de cargar datos
-class_weights = None # se inicializa después de cargar datos
+class_counts = None
+num_classes = 0
+class_weights = None
+
+def ultimate_iou_loss(y_true, y_pred):
+    """
+    Pérdida combinada que optimiza directamente IoU y los bordes,
+    inspirada en los principios de CIoU para la segmentación.
+    """
+    # 50% del peso para Lovasz, que optimiza directamente IoU
+    lov = 0.50 * lovasz_softmax_improved(y_pred, tf.cast(y_true, tf.int32), per_image=True)
+    
+    # 30% del peso para el error en los bordes (análogo a la forma en CIoU)
+    abe_dice = 0.30 * adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0)
+    
+    # 20% del peso para Tversky, que maneja desbalance FP/FN
+    tver = 0.20 * tversky_loss(y_true, y_pred, alpha=0.6, beta=0.4) # alpha<beta penaliza más los FNs
+    
+    return lov + abe_dice + tver
 
 def weighted_sparse_ce(y_true, y_pred):
     y_i = tf.cast(y_true, tf.int32)
@@ -276,32 +312,21 @@ def dice_loss(y_true, y_pred, smooth=1e-5):
     dice = (2.0 * intersection + smooth) / (denominator + smooth)
     return 1.0 - tf.reduce_mean(tf.reduce_mean(dice, axis=-1))
 
-# 4. UPDATED COMBINED LOSS con Boundary-Aware Dice
-def enhanced_combined_loss(y_true, y_pred):
-    jac   = 0.40 * soft_jaccard_loss(y_true, y_pred)
-    dice  = 0.20 * dice_loss(y_true, y_pred)
-    b_dice= 0.20 * boundary_aware_dice_loss_tf(y_true, y_pred) # NUEVO: Pérdida de bordes
-    lov   = 0.15 * lovasz_softmax_improved(y_pred, tf.cast(y_true,tf.int32), per_image=True)
-    foc   = 0.04 * focal_loss(y_true, y_pred)
-    ce    = 0.01 * weighted_sparse_ce(y_true, y_pred)
-    return jac + dice + b_dice + lov + foc + ce
-
 # -------------------------------------------------------------------------------
 # 2) Pipelines de augmentación (CAMBIO #5)
 # -------------------------------------------------------------------------------
-# 5. IMPROVE DATA AUGMENTATION - More aggressive for better generalization
 def get_training_augmentation():
     return A.Compose([
-        A.RandomScale(scale_limit=0.2, p=0.5),  # Increase scale variation
+        A.RandomScale(scale_limit=0.2, p=0.5),
         A.PadIfNeeded(256,256, border_mode=cv2.BORDER_REFLECT),
         A.RandomCrop(256,256),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
-        A.RandomRotate90(p=0.5),  # Increase rotation probability
+        A.RandomRotate90(p=0.5),
         A.ShiftScaleRotate(shift_limit=0.15, scale_limit=0.15, rotate_limit=20, p=0.4),
         A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.3),
         A.RandomGamma(gamma_limit=(90,110), p=0.2),
-        A.ElasticTransform(alpha=1, sigma=50, alpha_affine=50, p=0.2),  # Add elastic deformation
+        A.ElasticTransform(alpha=1, sigma=50, alpha_affine=50, p=0.2),
         A.CoarseDropout(
             max_holes=3, max_height=16, max_width=16,
             min_holes=1, min_height=8, min_width=8,
@@ -311,17 +336,6 @@ def get_training_augmentation():
 
 def get_validation_augmentation():
     return A.Compose([])
-
-# NOTA: Para usar cutpaste_augment_np, necesitarías un pipeline de tf.data
-# y un generador que provea imágenes de fondo. Ejemplo de integración:
-# def apply_cutpaste(image, mask, background):
-#     img, msk = tf.py_function(
-#         cutpaste_augment_np,
-#         [image, mask, background],
-#         [tf.float32, tf.float32]
-#     )
-#     return img, msk
-# dataset = dataset.map(apply_cutpaste)
 
 # -------------------------------------------------------------------------------
 # 3) Carga de datos y Balanceo de Clases (CAMBIO #7)
@@ -358,13 +372,11 @@ val_X,   val_y   = load_augmented_dataset('Balanced/val/images',  'Balanced/val/
 num_classes = int(np.max(train_y)+1)
 class_counts = np.bincount(train_y.flatten())
 
-# 7. IMPROVE CLASS BALANCING - Better rare class sampling
 prob = class_counts / class_counts.sum()
-rare_threshold = np.percentile(prob, 30)  # Bottom 30% instead of just 2 rarest
+rare_threshold = np.percentile(prob, 30)
 rare_classes = np.where(prob < rare_threshold)[0]
 
-# Create more balanced sampling
-oversample_factor = 3  # Increase oversampling
+oversample_factor = 3
 for _ in range(oversample_factor):
     mask = np.isin(train_y.reshape(len(train_y), -1), rare_classes)
     idx = np.any(mask, axis=1)
@@ -382,43 +394,26 @@ class_weights = tf.constant(cw, dtype=tf.float32)
 # -------------------------------------------------------------------------------
 # 4) ASPP mejorado (CAMBIO #8)
 # -------------------------------------------------------------------------------
-# 8. MODIFY ASPP FOR BETTER FEATURE EXTRACTION
 def ASPP(x, out=320, rates=(6, 12, 18, 24, 30)):
     br = []
-
-    # 1×1
     c1 = Activation('relu')(BatchNormalization()(Conv2D(out, 1, use_bias=False)(x)))
     br.append(c1)
-
-    # Convoluciones dilatadas
     for i, r in enumerate(rates):
         k = 3 if i < 3 else 5
         d = Activation('relu')(BatchNormalization()(
             SeparableConv2D(out, k, dilation_rate=r, padding='same', use_bias=False)(x)))
         br.append(d)
-
-    # Contexto global
     p = Activation('relu')(BatchNormalization()(Conv2D(out, 1, use_bias=False)(
         layers.GlobalAveragePooling2D(keepdims=True)(x))))
     p = Lambda(lambda args: tf.image.resize(args[0], tf.shape(args[1])[1:3]))([p, x])
     br.append(p)
-
-    # Concatenación
     feat = Concatenate()(br)
-
-    # ── Atención de canales ───────────────────────────────────
     ch = layers.GlobalAveragePooling2D(keepdims=True)(feat)
     num_ch = K.int_shape(feat)[-1]
     ch = layers.Conv2D(num_ch, 1, activation='sigmoid')(ch)
-
-    # ── Atención espacial ───────────────────────────────────
     sp = Conv2D(1, 7, padding='same', activation='sigmoid')(feat)
-
-    # ── Aplicar ambas atenciones ─────────────────────────────
     attended = layers.Multiply()([feat, ch])
     attended = layers.Multiply()([attended, sp])
-
-    # Salida
     out_f = Dropout(0.1)(Activation('relu')(BatchNormalization()(
         Conv2D(out, 1, use_bias=False)(attended))))
     return out_f
@@ -427,106 +422,124 @@ def ASPP(x, out=320, rates=(6, 12, 18, 24, 30)):
 # 5) Definición del modelo con decoder completo
 # -------------------------------------------------------------------------------
 def distance_band(mask, n):
-    mask_bool = tf.cast(mask, tf.bool)        # << conversión centralizada
-    band      = tf.zeros_like(mask_bool)      # band ahora es bool
-    interior  = mask_bool
-
+    mask_bool = tf.cast(mask, tf.bool)
+    band = tf.zeros_like(mask_bool)
+    interior = mask_bool
     for _ in range(n):
         interior = tf.nn.erosion2d(
-            tf.cast(interior, tf.float32),     # erosión necesita float
+            tf.cast(interior, tf.float32),
             tf.ones((3, 3, 1), tf.float32),
             strides=[1, 1, 1, 1],
             padding='SAME',
             data_format='NHWC',
             dilations=[1, 1, 1, 1]
-        ) > 0.5                                # vuelve a bool
-        band = tf.logical_or(band,
-                             tf.math.logical_xor(mask_bool, interior))
+        ) > 0.5
+        band = tf.logical_or(band, tf.math.logical_xor(mask_bool, interior))
     return tf.cast(band, tf.float32)
+
 def build_model(shape=(256, 256, 3), num_classes=1):
-    """
-    Construye un modelo de segmentación tipo U-Net con un backbone EfficientNetV2S.
-    """
-    # --- Codificador (Backbone) ---
     backbone = EfficientNetV2S(input_shape=shape, num_classes=0,
-                               pretrained='imagenet', include_preprocessing=False)
-    
-    # Añadir regularización L2 a las capas convolucionales
+                                     pretrained='imagenet', include_preprocessing=False)
     for layer in backbone.layers:
         if isinstance(layer, (Conv2D, SeparableConv2D)):
             layer.kernel_regularizer = tf.keras.regularizers.l2(2e-4)
-
     inp = backbone.input
-
-    # --- Extracción de Mapas de Características (Skip Connections) ---
-    # Se seleccionan las últimas capas 'Add' de cada bloque de resolución
-    high = backbone.get_layer('post_swish').output        # Salida: 8x8
-    mid = None          # Objetivo: 16x16
-    low = None          # Objetivo: 32x32
-    very_low = None     # Objetivo: 64x64
-    stem = backbone.get_layer('stem_swish').output      # Salida: 128x128
-    
-    # Recorremos las capas en reversa para encontrar la ÚLTIMA capa 'add' en cada bloque
+    high = backbone.get_layer('post_swish').output
+    mid, low, very_low = None, None, None
     for layer in reversed(backbone.layers):
         if 'add' in layer.name:
-            # Access the shape from the output TENSOR, not the layer object
-            if layer.output.shape[1] == 16 and mid is None:
-                mid = layer.output
-                print(f"Encontrada capa media (16x16): {layer.name}")
-            elif layer.output.shape[1] == 32 and low is None:
-                low = layer.output
-                print(f"Encontrada capa baja (32x32): {layer.name}")
-            elif layer.output.shape[1] == 64 and very_low is None:
-                very_low = layer.output
-                print(f"Encontrada capa muy baja (64x64): {layer.name}")
-
-    # Verificación para asegurar que todas las capas fueron encontradas
+            if layer.output.shape[1] == 16 and mid is None: mid = layer.output
+            elif layer.output.shape[1] == 32 and low is None: low = layer.output
+            elif layer.output.shape[1] == 64 and very_low is None: very_low = layer.output
     if mid is None or low is None or very_low is None:
         raise ValueError("No se pudieron encontrar todas las capas de skip connection requeridas.")
-
-    # --- Puente (Bridge) ---
-    # Se aplica ASPP a la característica de más alto nivel (8x8)
+    
     x = ASPP(high)
-
-    # --- Decodificador --- (El resto del código permanece igual)
-    # Etapa 1 del Decodificador: 8x8 -> 16x16
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
-    m = Activation('relu')(BatchNormalization()(Conv2D(160, 1, use_bias=False)(mid)))
-    x = Concatenate()([x, m])
-    x = Activation('relu')(BatchNormalization()(SeparableConv2D(256, 3, padding='same', use_bias=False)(x)))
-    x = Dropout(0.1)(x)
-
-    # Etapa 2 del Decodificador: 16x16 -> 32x32
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
-    l = Activation('relu')(BatchNormalization()(Conv2D(64, 1, use_bias=False)(low)))
-    x = Concatenate()([x, l])
-    x = Activation('relu')(BatchNormalization()(SeparableConv2D(128, 3, padding='same', use_bias=False)(x)))
-    x = Dropout(0.1)(x)
-
-    # Etapa 3 del Decodificador: 32x32 -> 64x64
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
-    v = Activation('relu')(BatchNormalization()(Conv2D(48, 1, use_bias=False)(very_low)))
-    x = Concatenate()([x, v])
-    x = Activation('relu')(BatchNormalization()(SeparableConv2D(96, 3, padding='same', use_bias=False)(x)))
-    x = Dropout(0.1)(x)
-
-    # Etapa 4 del Decodificador: 64x64 -> 128x128
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
-    s = Activation('relu')(BatchNormalization()(Conv2D(24, 1, use_bias=False)(stem)))
-    x = Concatenate()([x, s])
-    x = Activation('relu')(BatchNormalization()(SeparableConv2D(64, 3, padding='same', use_bias=False)(x)))
     
-    # Suavizado final y escalado a 256x256
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
-    x = Activation('relu')(BatchNormalization()(SeparableConv2D(32, 3, padding='same', use_bias=False)(x)))
+    # Decoder stages con LoRA
+    def decoder_block(x_in, skip_conn, filters_skip, filters_sep, r_lora, alpha_lora):
+        x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x_in)
+        s = Activation('relu')(BatchNormalization()(Conv2D(filters_skip, 1, use_bias=False)(skip_conn)))
+        x = Concatenate()([x, s])
+        sep_conv = SeparableConv2D(filters_sep, 3, padding='same', use_bias=False)
+        x = LoRAAdapterLayer(sep_conv, r=r_lora, alpha=alpha_lora)(x)
+        x = BatchNormalization()(x)
+        x = Activation('relu')(x)
+        x = Dropout(0.1)(x)
+        return x
 
-    # --- Cabezal de Predicción ---
+    x = decoder_block(x, mid, 160, 256, r_lora=4, alpha_lora=4)
+    x = decoder_block(x, low, 64, 128, r_lora=4, alpha_lora=4)
+    x = decoder_block(x, very_low, 48, 96, r_lora=4, alpha_lora=4)
+    stem = backbone.get_layer('stem_swish').output
+    x = decoder_block(x, stem, 24, 64, r_lora=4, alpha_lora=4)
+
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    sep_conv_5 = SeparableConv2D(32, 3, padding='same', use_bias=False)
+    x = LoRAAdapterLayer(sep_conv_5, r=4, alpha=4)(x)
+    x = BatchNormalization()(x)
+    x = Activation('relu')(x)
+    
     out = Conv2D(num_classes, 1, padding='same', dtype='float32')(x)
-    
     model = Model(inp, out)
-    model.summary()  # <--- Línea añadida aquí
-
+    model.summary()
     return model, backbone
+
+# --- Define esta clase después de tu función build_model ---
+class IoUOptimizedModel(keras.Model):
+    def __init__(self, shape, num_classes, **kwargs):
+        super().__init__(**kwargs)
+        self.num_classes = num_classes
+        # Construimos el modelo base
+        self.seg_model, self.backbone = build_model(shape, num_classes)
+        
+        # Trackers para pérdida y métricas
+        self.loss_tracker = keras.metrics.Mean(name="loss")
+        self.iou_metric = MeanIoU(num_classes=num_classes, name='enhanced_mean_iou')
+
+    def call(self, inputs, training=False):
+        return self.seg_model(inputs, training=training)
+
+    @property
+    def metrics(self):
+        # Expone las métricas para que Keras las muestre y las registre
+        return [self.loss_tracker, self.iou_metric]
+
+    def train_step(self, data):
+        x, y_true = data
+
+        with tf.GradientTape() as tape:
+            # 1. Obtener las predicciones (logits)
+            y_pred = self.seg_model(x, training=True)
+            
+            # 2. CALCULAR LA PÉRDIDA DIRECTAMENTE USANDO NUESTRA FUNCIÓN IOU-CÉNTRICA
+            # Esta es la modificación clave: la pérdida para el backprop es la que
+            # se enfoca en IoU y bordes.
+            loss = ultimate_iou_loss(y_true, y_pred)
+
+        # 3. Aplicar gradientes
+        trainable_vars = self.seg_model.trainable_variables
+        grads = tape.gradient(loss, trainable_vars)
+        self.optimizer.apply_gradients(zip(grads, trainable_vars))
+
+        # 4. Actualizar métricas
+        self.loss_tracker.update_state(loss)
+        self.iou_metric.update_state(y_true, y_pred)
+        
+        return {m.name: m.result() for m in self.metrics}
+        
+    def test_step(self, data):
+        x, y_true = data
+        y_pred = self.seg_model(x, training=False)
+        
+        # Para la validación, usamos la misma pérdida para consistencia
+        loss = ultimate_iou_loss(y_true, y_pred)
+        
+        # Actualizar métricas
+        self.loss_tracker.update_state(loss)
+        self.iou_metric.update_state(y_true, y_pred)
+        
+        return {m.name: m.result() for m in self.metrics}
 
 # -------------------------------------------------------------------------------
 # 6) Métrica MeanIoU segura
@@ -568,7 +581,7 @@ class MeanIoU(tf.keras.metrics.Metric):
         self.total_cm.assign(tf.zeros_like(self.total_cm))
 
 # -------------------------------------------------------------------------------
-# 7) Entrenamiento por fases con cargas seguras (CAMBIO #6)
+# 7) Entrenamiento por fases (AHORA CON EL NUEVO MODELO)
 # -------------------------------------------------------------------------------
 checkpoint_dir = 'checkpoints'
 os.makedirs(checkpoint_dir, exist_ok=True)
@@ -580,23 +593,28 @@ val_gen = tf.data.Dataset.from_tensor_slices((val_X,val_y))\
     .prefetch(tf.data.AUTOTUNE)
 
 device = '/GPU:0' if gpus else '/CPU:0'
+
 with tf.device(device):
-    model, backbone = build_model(train_X.shape[1:], num_classes=num_classes)
+    # --- INICIO DE LA IMPLEMENTACIÓN ---
+    # En lugar de UncertaintyModel, instanciamos IoUOptimizedModel
+    iou_aware_model = IoUOptimizedModel(shape=train_X.shape[1:], num_classes=num_classes)
+    
+    # Referencias al modelo interno y al backbone para compatibilidad
+    model = iou_aware_model.seg_model
+    backbone = iou_aware_model.backbone
     
     MONITOR_METRIC = 'val_enhanced_mean_iou'
     
-    model.compile(
-        optimizer=tf.keras.optimizers.AdamW(5e-4, weight_decay=1e-4),
-        loss=enhanced_combined_loss,
-        metrics=[MeanIoU(num_classes=num_classes)],
-        jit_compile=True  # <-- Add this line
-    )
-
-    # Fase 1: entrenar cabeza
+    # --- Fase 1: entrenar cabeza ---
     print("\n--- Fase 1: Entrenando solo el decoder (backbone congelado) ---")
     backbone.trainable = False
     
-    def one_cycle_lr(ep, lr_unused, max_epochs=20, max_lr=5e-4, min_lr=1e-6): # Epochs increased
+    # Compilamos el modelo contenedor. El optimizador es lo único que necesita.
+    iou_aware_model.compile(
+        optimizer=tf.keras.optimizers.AdamW(5e-4, weight_decay=1e-4)
+    )
+    
+    def one_cycle_lr(ep, lr_unused, max_epochs=20, max_lr=5e-4, min_lr=1e-6):
         half = max_epochs//2
         return (min_lr + (max_lr-min_lr)*ep/half) if ep<half \
                else (max_lr - (max_lr-min_lr)*(ep-half)/half)
@@ -612,31 +630,25 @@ with tf.device(device):
         LearningRateScheduler(one_cycle_lr),
         ReduceLROnPlateau(MONITOR_METRIC,mode='max',factor=0.5,patience=5,min_lr=1e-7)
     ]
-    model.fit(train_X,train_y, batch_size=12, epochs=20,
-              validation_data=val_gen, callbacks=cbs1)
-
-    # Cargar fase 1 (skip mismatches)
+    iou_aware_model.fit(train_X,train_y, batch_size=12, epochs=20,
+                        validation_data=val_gen, callbacks=cbs1)
+    
     print(f"Cargando pesos de la fase 1 desde: {ckpt1_path}")
-    model.load_weights(ckpt1_path, skip_mismatch=True)
+    iou_aware_model.load_weights(ckpt1_path)
 
-    # Fase 2: fine-tune parcial
+    # --- Fase 2: fine-tune parcial ---
     print("\n--- Fase 2: Fine-tuning del 20% superior del backbone ---")
     backbone.trainable = True
     total = len(backbone.layers)
     unfreeze_from = int(0.8 * total)
-    print(f"Total de capas en backbone: {total}. Descongelando desde la capa: {unfreeze_from}")
     for i, layer in enumerate(backbone.layers):
-        if i < unfreeze_from:
-            layer.trainable = False
-        else:
-            layer.trainable = True
+        layer.trainable = (i >= unfreeze_from)
 
-    model.compile(
-        optimizer=tf.keras.optimizers.AdamW(2e-6, weight_decay=1e-4),
-        loss=enhanced_combined_loss,
-        metrics=[MeanIoU(num_classes=num_classes)],
-        jit_compile=True  # <-- Add this line
+    # Recompilar el modelo contenedor
+    iou_aware_model.compile(
+        optimizer=tf.keras.optimizers.AdamW(2e-6, weight_decay=1e-4)
     )
+    
     ckpt2_path = os.path.join(checkpoint_dir, 'final_efficientnetv2_deeplab.weights.h5')
     cbs2 = [
         EarlyStopping(MONITOR_METRIC,mode='max',patience=10,restore_best_weights=True),
@@ -644,23 +656,21 @@ with tf.device(device):
         TensorBoard(log_dir='./logs/phase2_finetune'),
         ReduceLROnPlateau(MONITOR_METRIC,mode='max',factor=0.6,patience=6,min_lr=1e-8)
     ]
-    model.fit(train_X,train_y, batch_size=6, epochs=20,
-              validation_data=val_gen, callbacks=cbs2)
+    iou_aware_model.fit(train_X,train_y, batch_size=6, epochs=20,
+                        validation_data=val_gen, callbacks=cbs2)
 
-    # Cargar fase 2
     print(f"Cargando pesos de la fase 2 desde: {ckpt2_path}")
-    model.load_weights(ckpt2_path, skip_mismatch=True)
+    iou_aware_model.load_weights(ckpt2_path)
 
-    # Fase 3: full fine-tune
+    # --- Fase 3: full fine-tune ---
     print("\n--- Fase 3: Fine-tuning de todo el modelo (backbone + decoder) ---")
     backbone.trainable = True
-
-    model.compile(
-        optimizer=tf.keras.optimizers.AdamW(5e-7, weight_decay=5e-5),
-        loss=enhanced_combined_loss,
-        metrics=[MeanIoU(num_classes=num_classes)],
-        jit_compile=True  # <-- Add this line
+    
+    # Recompilar el modelo contenedor
+    iou_aware_model.compile(
+        optimizer=tf.keras.optimizers.AdamW(5e-7, weight_decay=5e-5)
     )
+
     ckpt3_path = os.path.join(checkpoint_dir, 'final_full_finetune.weights.h5')
     cbs3 = [
         EarlyStopping(MONITOR_METRIC,mode='max',patience=10,restore_best_weights=True),
@@ -668,15 +678,15 @@ with tf.device(device):
         TensorBoard(log_dir='./logs/phase3_full'),
         ReduceLROnPlateau(MONITOR_METRIC,mode='max',factor=0.6,patience=8,min_lr=1e-9)
     ]
-    model.fit(train_X,train_y, batch_size=4, epochs=20,
-              validation_data=val_gen, callbacks=cbs3)
-
-    # Cargar modelo final
+    iou_aware_model.fit(train_X,train_y, batch_size=4, epochs=20,
+                        validation_data=val_gen, callbacks=cbs3)
+    
     print(f"Cargando pesos finales desde: {ckpt3_path}")
-    model.load_weights(ckpt3_path, skip_mismatch=True)
+    iou_aware_model.load_weights(ckpt3_path)
+    # --- FIN DE LA IMPLEMENTACIÓN ---
 
 # -------------------------------------------------------------------------------
-# 8) Evaluación, Post-Procesamiento y Visualización (CAMBIOS #9, #10)
+# 8) Evaluación, Post-Procesamiento y Visualización
 # -------------------------------------------------------------------------------
 
 def evaluate_model(model, X, y):
@@ -692,45 +702,22 @@ def evaluate_model(model, X, y):
     return {'mean_iou': np.mean(ious), 'class_ious': ious, 'pixel_accuracy': np.mean(mask==y)}
 
 def evaluate_model_with_tta(model, X, y, num_classes=num_classes, batch_size=8):
-    # These augmentation functions operate on the spatial axes (1, 2) of a (N, H, W, C) tensor.
     def _hflip(a): return np.flip(a, axis=2)
     def _vflip(a): return np.flip(a, axis=1)
-    def _rot90(a): return np.rot90(a, k=1, axes=(1, 2))
-    def _rot180(a): return np.rot90(a, k=2, axes=(1, 2))
-    def _rot270(a): return np.rot90(a, k=3, axes=(1, 2))
-
-    # Define pairs of forward (for input) and inverse (for output) transformations.
     tfs = [
-        (lambda a: a,                    lambda p: p),                            # Original
-        (_hflip,                         _hflip),                                 # Horizontal flip is its own inverse
-        (_vflip,                         _vflip),                                 # Vertical flip is its own inverse
-        (lambda a: _vflip(_hflip(a)),    lambda p: _hflip(_vflip(p))),            # Flipped h and v
-        (_rot90,                         lambda p: np.rot90(p, k=-1, axes=(1, 2))), # Rotate +90 -> -90
-        (_rot180,                        lambda p: np.rot90(p, k=-2, axes=(1, 2))), # Rotate +180 -> -180 (or just _rot180)
-        (_rot270,                        lambda p: np.rot90(p, k=-3, axes=(1, 2))), # Rotate +270 -> -270
+        (lambda a: a, lambda p: p),
+        (_hflip, _hflip),
+        (_vflip, _vflip),
+        (lambda a: _vflip(_hflip(a)), lambda p: _hflip(_vflip(p))),
     ]
-
-    # Initialize sum of probabilities with the correct shape.
     probs_sum = np.zeros((len(X), *X.shape[1:-1], num_classes), dtype=np.float32)
-
     for tf_in, tf_inv in tfs:
-        # 1. Augment the input batch of images.
         X_aug = tf_in(np.copy(X))
-
-        # 2. Get predictions. Shape remains (N, H, W, C).
         preds_aug = model.predict(X_aug, batch_size=batch_size, verbose=0)
-
-        # 3. Apply the INVERSE geometric transformation directly to the predictions.
-        # This correctly brings the prediction masks back to their original orientation.
         preds_final = tf_inv(preds_aug)
-
-        # 4. Add to the sum. Both arrays now have the same shape: (N, H, W, C).
         probs_sum += preds_final
-
-    # --- The rest of your function remains the same ---
     probs_mean = probs_sum / len(tfs)
     y_pred = np.argmax(probs_mean, axis=-1)
-
     ious, eps = [], 1e-7
     for cls in range(num_classes):
         yt = (y == cls)
@@ -738,18 +725,14 @@ def evaluate_model_with_tta(model, X, y, num_classes=num_classes, batch_size=8):
         inter = np.logical_and(yt, yp).sum()
         union = yt.sum() + yp.sum() - inter
         ious.append(inter / (union + eps) if union > 0 else 0.0)
-
     return {"mean_iou": np.mean(ious), "class_ious": ious, "pixel_accuracy": (y_pred == y).mean()}
 
-# 9. ADD POST-PROCESSING FOR BETTER IoU
 def post_process_predictions(predictions, min_area=50):
-    """Apply CRF-like smoothing and remove small isolated regions"""
     processed = []
     for pred in predictions:
         pred_class = np.argmax(pred, axis=-1).astype(np.uint8)
         final_mask = np.zeros_like(pred_class)
-        
-        for class_id in range(1, num_classes): # Skip background
+        for class_id in range(1, num_classes):
             mask = (pred_class == class_id).astype(np.uint8)
             num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
             for label in range(1, num_labels):
@@ -758,7 +741,6 @@ def post_process_predictions(predictions, min_area=50):
         processed.append(final_mask)
     return np.array(processed)
 
-# 10. MODIFY EVALUATION TO USE POST-PROCESSING
 def evaluate_model_with_postprocessing(model, X, y):
     preds = model.predict(X)
     processed_masks = post_process_predictions(preds)
@@ -769,33 +751,16 @@ def evaluate_model_with_postprocessing(model, X, y):
         inter = np.sum(yt * yp)
         union = np.sum(yt) + np.sum(yp) - inter
         ious.append(inter/union if union > 0 else 0)
-    return {
-        'mean_iou': np.mean(ious), 
-        'class_ious': ious, 
-        'pixel_accuracy': np.mean(processed_masks == y)
-    }
+    return {'mean_iou': np.mean(ious), 'class_ious': ious, 'pixel_accuracy': np.mean(processed_masks == y)}
 
 def visualize_predictions(model, X, y, num_samples=5):
     preds = model.predict(X[:num_samples])
     pred_masks = np.argmax(preds, axis=-1)
-    
     plt.figure(figsize=(15, 5 * num_samples))
     for i in range(num_samples):
-        plt.subplot(num_samples, 3, i*3 + 1)
-        plt.imshow(X[i])
-        plt.title("Imagen Original")
-        plt.axis('off')
-        
-        plt.subplot(num_samples, 3, i*3 + 2)
-        plt.imshow(y[i], vmin=0, vmax=num_classes-1, cmap='jet')
-        plt.title("Máscara Real")
-        plt.axis('off')
-
-        plt.subplot(num_samples, 3, i*3 + 3)
-        plt.imshow(pred_masks[i], vmin=0, vmax=num_classes-1, cmap='jet')
-        plt.title("Máscara Predicha")
-        plt.axis('off')
-    
+        plt.subplot(num_samples, 3, i*3 + 1); plt.imshow(X[i]); plt.title("Imagen Original"); plt.axis('off')
+        plt.subplot(num_samples, 3, i*3 + 2); plt.imshow(y[i], vmin=0, vmax=num_classes-1, cmap='jet'); plt.title("Máscara Real"); plt.axis('off')
+        plt.subplot(num_samples, 3, i*3 + 3); plt.imshow(pred_masks[i], vmin=0, vmax=num_classes-1, cmap='jet'); plt.title("Máscara Predicha"); plt.axis('off')
     plt.tight_layout()
     plt.savefig("predictions_visualization.png")
     print("Visualización de predicciones guardada en 'predictions_visualization.png'")
@@ -805,9 +770,9 @@ final_model_path = os.path.join(checkpoint_dir, 'final_full_finetune.weights.h5'
 print(f"Cargando el mejor modelo final desde '{final_model_path}' para la evaluación.")
 
 if os.path.exists(final_model_path):
-    # Reconstruir el modelo para la evaluación
-    eval_model, _ = build_model(val_X.shape[1:], num_classes=num_classes)
-    eval_model.load_weights(final_model_path)
+    # Usamos el modelo interno (seg_model) del contenedor para la evaluación
+    # --- CAMBIO REALIZADO AQUÍ ---
+    eval_model = iou_aware_model.seg_model
     
     print("\n--- Evaluación Estándar ---")
     metrics = evaluate_model(eval_model, val_X, val_y)
@@ -819,15 +784,13 @@ if os.path.exists(final_model_path):
     metrics_tta = evaluate_model_with_tta(eval_model, val_X, val_y, num_classes=num_classes)
     print(f"Mean IoU (TTA): {metrics_tta['mean_iou']:.4f}")
     print(f"Pixel Acc. (TTA): {metrics_tta['pixel_accuracy']:.4f}")
-    for i, iou in enumerate(metrics_tta['class_ious']):
-        print(f"  IoU clase {i}: {iou:.4f}")
-        
+    for i, iou in enumerate(metrics_tta['class_ious']): print(f"  IoU clase {i}: {iou:.4f}")
+    
     print("\n--- Evaluación con Post-Procesamiento ---")
     metrics_pp = evaluate_model_with_postprocessing(eval_model, val_X, val_y)
     print(f"Mean IoU (Post-Proc): {metrics_pp['mean_iou']:.4f}")
     print(f"Pixel Acc. (Post-Proc): {metrics_pp['pixel_accuracy']:.4f}")
-    for i, iou in enumerate(metrics_pp['class_ious']):
-        print(f"  IoU clase {i}: {iou:.4f}")
+    for i, iou in enumerate(metrics_pp['class_ious']): print(f"  IoU clase {i}: {iou:.4f}")
 
     visualize_predictions(eval_model, val_X, val_y)
 else:
