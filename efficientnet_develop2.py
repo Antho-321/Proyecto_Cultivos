@@ -426,67 +426,6 @@ def ASPP(x, out=320, rates=(6, 12, 18, 24, 30)):
 # -------------------------------------------------------------------------------
 # 5) Definición del modelo con decoder completo
 # -------------------------------------------------------------------------------
-def build_model(shape=(256,256,3)):
-    backbone = EfficientNetV2S(input_shape=shape, num_classes=0,
-                                 pretrained='imagenet', include_preprocessing=False)
-    for layer in backbone.layers:
-        if isinstance(layer, (Conv2D, SeparableConv2D)):
-            layer.kernel_regularizer = tf.keras.regularizers.l2(2e-4)
-
-    # NOTA: Para usar LoRA, se reemplazaría una capa. Por ejemplo:
-    # original_conv_layer = backbone.get_layer('some_conv_layer')
-    # lora_conv_layer = LoRAAdapterLayer(original_conv_layer, r=8)
-    # Luego, se debe reconstruir el grafo del modelo usando lora_conv_layer.
-    # Esto es complejo y requiere un conocimiento detallado de la arquitectura del backbone.
-
-    inp = backbone.input
-    high     = backbone.get_layer('post_swish').output   # 8×8
-    mid      = backbone.get_layer('add_6').output        # 16×16  
-    low      = backbone.get_layer('add_2').output        # 32×32
-    very_low = backbone.get_layer('stem_swish').output   # 64×64
-
-    # ASPP
-    x = ASPP(high)
-
-    # Decoder Stage 1: 8→32
-    x = Activation('relu')(BatchNormalization()(
-        Conv2DTranspose(256,4,strides=4,padding='same',use_bias=False)(x)))
-    m = Activation('relu')(BatchNormalization()(Conv2D(256,1,use_bias=False)(mid)))
-    x = Dropout(0.1)(layers.Add()([
-        Activation('relu')(BatchNormalization()(
-            SeparableConv2D(256,3,padding='same',use_bias=False)(
-                Concatenate()([x,m])))),
-        Conv2D(256,1,use_bias=False)(Concatenate()([x,m]))
-    ]))
-
-    # Decoder Stage 2: 32→64
-    x = Activation('relu')(BatchNormalization()(
-        Conv2DTranspose(128,2,strides=2,padding='same',use_bias=False)(x)))
-    l = Activation('relu')(BatchNormalization()(Conv2D(128,1,use_bias=False)(low)))
-    x = Dropout(0.1)(layers.Add()([
-        Activation('relu')(BatchNormalization()(
-            SeparableConv2D(128,3,padding='same',use_bias=False)(
-                Concatenate()([x,l])))),
-        Conv2D(128,1,use_bias=False)(Concatenate()([x,l]))
-    ]))
-
-    # Decoder Stage 3: 64→128
-    x = Activation('relu')(BatchNormalization()(
-        Conv2DTranspose(64,2,strides=2,padding='same',use_bias=False)(x)))
-    v = Activation('relu')(BatchNormalization()(Conv2D(64,1,use_bias=False)(very_low)))
-    x = Activation('relu')(BatchNormalization()(
-        SeparableConv2D(96,3,padding='same',use_bias=False)(
-            Concatenate()([x,v]))))
-
-    # Final upsampling to 256×256
-    x = UpSampling2D(2, interpolation='bilinear')(x)
-    x = Activation('relu')(BatchNormalization()(SeparableConv2D(64,3,padding='same',use_bias=False)(x)))
-    x = Activation('relu')(BatchNormalization()(SeparableConv2D(32,3,padding='same',use_bias=False)(x)))
-
-    # Prediction
-    out = Conv2D(num_classes,1,padding='same', dtype='float32')(x)
-    
-    return Model(inp, out), backbone
 def distance_band(mask, n):
     mask_bool = tf.cast(mask, tf.bool)        # << conversión centralizada
     band      = tf.zeros_like(mask_bool)      # band ahora es bool
@@ -504,6 +443,91 @@ def distance_band(mask, n):
         band = tf.logical_or(band,
                              tf.math.logical_xor(mask_bool, interior))
     return tf.cast(band, tf.float32)
+def build_model(shape=(256, 256, 3), num_classes=1):
+    """
+    Construye un modelo de segmentación tipo U-Net con un backbone EfficientNetV2S.
+    """
+    # --- Codificador (Backbone) ---
+    backbone = EfficientNetV2S(input_shape=shape, num_classes=0,
+                               pretrained='imagenet', include_preprocessing=False)
+    
+    # Añadir regularización L2 a las capas convolucionales
+    for layer in backbone.layers:
+        if isinstance(layer, (Conv2D, SeparableConv2D)):
+            layer.kernel_regularizer = tf.keras.regularizers.l2(2e-4)
+
+    inp = backbone.input
+
+    # --- Extracción de Mapas de Características (Skip Connections) ---
+    # Se seleccionan las últimas capas 'Add' de cada bloque de resolución
+    high = backbone.get_layer('post_swish').output        # Salida: 8x8
+    mid = None          # Objetivo: 16x16
+    low = None          # Objetivo: 32x32
+    very_low = None     # Objetivo: 64x64
+    stem = backbone.get_layer('stem_swish').output      # Salida: 128x128
+    
+    # Recorremos las capas en reversa para encontrar la ÚLTIMA capa 'add' en cada bloque
+    for layer in reversed(backbone.layers):
+        if 'add' in layer.name:
+            # Access the shape from the output TENSOR, not the layer object
+            if layer.output.shape[1] == 16 and mid is None:
+                mid = layer.output
+                print(f"Encontrada capa media (16x16): {layer.name}")
+            elif layer.output.shape[1] == 32 and low is None:
+                low = layer.output
+                print(f"Encontrada capa baja (32x32): {layer.name}")
+            elif layer.output.shape[1] == 64 and very_low is None:
+                very_low = layer.output
+                print(f"Encontrada capa muy baja (64x64): {layer.name}")
+
+    # Verificación para asegurar que todas las capas fueron encontradas
+    if mid is None or low is None or very_low is None:
+        raise ValueError("No se pudieron encontrar todas las capas de skip connection requeridas.")
+
+    # --- Puente (Bridge) ---
+    # Se aplica ASPP a la característica de más alto nivel (8x8)
+    x = ASPP(high)
+
+    # --- Decodificador --- (El resto del código permanece igual)
+    # Etapa 1 del Decodificador: 8x8 -> 16x16
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    m = Activation('relu')(BatchNormalization()(Conv2D(160, 1, use_bias=False)(mid)))
+    x = Concatenate()([x, m])
+    x = Activation('relu')(BatchNormalization()(SeparableConv2D(256, 3, padding='same', use_bias=False)(x)))
+    x = Dropout(0.1)(x)
+
+    # Etapa 2 del Decodificador: 16x16 -> 32x32
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    l = Activation('relu')(BatchNormalization()(Conv2D(64, 1, use_bias=False)(low)))
+    x = Concatenate()([x, l])
+    x = Activation('relu')(BatchNormalization()(SeparableConv2D(128, 3, padding='same', use_bias=False)(x)))
+    x = Dropout(0.1)(x)
+
+    # Etapa 3 del Decodificador: 32x32 -> 64x64
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    v = Activation('relu')(BatchNormalization()(Conv2D(48, 1, use_bias=False)(very_low)))
+    x = Concatenate()([x, v])
+    x = Activation('relu')(BatchNormalization()(SeparableConv2D(96, 3, padding='same', use_bias=False)(x)))
+    x = Dropout(0.1)(x)
+
+    # Etapa 4 del Decodificador: 64x64 -> 128x128
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    s = Activation('relu')(BatchNormalization()(Conv2D(24, 1, use_bias=False)(stem)))
+    x = Concatenate()([x, s])
+    x = Activation('relu')(BatchNormalization()(SeparableConv2D(64, 3, padding='same', use_bias=False)(x)))
+    
+    # Suavizado final y escalado a 256x256
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    x = Activation('relu')(BatchNormalization()(SeparableConv2D(32, 3, padding='same', use_bias=False)(x)))
+
+    # --- Cabezal de Predicción ---
+    out = Conv2D(num_classes, 1, padding='same', dtype='float32')(x)
+    
+    model = Model(inp, out)
+    model.summary()  # <--- Línea añadida aquí
+
+    return model, backbone
+
 # -------------------------------------------------------------------------------
 # 6) Métrica MeanIoU segura
 # -------------------------------------------------------------------------------
@@ -557,7 +581,7 @@ val_gen = tf.data.Dataset.from_tensor_slices((val_X,val_y))\
 
 device = '/GPU:0' if gpus else '/CPU:0'
 with tf.device(device):
-    model, backbone = build_model(train_X.shape[1:])
+    model, backbone = build_model(train_X.shape[1:], num_classes=num_classes)
     
     MONITOR_METRIC = 'val_enhanced_mean_iou'
     
@@ -565,7 +589,7 @@ with tf.device(device):
         optimizer=tf.keras.optimizers.AdamW(5e-4, weight_decay=1e-4),
         loss=enhanced_combined_loss,
         metrics=[MeanIoU(num_classes=num_classes)],
-        jit_compile=False  # <-- Add this line
+        jit_compile=True  # <-- Add this line
     )
 
     # Fase 1: entrenar cabeza
@@ -611,7 +635,7 @@ with tf.device(device):
         optimizer=tf.keras.optimizers.AdamW(2e-6, weight_decay=1e-4),
         loss=enhanced_combined_loss,
         metrics=[MeanIoU(num_classes=num_classes)],
-        jit_compile=False  # <-- Add this line
+        jit_compile=True  # <-- Add this line
     )
     ckpt2_path = os.path.join(checkpoint_dir, 'final_efficientnetv2_deeplab.weights.h5')
     cbs2 = [
@@ -635,7 +659,7 @@ with tf.device(device):
         optimizer=tf.keras.optimizers.AdamW(5e-7, weight_decay=5e-5),
         loss=enhanced_combined_loss,
         metrics=[MeanIoU(num_classes=num_classes)],
-        jit_compile=False  # <-- Add this line
+        jit_compile=True  # <-- Add this line
     )
     ckpt3_path = os.path.join(checkpoint_dir, 'final_full_finetune.weights.h5')
     cbs3 = [
@@ -668,31 +692,42 @@ def evaluate_model(model, X, y):
     return {'mean_iou': np.mean(ious), 'class_ious': ious, 'pixel_accuracy': np.mean(mask==y)}
 
 def evaluate_model_with_tta(model, X, y, num_classes=num_classes, batch_size=8):
+    # These augmentation functions operate on the spatial axes (1, 2) of a (N, H, W, C) tensor.
     def _hflip(a): return np.flip(a, axis=2)
     def _vflip(a): return np.flip(a, axis=1)
     def _rot90(a): return np.rot90(a, k=1, axes=(1, 2))
     def _rot180(a): return np.rot90(a, k=2, axes=(1, 2))
     def _rot270(a): return np.rot90(a, k=3, axes=(1, 2))
 
+    # Define pairs of forward (for input) and inverse (for output) transformations.
     tfs = [
-        (lambda a: a,                   lambda a: a),
-        (_hflip,                         _hflip),
-        (_vflip,                         _vflip),
-        (lambda a: _vflip(_hflip(a)),    lambda a: _hflip(_vflip(a))),
-        (_rot90,                         lambda a: np.rot90(a, k=-1, axes=(1,2))),
-        (_rot180,                        _rot180),
-        (_rot270,                        lambda a: np.rot90(a, k=-3, axes=(1,2))),
+        (lambda a: a,                    lambda p: p),                            # Original
+        (_hflip,                         _hflip),                                 # Horizontal flip is its own inverse
+        (_vflip,                         _vflip),                                 # Vertical flip is its own inverse
+        (lambda a: _vflip(_hflip(a)),    lambda p: _hflip(_vflip(p))),            # Flipped h and v
+        (_rot90,                         lambda p: np.rot90(p, k=-1, axes=(1, 2))), # Rotate +90 -> -90
+        (_rot180,                        lambda p: np.rot90(p, k=-2, axes=(1, 2))), # Rotate +180 -> -180 (or just _rot180)
+        (_rot270,                        lambda p: np.rot90(p, k=-3, axes=(1, 2))), # Rotate +270 -> -270
     ]
+
+    # Initialize sum of probabilities with the correct shape.
     probs_sum = np.zeros((len(X), *X.shape[1:-1], num_classes), dtype=np.float32)
-    
+
     for tf_in, tf_inv in tfs:
+        # 1. Augment the input batch of images.
         X_aug = tf_in(np.copy(X))
-        preds = model.predict(X_aug, batch_size=batch_size, verbose=0) # N, H, W, C
-        preds_transposed = np.transpose(preds, (0, 3, 1, 2)) # N, C, H, W
-        preds_inv = tf_inv(preds_transposed)
-        preds_final = np.transpose(preds_inv, (0, 2, 3, 1)) # N, H, W, C
+
+        # 2. Get predictions. Shape remains (N, H, W, C).
+        preds_aug = model.predict(X_aug, batch_size=batch_size, verbose=0)
+
+        # 3. Apply the INVERSE geometric transformation directly to the predictions.
+        # This correctly brings the prediction masks back to their original orientation.
+        preds_final = tf_inv(preds_aug)
+
+        # 4. Add to the sum. Both arrays now have the same shape: (N, H, W, C).
         probs_sum += preds_final
 
+    # --- The rest of your function remains the same ---
     probs_mean = probs_sum / len(tfs)
     y_pred = np.argmax(probs_mean, axis=-1)
 
@@ -765,14 +800,13 @@ def visualize_predictions(model, X, y, num_samples=5):
     plt.savefig("predictions_visualization.png")
     print("Visualización de predicciones guardada en 'predictions_visualization.png'")
 
-
 print("\n--- Evaluación Final del Modelo ---")
 final_model_path = os.path.join(checkpoint_dir, 'final_full_finetune.weights.h5')
 print(f"Cargando el mejor modelo final desde '{final_model_path}' para la evaluación.")
 
 if os.path.exists(final_model_path):
     # Reconstruir el modelo para la evaluación
-    eval_model, _ = build_model(val_X.shape[1:])
+    eval_model, _ = build_model(val_X.shape[1:], num_classes=num_classes)
     eval_model.load_weights(final_model_path)
     
     print("\n--- Evaluación Estándar ---")
