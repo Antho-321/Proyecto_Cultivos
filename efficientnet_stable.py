@@ -281,7 +281,7 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
     # Capa de salida
     out = Conv2D(num_classes_arg, 1, padding='same', activation='softmax', dtype='float32')(x)
 
-    return Model(inp, out)
+    return Model(inp, out), backbone
 
 
 # 7) Pérdidas Mejoradas y Métricas Personalizadas ------------------------------
