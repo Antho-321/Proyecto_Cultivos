@@ -21,6 +21,7 @@ import os
 os.environ['MPLBACKEND'] = 'agg'  # matplotlib backend
 
 import tensorflow as tf
+from tensorflow.keras.utils import Sequence
 import keras
 print("Versión de TensorFlow:", tf.__version__)
 gpus = tf.config.list_physical_devices('GPU')
@@ -193,6 +194,100 @@ def tversky_loss(y_true, y_pred, alpha=0.7, beta=0.3, smooth=1e-7):
     
     return 1.0 - tf.reduce_mean(tversky_index)
 
+class DataGenerator(Sequence):
+    def __init__(self, img_dir, mask_dir, normal_files, rare_files, batch_size,
+                 dim, num_classes, augmentations, rare_ratio=0.5):
+        self.img_dir = img_dir
+        self.mask_dir = mask_dir
+        self.normal_files = normal_files
+        self.rare_files = rare_files
+        self.batch_size = batch_size
+        self.dim = dim
+        self.num_classes = num_classes
+        self.augment = augmentations
+        self.rare_ratio = rare_ratio  # Proporción de muestras raras por lote
+
+        self.num_rare_per_batch = int(self.batch_size * self.rare_ratio)
+        self.num_normal_per_batch = self.batch_size - self.num_rare_per_batch
+        
+        # Si no hay archivos raros, tomar todos del grupo normal
+        if not self.rare_files or self.num_rare_per_batch == 0:
+            self.num_normal_per_batch = self.batch_size
+            self.num_rare_per_batch = 0
+            self.all_files = self.normal_files
+            self.is_mixed = False
+        else:
+            self.is_mixed = True
+
+        self.on_epoch_end()
+
+    def __len__(self):
+        # Longitud total basada en la clase más abundante para un epoch completo
+        if self.is_mixed:
+            return int(np.floor(len(self.normal_files) / self.num_normal_per_batch))
+        else:
+            return int(np.floor(len(self.all_files) / self.batch_size))
+
+
+    def __getitem__(self, index):
+        if self.is_mixed:
+            # Seleccionar archivos para el lote actual de forma balanceada
+            start_normal = index * self.num_normal_per_batch
+            end_normal = start_normal + self.num_normal_per_batch
+            batch_normal_files = self.normal_files[start_normal:end_normal]
+
+            # Usar módulo para repetir la lista de archivos raros si es necesario
+            start_rare = (index * self.num_rare_per_batch) % len(self.rare_files)
+            end_rare = start_rare + self.num_rare_per_batch
+            
+            if end_rare > len(self.rare_files): # Manejar el wrap-around
+                batch_rare_files = self.rare_files[start_rare:] + self.rare_files[:end_rare - len(self.rare_files)]
+            else:
+                batch_rare_files = self.rare_files[start_rare:end_rare]
+
+            batch_files = batch_normal_files + batch_rare_files
+        else:
+            start = index * self.batch_size
+            end = start + self.batch_size
+            batch_files = self.all_files[start:end]
+            
+        # Generar datos (X, y) para este lote
+        X, y = self.__data_generation(batch_files)
+        return X, y
+
+    def on_epoch_end(self):
+        # Barajar los índices al final de cada época
+        if self.is_mixed:
+            np.random.shuffle(self.normal_files)
+            np.random.shuffle(self.rare_files)
+        else:
+            np.random.shuffle(self.all_files)
+
+
+    def __data_generation(self, batch_files):
+        # Aquí va la lógica de carga y aumento para UN LOTE
+        X = np.empty((self.batch_size, *self.dim, 3), dtype=np.float32)
+        y = np.empty((self.batch_size, *self.dim), dtype=np.int32)
+
+        for i, filename in enumerate(batch_files):
+            img_path = os.path.join(self.img_dir, filename)
+            mask_path = os.path.join(self.mask_dir, filename.rsplit('.', 1)[0] + '_mask.png')
+            
+            img = cv2.imread(img_path)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            
+            if self.augment:
+                augmented = self.augment(image=img, mask=mask)
+                img, mask = augmented['image'], augmented['mask']
+            
+            # Normalizar y asignar
+            X[i,] = img.astype(np.float32) / 255.0
+            y[i,] = np.squeeze(mask)
+        
+        return X, y
+
+
 class LoRAAdapterLayer(layers.Layer):
     """
     Implementación de LoRA para una capa Conv2D que es eficiente en recursos.
@@ -206,16 +301,20 @@ class LoRAAdapterLayer(layers.Layer):
         self.r = r
         self.alpha = alpha
         
-        original_kernel_shape = self.original_layer.kernel.shape
+        # --- START: CORRECTED BLOCK ---
+        # We get the number of output channels from the layer's configuration,
+        # which is available before the layer is built.
+        self.out_channels = self.original_layer.filters
+        # --- END: CORRECTED BLOCK ---
+        
         self.kernel_size = self.original_layer.kernel_size
         self.strides = self.original_layer.strides
         self.padding = self.original_layer.padding
-        self.in_channels = original_kernel_shape[-2]
-        self.out_channels = original_kernel_shape[-1]
         
         self.scaling = self.alpha / self.r
 
     def build(self, input_shape):
+        # We can now use self.out_channels, which was set correctly in __init__.
         self.lora_down = layers.Conv2D(
             filters=self.r,
             kernel_size=self.kernel_size,
@@ -227,7 +326,7 @@ class LoRAAdapterLayer(layers.Layer):
         )
         
         self.lora_up = layers.Conv2D(
-            filters=self.out_channels,
+            filters=self.out_channels,  # This now works correctly
             kernel_size=(1, 1),
             strides=(1, 1),
             padding='VALID',
@@ -236,9 +335,11 @@ class LoRAAdapterLayer(layers.Layer):
             name="lora_up"
         )
         
-        self.lora_down.build(input_shape)
-        self.lora_up.build((input_shape[0], input_shape[1], input_shape[2], self.r))
-        self.built = True
+        # It's good practice to ensure the original layer is also built
+        if not self.original_layer.built:
+            self.original_layer.build(input_shape)
+            
+        super().build(input_shape) # This will call build on child layers (lora_down, lora_up)
 
     def call(self, x):
         original_output = self.original_layer(x)
@@ -315,11 +416,11 @@ def dice_loss(y_true, y_pred, smooth=1e-5):
 # -------------------------------------------------------------------------------
 # 2) Pipelines de augmentación (CAMBIO #5)
 # -------------------------------------------------------------------------------
-def get_training_augmentation():
+def get_training_augmentation(img_size=(256, 256)):
     return A.Compose([
         A.RandomScale(scale_limit=0.2, p=0.5),
-        A.PadIfNeeded(256,256, border_mode=cv2.BORDER_REFLECT),
-        A.RandomCrop(256,256),
+        A.PadIfNeeded(img_size[0], img_size[1], border_mode=cv2.BORDER_REFLECT),
+        A.RandomCrop(img_size[0], img_size[1]),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
         A.RandomRotate90(p=0.5),
@@ -334,62 +435,170 @@ def get_training_augmentation():
         )
     ])
 
-def get_validation_augmentation():
-    return A.Compose([])
+def get_validation_augmentation(img_size=(256, 256)):
+    # La validación solo necesita asegurar el tamaño correcto
+    return A.Compose([
+        A.PadIfNeeded(min_height=img_size[0], min_width=img_size[1], border_mode=cv2.BORDER_CONSTANT, value=0),
+        A.CenterCrop(img_size[0], img_size[1]),
+    ])
+
+
+# =========================================================================================
+# === INICIO DEL BLOQUE IMPLEMENTADO: Carga de Datos con DataGenerator ===
+# =========================================================================================
 
 # -------------------------------------------------------------------------------
-# 3) Carga de datos y Balanceo de Clases (CAMBIO #7)
+# 3) Carga de datos y Balanceo de Clases por Lotes (IMPLEMENTACIÓN CON GENERADOR)
 # -------------------------------------------------------------------------------
-def load_augmented_dataset(img_dir, mask_dir, target_size=(256,256), augment=False):
-    images, masks = [], []
-    files = [f for f in os.listdir(img_dir) if f.lower().endswith(('.jpg','.png'))]
-    aug = get_training_augmentation() if augment else get_validation_augmentation()
-    with ThreadPoolExecutor() as exe:
-        futures = {
-            exe.submit(lambda fn: (
-                img_to_array(load_img(os.path.join(img_dir,fn),target_size=target_size)),
-                img_to_array(load_img(os.path.join(mask_dir,fn.rsplit('.',1)[0]+'_mask.png'),
-                                      color_mode='grayscale',target_size=target_size))
-            ), fn): fn
-            for fn in files
-        }
-        for future in tqdm(as_completed(futures), total=len(files), desc="Cargando datos"):
-            img_arr, mask_arr = future.result()
-            if augment:
-                a = aug(image=img_arr.astype('uint8'), mask=mask_arr)
-                img_arr, mask_arr = a['image'], a['mask']
-            images.append(img_arr)
-            masks.append(mask_arr)
-    X = np.array(images, dtype='float32')/255.0
-    y = np.array(masks, dtype='int32')
-    if y.ndim==4 and y.shape[-1]==1:
-        y = np.squeeze(y,-1)
-    return X,y
 
-train_X, train_y = load_augmented_dataset('Balanced/train/images','Balanced/train/masks',augment=True)
-val_X,   val_y   = load_augmented_dataset('Balanced/val/images',  'Balanced/val/masks',  augment=False)
+def analyze_and_split_files(img_dir, mask_dir):
+    """
+    Analiza las máscaras para encontrar clases raras, calcula pesos de clase y
+    divide la lista de archivos en 'raros' y 'normales'.
+    """
+    all_files = sorted([f for f in os.listdir(img_dir) if f.lower().endswith(('.jpg', '.png'))])
+    mask_files = [os.path.join(mask_dir, f.rsplit('.', 1)[0] + '_mask.png') for f in all_files]
 
-num_classes = int(np.max(train_y)+1)
-class_counts = np.bincount(train_y.flatten())
+    # --- Pasada 1: Analizar todas las máscaras para obtener estadísticas ---
+    print("Analizando máscaras para determinar la distribución de clases...")
+    max_class_id = 0
+    
+    # Primero, determinar el número de clases
+    for mask_path in tqdm(mask_files, desc="Determinando # de clases"):
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if mask is not None:
+            max_class_id = max(max_class_id, np.max(mask))
+    
+    num_classes = max_class_id + 1
+    class_counts = np.zeros(num_classes, dtype=np.int64)
+    print(f"Número de clases detectado: {num_classes}")
 
-prob = class_counts / class_counts.sum()
-rare_threshold = np.percentile(prob, 30)
-rare_classes = np.where(prob < rare_threshold)[0]
+    # Ahora, contar píxeles por clase
+    for mask_path in tqdm(mask_files, desc="Contando píxeles de clase"):
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if mask is not None:
+            counts = np.bincount(mask.flatten(), minlength=num_classes)
+            class_counts += counts
 
-oversample_factor = 3
-for _ in range(oversample_factor):
-    mask = np.isin(train_y.reshape(len(train_y), -1), rare_classes)
-    idx = np.any(mask, axis=1)
-    if np.sum(idx) > 0:
-        train_X = np.concatenate([train_X, train_X[idx]], axis=0)
-        train_y = np.concatenate([train_y, train_y[idx]], axis=0)
+    # --- Calcular clases raras y pesos ---
+    total_pixels = np.sum(class_counts)
+    class_probabilities = class_counts / total_pixels
+    rare_threshold = np.percentile(class_probabilities[class_probabilities > 0], 25) # Umbral del 25% de las clases presentes
+    rare_classes = np.where(class_probabilities < rare_threshold)[0]
+    
+    # Ignorar la clase de fondo si es la más común
+    if 0 in rare_classes and class_probabilities[0] > 0.5:
+        rare_classes = np.delete(rare_classes, np.where(rare_classes == 0))
 
-perm = np.random.permutation(len(train_X))
-train_X, train_y = train_X[perm], train_y[perm]
+    print(f"Clases identificadas como raras: {rare_classes}")
+    
+    class_weights = total_pixels / (num_classes * np.maximum(class_counts, 1))
+    print(f"Pesos de clase calculados: {class_weights}")
 
-total_pix = train_y.size
-cw = total_pix/(num_classes*np.maximum(np.bincount(train_y.flatten()),1))
-class_weights = tf.constant(cw, dtype=tf.float32)
+    # --- Pasada 2: Dividir archivos en listas 'rara' y 'normal' ---
+    rare_class_files = []
+    normal_class_files = []
+    print("Separando archivos que contienen clases raras...")
+    for i, mask_path in enumerate(tqdm(mask_files, desc="Separando archivos")):
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if mask is not None:
+            unique_classes_in_mask = np.unique(mask)
+            if any(cls in rare_classes for cls in unique_classes_in_mask):
+                rare_class_files.append(all_files[i])
+            else:
+                normal_class_files.append(all_files[i])
+    
+    print(f"Archivos con clases raras: {len(rare_class_files)}")
+    print(f"Archivos con clases normales: {len(normal_class_files)}")
+
+    return rare_class_files, normal_class_files, num_classes, tf.constant(class_weights, dtype=tf.float32)
+
+# --- Configuración y Creación de los Generadores (VERSIÓN CORREGIDA) ---
+IMG_SIZE = (256, 256)
+TRAIN_BATCH_SIZE = 12
+VAL_BATCH_SIZE = 8
+AUTOTUNE = tf.data.AUTOTUNE # TensorFlow's automatic performance tuner
+
+# 1. Analizar archivos de entrenamiento y obtener listas y estadísticas
+img_dir_train = 'Balanced/train/images'
+mask_dir_train = 'Balanced/train/masks'
+rare_files, normal_files, num_classes, class_weights = analyze_and_split_files(img_dir_train, mask_dir_train)
+
+# 2. Instanciar generador para entrenamiento (¡sin batch size aquí!)
+# El batching lo hará tf.data
+train_generator_instance = DataGenerator(
+    img_dir=img_dir_train,
+    mask_dir=mask_dir_train,
+    normal_files=normal_files,
+    rare_files=rare_files,
+    batch_size=TRAIN_BATCH_SIZE, # DataGenerator still needs it to form a batch
+    dim=IMG_SIZE,
+    num_classes=num_classes,
+    augmentations=get_training_augmentation(IMG_SIZE),
+    rare_ratio=0.5
+)
+
+# 3. Instanciar generador para validación
+img_dir_val = 'Balanced/val/images'
+mask_dir_val = 'Balanced/val/masks'
+val_files = sorted([f for f in os.listdir(img_dir_val) if f.lower().endswith(('.jpg', '.png'))])
+
+val_generator_instance = DataGenerator(
+    img_dir=img_dir_val,
+    mask_dir=mask_dir_val,
+    normal_files=val_files,
+    rare_files=[],
+    batch_size=VAL_BATCH_SIZE, # DataGenerator still needs it to form a batch
+    dim=IMG_SIZE,
+    num_classes=num_classes,
+    augmentations=get_validation_augmentation(IMG_SIZE),
+    rare_ratio=0.0
+)
+
+# 4. Crear los datasets de tf.data
+train_ds = tf.data.Dataset.from_generator(
+    lambda: train_generator_instance,
+    output_signature=(
+        tf.TensorSpec(shape=(None, *IMG_SIZE, 3), dtype=tf.float32),
+        tf.TensorSpec(shape=(None, *IMG_SIZE), dtype=tf.int32)
+    )
+).prefetch(buffer_size=AUTOTUNE) # <-- Replaces workers/multiprocessing
+
+val_ds = tf.data.Dataset.from_generator(
+    lambda: val_generator_instance,
+    output_signature=(
+        tf.TensorSpec(shape=(None, *IMG_SIZE, 3), dtype=tf.float32),
+        tf.TensorSpec(shape=(None, *IMG_SIZE), dtype=tf.int32)
+    )
+).prefetch(buffer_size=AUTOTUNE) # <-- Replaces workers/multiprocessing
+
+print("tf.data pipelines created successfully.")
+
+# El resto del código para cargar val_X y val_y en memoria permanece igual...
+
+# 4. Cargar datos de validación en memoria para la evaluación final
+print("Cargando datos de validación en memoria para evaluación final...")
+val_X, val_y = [], []
+val_aug = get_validation_augmentation(IMG_SIZE)
+for filename in tqdm(val_files, desc="Cargando validación"):
+    img = cv2.imread(os.path.join(img_dir_val, filename))
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    mask = cv2.imread(os.path.join(mask_dir_val, filename.rsplit('.', 1)[0] + '_mask.png'), cv2.IMREAD_GRAYSCALE)
+    
+    augmented = val_aug(image=img, mask=mask)
+    img_aug, mask_aug = augmented['image'], augmented['mask']
+    
+    val_X.append(img_aug.astype(np.float32) / 255.0)
+    val_y.append(mask_aug)
+
+val_X = np.array(val_X)
+val_y = np.array(val_y)
+print("Datos de validación cargados.")
+
+# =========================================================================================
+# === FIN DEL BLOQUE IMPLEMENTADO =========================================================
+# =========================================================================================
+
 
 # -------------------------------------------------------------------------------
 # 4) ASPP mejorado (CAMBIO #8)
@@ -439,7 +648,7 @@ def distance_band(mask, n):
 
 def build_model(shape=(256, 256, 3), num_classes=1):
     backbone = EfficientNetV2S(input_shape=shape, num_classes=0,
-                                     pretrained='imagenet', include_preprocessing=False)
+                                         pretrained='imagenet', include_preprocessing=False)
     for layer in backbone.layers:
         if isinstance(layer, (Conv2D, SeparableConv2D)):
             layer.kernel_regularizer = tf.keras.regularizers.l2(2e-4)
@@ -581,23 +790,17 @@ class MeanIoU(tf.keras.metrics.Metric):
         self.total_cm.assign(tf.zeros_like(self.total_cm))
 
 # -------------------------------------------------------------------------------
-# 7) Entrenamiento por fases (AHORA CON EL NUEVO MODELO)
+# 7) Entrenamiento por fases (CON DataGenerators Y MULTIPROCESAMIENTO)
 # -------------------------------------------------------------------------------
 checkpoint_dir = 'checkpoints'
 os.makedirs(checkpoint_dir, exist_ok=True)
-
-val_gen = tf.data.Dataset.from_tensor_slices((val_X,val_y))\
-    .batch(8)\
-    .map(lambda x,y: (tf.image.random_flip_left_right(x), y),
-         num_parallel_calls=tf.data.AUTOTUNE)\
-    .prefetch(tf.data.AUTOTUNE)
 
 device = '/GPU:0' if gpus else '/CPU:0'
 
 with tf.device(device):
     # --- INICIO DE LA IMPLEMENTACIÓN ---
-    # En lugar de UncertaintyModel, instanciamos IoUOptimizedModel
-    iou_aware_model = IoUOptimizedModel(shape=train_X.shape[1:], num_classes=num_classes)
+    # Instanciamos IoUOptimizedModel
+    iou_aware_model = IoUOptimizedModel(shape=(*IMG_SIZE, 3), num_classes=num_classes)
     
     # Referencias al modelo interno y al backbone para compatibilidad
     model = iou_aware_model.seg_model
@@ -627,11 +830,18 @@ with tf.device(device):
             save_best_only=True,
             save_weights_only=True,
             monitor=MONITOR_METRIC, mode='max'),
-        LearningRateScheduler(one_cycle_lr),
+        LearningRateScheduler(lambda ep, lr: one_cycle_lr(ep, lr, max_epochs=20)),
         ReduceLROnPlateau(MONITOR_METRIC,mode='max',factor=0.5,patience=5,min_lr=1e-7)
     ]
-    iou_aware_model.fit(train_X,train_y, batch_size=12, epochs=20,
-                        validation_data=val_gen, callbacks=cbs1)
+    
+    # Usamos los generadores y activamos el multiprocesamiento
+    iou_aware_model.fit(
+        train_ds,  # <--- Pass the tf.data.Dataset object
+        epochs=20,
+        validation_data=val_ds, # <--- Pass the tf.data.Dataset object
+        callbacks=cbs1
+        # NO workers or use_multiprocessing arguments needed
+    )
     
     print(f"Cargando pesos de la fase 1 desde: {ckpt1_path}")
     iou_aware_model.load_weights(ckpt1_path)
@@ -656,8 +866,13 @@ with tf.device(device):
         TensorBoard(log_dir='./logs/phase2_finetune'),
         ReduceLROnPlateau(MONITOR_METRIC,mode='max',factor=0.6,patience=6,min_lr=1e-8)
     ]
-    iou_aware_model.fit(train_X,train_y, batch_size=6, epochs=20,
-                        validation_data=val_gen, callbacks=cbs2)
+    iou_aware_model.fit(
+        train_ds,  # <--- Pass the tf.data.Dataset object
+        epochs=20,
+        validation_data=val_ds, # <--- Pass the tf.data.Dataset object
+        callbacks=cbs1
+        # NO workers or use_multiprocessing arguments needed
+    )
 
     print(f"Cargando pesos de la fase 2 desde: {ckpt2_path}")
     iou_aware_model.load_weights(ckpt2_path)
@@ -678,8 +893,13 @@ with tf.device(device):
         TensorBoard(log_dir='./logs/phase3_full'),
         ReduceLROnPlateau(MONITOR_METRIC,mode='max',factor=0.6,patience=8,min_lr=1e-9)
     ]
-    iou_aware_model.fit(train_X,train_y, batch_size=4, epochs=20,
-                        validation_data=val_gen, callbacks=cbs3)
+    iou_aware_model.fit(
+        train_ds,  # <--- Pass the tf.data.Dataset object
+        epochs=20,
+        validation_data=val_ds, # <--- Pass the tf.data.Dataset object
+        callbacks=cbs1
+        # NO workers or use_multiprocessing arguments needed
+    )
     
     print(f"Cargando pesos finales desde: {ckpt3_path}")
     iou_aware_model.load_weights(ckpt3_path)
@@ -771,7 +991,6 @@ print(f"Cargando el mejor modelo final desde '{final_model_path}' para la evalua
 
 if os.path.exists(final_model_path):
     # Usamos el modelo interno (seg_model) del contenedor para la evaluación
-    # --- CAMBIO REALIZADO AQUÍ ---
     eval_model = iou_aware_model.seg_model
     
     print("\n--- Evaluación Estándar ---")
