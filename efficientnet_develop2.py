@@ -40,7 +40,8 @@ import cv2  # Ahora cv2 se importa DESPUÉS de TensorFlow
 from tqdm import tqdm
 import albumentations as A
 from tensorflow import keras
-from tensorflow.keras import layers, backend as K
+from tensorflow.keras import layers
+from tensorflow.keras import backend as K
 from tensorflow.keras.layers import (
     Input, Conv2D, SeparableConv2D, Conv2DTranspose,
     BatchNormalization, Activation, Dropout,
