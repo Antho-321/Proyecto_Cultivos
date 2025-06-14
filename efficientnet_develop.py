@@ -54,7 +54,6 @@ from tensorflow.keras.callbacks import (
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
 import matplotlib.pyplot as plt
 from iou_por_clase import print_class_iou
-import numpy as np
 
 # -------------------------------------------------------------------------------
 # Monkey-patch para usar un Lambda layer en SE module de keras_efficientnet_v2
@@ -520,61 +519,61 @@ with tf.device(device):
     
     MONITOR_METRIC = 'val_enhanced_mean_iou'
     
-    # --- Fase 1: entrenar cabeza ---
-    print("\n--- Fase 1: Entrenando solo el decoder (backbone congelado) ---")
-    backbone.trainable = False
+    # # --- Fase 1: entrenar cabeza ---
+    # print("\n--- Fase 1: Entrenando solo el decoder (backbone congelado) ---")
+    # backbone.trainable = False
     
-    iou_aware_model.compile(optimizer=tf.keras.optimizers.AdamW(5e-4, weight_decay=1e-4))
+    # iou_aware_model.compile(optimizer=tf.keras.optimizers.AdamW(5e-4, weight_decay=1e-4))
     
-    cbs1 = [
-        ModelCheckpoint(ckpt1_path, save_best_only=True, monitor=MONITOR_METRIC, mode='max', verbose=1),
-        EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=10, restore_best_weights=False),
-        TensorBoard(log_dir='./logs/iou_phase1_head', update_freq='epoch')
-    ]
+    # cbs1 = [
+    #     ModelCheckpoint(ckpt1_path, save_best_only=True, monitor=MONITOR_METRIC, mode='max', verbose=1),
+    #     EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=10, restore_best_weights=False),
+    #     TensorBoard(log_dir='./logs/iou_phase1_head', update_freq='epoch')
+    # ]
     
-    iou_aware_model.fit(train_X, train_y, batch_size=12, epochs=5,
-                        validation_data=val_gen, callbacks=cbs1)
+    # iou_aware_model.fit(train_X, train_y, batch_size=12, epochs=5,
+    #                     validation_data=val_gen, callbacks=cbs1)
     
-    print(f"Cargando mejores pesos de la fase 1 desde: {ckpt1_path}")
-    iou_aware_model.load_weights(ckpt1_path)
+    # print(f"Cargando mejores pesos de la fase 1 desde: {ckpt1_path}")
+    # iou_aware_model.load_weights(ckpt1_path)
 
-    # --- Fase 2: fine-tune parcial ---
-    print("\n--- Fase 2: Fine-tuning del 20% superior del backbone ---")
-    backbone.trainable = True
-    fine_tune_at = int(len(backbone.layers) * 0.80)
-    for layer in backbone.layers[:fine_tune_at]:
-        layer.trainable = False
+    # # --- Fase 2: fine-tune parcial ---
+    # print("\n--- Fase 2: Fine-tuning del 20% superior del backbone ---")
+    # backbone.trainable = True
+    # fine_tune_at = int(len(backbone.layers) * 0.80)
+    # for layer in backbone.layers[:fine_tune_at]:
+    #     layer.trainable = False
 
-    iou_aware_model.compile(optimizer=tf.keras.optimizers.AdamW(2e-5, weight_decay=1e-4))
+    # iou_aware_model.compile(optimizer=tf.keras.optimizers.AdamW(2e-5, weight_decay=1e-4))
     
-    cbs2 = [
-        ModelCheckpoint(ckpt2_path, save_best_only=True, monitor=MONITOR_METRIC, mode='max', verbose=1),
-        EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=12, restore_best_weights=False),
-        TensorBoard(log_dir='./logs/iou_phase2_partial', update_freq='epoch')
-    ]
+    # cbs2 = [
+    #     ModelCheckpoint(ckpt2_path, save_best_only=True, monitor=MONITOR_METRIC, mode='max', verbose=1),
+    #     EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=12, restore_best_weights=False),
+    #     TensorBoard(log_dir='./logs/iou_phase2_partial', update_freq='epoch')
+    # ]
 
-    iou_aware_model.fit(train_X, train_y, batch_size=6, epochs=5,
-                        validation_data=val_gen, callbacks=cbs2)
+    # iou_aware_model.fit(train_X, train_y, batch_size=6, epochs=5,
+    #                     validation_data=val_gen, callbacks=cbs2)
 
-    print(f"Cargando mejores pesos de la fase 2 desde: {ckpt2_path}")
-    iou_aware_model.load_weights(ckpt2_path)
+    # print(f"Cargando mejores pesos de la fase 2 desde: {ckpt2_path}")
+    # iou_aware_model.load_weights(ckpt2_path)
 
-    # --- Fase 3: full fine-tune ---
-    print("\n--- Fase 3: Fine-tuning de todo el modelo (backbone + decoder) ---")
-    for layer in backbone.layers:
-        layer.trainable = True
+    # # --- Fase 3: full fine-tune ---
+    # print("\n--- Fase 3: Fine-tuning de todo el modelo (backbone + decoder) ---")
+    # for layer in backbone.layers:
+    #     layer.trainable = True
         
-    iou_aware_model.compile(optimizer=tf.keras.optimizers.AdamW(5e-6, weight_decay=5e-5))
+    # iou_aware_model.compile(optimizer=tf.keras.optimizers.AdamW(5e-6, weight_decay=5e-5))
     
-    cbs3 = [
-        ModelCheckpoint(ckpt3_path, save_best_only=True, monitor=MONITOR_METRIC, mode='max', verbose=1),
-        EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=15, restore_best_weights=False),
-        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1),
-        TensorBoard(log_dir='./logs/iou_phase3_full', update_freq='epoch')
-    ]
+    # cbs3 = [
+    #     ModelCheckpoint(ckpt3_path, save_best_only=True, monitor=MONITOR_METRIC, mode='max', verbose=1),
+    #     EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=15, restore_best_weights=False),
+    #     ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1),
+    #     TensorBoard(log_dir='./logs/iou_phase3_full', update_freq='epoch')
+    # ]
     
-    iou_aware_model.fit(train_X, train_y, batch_size=4, epochs=5,
-                        validation_data=val_gen, callbacks=cbs3)
+    # iou_aware_model.fit(train_X, train_y, batch_size=4, epochs=5,
+    #                     validation_data=val_gen, callbacks=cbs3)
     
     print(f"Cargando pesos finales desde: {ckpt3_path}")
     iou_aware_model.load_weights(ckpt3_path)

@@ -1,3 +1,4 @@
+import numpy as np
 def print_class_iou(model, X, y_true, class_names=None):
     """
     Calcula e imprime el Intersection over Union (IoU) por clase.
