@@ -389,5 +389,5 @@ if __name__ == "__main__":
         model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
         model.summary()
         print("\nIniciando entrenamiento de prueba...")
-        model.fit(X, y, epochs=1, batch_size=2)
+        model.fit(X, y, epochs=10, batch_size=2)
         print("Entrenamiento de prueba completado.")
