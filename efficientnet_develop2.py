@@ -222,51 +222,65 @@ class SwinTransformerBlock(tf.keras.layers.Layer):
 
     def call(self, x):
         H, W = self.input_resolution
-        B, L, C = tf.unstack(tf.shape(x))
+        
+        # --- FIX ---
+        # Obtenemos la longitud de la secuencia (L) de forma dinámica,
+        # pero usamos la dimensión de canales (C) que es estática y se
+        # definió como 'self.dim' en el constructor __init__.
+        # Esto evita pasar un tensor simbólico a la capa Reshape.
+        shape = tf.shape(x)
+        L = shape[1]
+        C = self.dim
+
         shortcut = x
         x = self.norm1(x)
+        
+        # Esta línea ahora es segura porque H, W, y C son enteros de Python.
         x = Reshape((H, W, C))(x)
 
-        # shift
-        if any(s>0 for s in self.shift_size):
+        # shift: Desplazamiento cíclico si es necesario (para SW-MSA)
+        if any(s > 0 for s in self.shift_size):
             ssH, ssW = self.shift_size
-            x = tf.roll(x, shift=[-ssH, -ssW], axis=[1,2])
+            x = tf.roll(x, shift=[-ssH, -ssW], axis=[1, 2])
 
-        # partition windows
+        # partition windows: Partición de la imagen en ventanas
         wsH, wsW = self.window_size
         x_windows = Lambda(
             lambda t: tf.reshape(
                 tf.transpose(
-                    tf.reshape(t, (-1, H//wsH, wsH, W//wsW, wsW, C)),
-                    (0,1,3,2,4,5)
+                    tf.reshape(t, (-1, H // wsH, wsH, W // wsW, wsW, C)),
+                    (0, 1, 3, 2, 4, 5)
                 ),
-                (-1, wsH*wsW, C)
+                (-1, wsH * wsW, C)
             )
         )(x)
 
-        # W-MSA or SW-MSA
+        # W-MSA or SW-MSA: Aplicación de la atención multi-cabeza en las ventanas
         attn_windows = self.attn(x_windows, mask=self.attn_mask)
 
-        # merge windows
+        # merge windows: Fusión de las ventanas para reconstruir la imagen
         x = Lambda(
             lambda t: tf.reshape(
                 tf.transpose(
-                    tf.reshape(t, (-1, H//wsH, W//wsW, wsH, wsW, C)),
-                    (0,1,3,2,4,5)
+                    tf.reshape(t, (-1, H // wsH, W // wsW, wsH, wsW, C)),
+                    (0, 1, 3, 2, 4, 5)
                 ),
                 (-1, H, W, C)
             )
         )(attn_windows)
 
-        # reverse shift
-        if any(s>0 for s in self.shift_size):
+        # reverse shift: Inversión del desplazamiento cíclico
+        if any(s > 0 for s in self.shift_size):
             ssH, ssW = self.shift_size
-            x = tf.roll(x, shift=[ssH, ssW], axis=[1,2])
+            x = tf.roll(x, shift=[ssH, ssW], axis=[1, 2])
 
+        # Aplanamos de nuevo a la forma (Batch, Secuencia, Canales)
         x = Reshape((L, C))(x)
-        # FFN
+        
+        # FFN: Conexión residual y red Feed-Forward
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
+        
         return x
 
 # --- 3) Componentes del modelo original (WASP, etc.) --------------------------
