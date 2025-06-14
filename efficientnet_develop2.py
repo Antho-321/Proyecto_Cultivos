@@ -314,21 +314,26 @@ def build_model(img_shape=(256, 256, 3), n_classes=2):
     x = Reshape((H, W, C))(x)
     x = WASP(x, 256, dilations=(2, 4, 6), use_gap=True, use_attention=True, name="WASP_Module")
 
-    # --- DECODIFICADOR (estilo U-Net) ---
+    # --- DECODIFICADOR (estilo U-Net) CORREGIDO ---
+    # x (salida de WASP) tiene forma (None, 16, 16, 256)
+
     # De 16x16 -> 32x32
-    x = Concatenate()([UpSampling2D()(x), s4])
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x) # x ahora es (32, 32, 256)
+    x = Concatenate()([x, s3]) # CORRECTO: Concatenar con s3 (32x32)
     x = conv_block(x, 128, 3); x = conv_block(x, 128, 3)
 
     # De 32x32 -> 64x64
-    x = Concatenate()([UpSampling2D()(x), s3])
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x) # x ahora es (64, 64, 128)
+    x = Concatenate()([x, s2]) # CORRECTO: Concatenar con s2 (64x64)
     x = conv_block(x, 64, 3);  x = conv_block(x, 64, 3)
 
     # De 64x64 -> 128x128
-    x = Concatenate()([UpSampling2D()(x), s2])
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x) # x ahora es (128, 128, 64)
+    x = Concatenate()([x, s1]) # CORRECTO: Concatenar con s1 (128x128)
     x = conv_block(x, 48, 3); x = conv_block(x, 48, 3)
 
     # De 128x128 -> 256x256
-    x = Concatenate()([UpSampling2D()(x), s1])
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x) # x ahora es (256, 256, 48)
     x = conv_block(x, 32, 3); x = conv_block(x, 32, 3)
     
     # Capa de salida final
