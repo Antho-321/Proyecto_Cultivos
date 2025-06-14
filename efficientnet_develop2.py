@@ -64,30 +64,7 @@ from lovasz_losses_tf import lovasz_softmax
 # Si no, se pueden instalar con:
 # pip install keras-efficientnet-v2
 # pip install git+https://github.com/bermanmaxim/LovaszSoftmax.git
-try:
-    import keras_efficientnet_v2.efficientnet_v2 as _efn2
-    from keras_efficientnet_v2 import EfficientNetV2S
-    
-    def patched_se_module(inputs, se_ratio=0.25, name=""):
-        data_format = K.image_data_format()
-        h_axis, w_axis = (1, 2) if data_format == 'channels_last' else (2, 3)
-        se = Lambda(lambda x: tf.reduce_mean(x, axis=[h_axis, w_axis], keepdims=True),
-                    name=name + "se_reduce_pool")(inputs)
-        channels = inputs.shape[-1]
-        reduced_filters = max(1, int(channels / se_ratio))
-        se = Conv2D(reduced_filters, 1, padding='same', name=name + "se_reduce_conv")(se)
-        se = Activation('swish', name=name + "se_reduce_act")(se)
-        se = Conv2D(channels, 1, padding='same', name=name + "se_expand_conv")(se)
-        se = Activation('sigmoid', name=name + "se_excite")(se)
-        return layers.Multiply(name=name + "se_excite_mul")([inputs, se])
-
-    _efn2.se_module = patched_se_module
-
-except ImportError as e:
-    print(f"Error al importar un módulo necesario: {e}")
-    print("Por favor, instala las dependencias: pip install keras-efficientnet-v2 tensorflow-addons")
-    # Definimos placeholders para que el script no falle inmediatamente
-    EfficientNetV2S = tf.keras.applications.EfficientNetV2S
+EfficientNetV2S = tf.keras.applications.EfficientNetV2S
 
 
 # --- 2) Definición de los componentes Swin Transformer -------------------------
