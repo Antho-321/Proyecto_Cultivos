@@ -10,7 +10,7 @@ directamente una pérdida combinada centrada en IoU.
 
 Correcciones implementadas:
 1. Se usa una longitud de secuencia estática en SwinTransformerBlock para evitar `OperatorNotAllowedInGraphError`.
-2. Se usa tf.constant para `relative_position_index` en WindowAttention para evitar `InvalidArgumentError` en GPU.
+2. Se fuerza la creación de la variable `relative_position_index` en la GPU para evitar `InvalidArgumentError`.
 """
 
 # --- 1) Imports ------------------------------------------------------------------
@@ -144,12 +144,27 @@ class WindowAttention(tf.keras.layers.Layer):
         rel_index = tf.reduce_sum(rel_coords, axis=-1)
 
         # --- SOLUCIÓN GPU: INICIO ---
-        # Usamos tf.constant en lugar de tf.Variable.
-        # Las constantes se copian al dispositivo de la operación (GPU),
-        # evitando un error de lectura de recursos entre dispositivos.
-        self.relative_position_index = tf.constant(
-            rel_index, dtype=tf.int32, name="relative_position_index"
-        )
+        # Forzamos la creación del peso (variable no entrenable) en la GPU
+        # para evitar un error de lectura de recursos entre dispositivos.
+        # Nota: Esto asume que se está entrenando en /GPU:0 y fallará si no hay GPU.
+        # Una solución más robusta usaría el método build() de la capa.
+        if gpus:
+            with tf.device('/GPU:0'):
+                self.relative_position_index = self.add_weight(
+                    shape=rel_index.shape,
+                    dtype=tf.int32,
+                    trainable=False,
+                    initializer=tf.constant_initializer(rel_index),
+                    name='relative_position_index'
+                )
+        else:
+             self.relative_position_index = self.add_weight(
+                    shape=rel_index.shape,
+                    dtype=tf.int32,
+                    trainable=False,
+                    initializer=tf.constant_initializer(rel_index),
+                    name='relative_position_index'
+                )
         # --- SOLUCIÓN GPU: FIN ---
 
     def call(self, x, mask=None):
