@@ -123,7 +123,7 @@ def load_dataset(img_dir, mask_dir, target_size=(256,256), augment=False):
                 print(f"No se encontró la máscara para: {image_filename}")
 
     # Convertimos YA aquí en arrays y devolvemos
-    images = np.array(images)     # shape (N, H, W, C)
+    images = np.array(images)    # shape (N, H, W, C)
     masks  = np.array(masks)      # shape (N, H, W)
     return images, masks
 
@@ -133,8 +133,8 @@ def calculate_class_weights(masks: Union[np.ndarray, List[np.ndarray]], verbose:
 
     Args:
         masks (np.ndarray or list of np.ndarray): Máscara o lista de máscaras de segmentación 
-                                                  con forma (H, W) o (N, H, W).
-                                                  Los valores son los índices de clase.
+                                                     con forma (H, W) o (N, H, W).
+                                                     Los valores son los índices de clase.
         verbose (bool): Si es True, imprime un resumen de los pesos calculados.
 
     Returns:
@@ -190,6 +190,19 @@ weights_dict_silent = calculate_class_weights(train_y, verbose=False)
 
 # 6) Definición del Modelo (Arquitectura) ------------------------------------
 
+class ResizeLike(layers.Layer):
+    """Capa personalizada para redimensionar un tensor al tamaño de otro."""
+    def call(self, inputs):
+        src, tgt = inputs
+        # Redimensiona 'src' para que coincida con la altura y anchura de 'tgt'
+        return tf.image.resize(src, tf.shape(tgt)[1:3], method='bilinear')
+
+    def compute_output_shape(self, shapes):
+        src_shape, tgt_shape = shapes
+        # El batch size y los canales de salida provienen de 'src_shape'
+        # La altura y anchura de salida provienen de 'tgt_shape'
+        return (src_shape[0], tgt_shape[1], tgt_shape[2], src_shape[3])
+
 def SqueezeAndExcitation(tensor, ratio=16, name="se"):
     """Bloque de atención Squeeze-and-Excitation (SE)."""
     filters = tensor.shape[-1]
@@ -202,14 +215,14 @@ def SqueezeAndExcitation(tensor, ratio=16, name="se"):
     return se
 
 
-def conv_block(x, filters, kernel_size, strides=1, padding='same', dilation_rate=1): # <-- Add dilation_rate here
+def conv_block(x, filters, kernel_size, strides=1, padding='same', dilation_rate=1):
     """Un bloque convolucional que soporta dilatación, con Conv2D, BatchNorm y Swish."""
     x = Conv2D(
         filters, 
         kernel_size, 
         strides=strides, 
         padding=padding, 
-        dilation_rate=dilation_rate, # <-- Pass it to Conv2D
+        dilation_rate=dilation_rate, 
         use_bias=False
     )(x)
     x = BatchNormalization()(x)
@@ -225,29 +238,6 @@ def WASP(x,
          name="WASP"):
     """
     Waterfall Atrous Spatial Pooling.
-    
-    Args
-    ----
-    x : 4-D tensor
-        Entrada (feature map) de forma (B, H, W, C).
-    out_channels : int
-        Nº de filtros en cada rama convolucional.
-    dilation_rates : iterable[int]
-        Tasas de dilatación (p.e. (2,4,6)). Se aplican en cascada:  
-        cada rama recibe la salida de la anterior (“waterfall”).
-    use_global_pool : bool
-        Añade rama de pooling global + 1×1 conv (estilo ASPP).
-    anti_gridding : bool
-        Si r > 1, aplica DepthwiseConv 3×3 extra para suavizar artefactos.
-    use_attention : bool
-        Aplica un bloque SE al tensor fusionado.
-    name : str
-        Prefijo para los nombres de capa.
-    
-    Returns
-    -------
-    y : 4-D tensor
-        Mapa de características fusionado.
     """
     convs = []
 
@@ -266,7 +256,6 @@ def WASP(x,
         branch = layers.BatchNormalization(name=f"{name}_bn_d{r}")(branch)
         branch = layers.Activation("relu", name=f"{name}_relu_d{r}")(branch)
 
-        # Anti-gridding (opcional) — Depthwise 3×3
         if anti_gridding and r > 1:
             branch = layers.DepthwiseConv2D(3, padding="same", use_bias=False,
                                             name=f"{name}_ag_dw{r}")(branch)
@@ -283,10 +272,8 @@ def WASP(x,
                            name=f"{name}_gp_conv")(gp)
         gp = layers.BatchNormalization(name=f"{name}_gp_bn")(gp)
         gp = layers.Activation("relu", name=f"{name}_gp_relu")(gp)
-        # Redimensiona al tamaño espacial de `x`
-        gp = layers.Lambda(lambda t: tf.image.resize(
-                t[0], tf.shape(t[1])[1:3], method="bilinear"),
-                name=f"{name}_gp_resize")([gp, x])
+        # Redimensiona al tamaño espacial de `x` usando la nueva capa
+        gp = ResizeLike(name=f"{name}_gp_resize")([gp, x])
         convs.append(gp)
 
     # 3) Fusión por concatenación + 1×1 conv
@@ -341,37 +328,34 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
         use_global_pool=True, anti_gridding=True, use_attention=True, name="WASP"
     )
 
-    # --- Decodificador estilo U-Net con redimensionamiento dinámico ---
-    def resize_like(source, target):
-        """Redimensiona `source` para que coincida con el tamaño espacial de `target`."""
-        return tf.image.resize(source, size=tf.shape(target)[1:3], method='bilinear')
-
+    # --- Decodificador estilo U-Net con redimensionamiento usando ResizeLike ---
+    
     # Bloque 1: -> 16x16 (aprox)
-    x = Lambda(resize_like, arguments={'target': s4})(x)
+    x = ResizeLike()([x, s4])
     x = Concatenate()([x, s4])
     x = conv_block(x, filters=128, kernel_size=3)
     x = conv_block(x, filters=128, kernel_size=3)
 
     # Bloque 2: -> 32x32 (aprox)
-    x = Lambda(resize_like, arguments={'target': s3})(x)
+    x = ResizeLike()([x, s3])
     x = Concatenate()([x, s3])
     x = conv_block(x, filters=64, kernel_size=3)
     x = conv_block(x, filters=64, kernel_size=3)
 
     # Bloque 3: -> 64x64 (aprox)
-    x = Lambda(resize_like, arguments={'target': s2})(x)
+    x = ResizeLike()([x, s2])
     x = Concatenate()([x, s2])
     x = conv_block(x, filters=48, kernel_size=3)
     x = conv_block(x, filters=48, kernel_size=3)
 
     # Bloque 4: -> 128x128 (aprox)
-    x = Lambda(resize_like, arguments={'target': s1})(x)
+    x = ResizeLike()([x, s1])
     x = Concatenate()([x, s1])
     x = conv_block(x, filters=32, kernel_size=3)
     x = conv_block(x, filters=32, kernel_size=3)
 
     # Upsampling final a la resolución de entrada
-    x = Lambda(resize_like, arguments={'target': inp})(x)
+    x = ResizeLike()([x, inp])
 
     out = Conv2D(
         num_classes_arg, kernel_size=1, padding='same',
@@ -404,7 +388,6 @@ def tversky_loss(y_true, y_pred, alpha=0.7, beta=0.3, smooth=1e-7):
     
     return 1.0 - tf.reduce_mean(tversky_index)
 
-# Replace your existing function with this one
 def adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0, smooth=1e-7):
     """
     Pérdida de bordes basada en el Dice score, calculado sobre el gradiente
@@ -414,10 +397,7 @@ def adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0, smooth=1e
     y_true_one_hot = tf.one_hot(tf.cast(y_true, tf.int32), depth=num_classes, axis=-1)
     y_pred_probs = tf.nn.softmax(y_pred, axis=-1)
 
-    # Usar max_pool2d para aproximar la dilatación (XLA-friendly)
     y_true_dilated = tf.nn.max_pool2d(y_true_one_hot, ksize=3, strides=1, padding='SAME')
-    
-    # Usar max_pool2d con input negado para aproximar la erosión (XLA-friendly)
     y_true_eroded = -tf.nn.max_pool2d(-y_true_one_hot, ksize=3, strides=1, padding='SAME')
 
     y_true_boundary = y_true_dilated - y_true_eroded
@@ -542,8 +522,6 @@ with tf.device(device):
     iou_aware_model = IoUOptimizedModel(shape=train_X.shape[1:], num_classes=num_classes)
     
     # 2. Add this line to explicitly build the model
-    # The input shape is (batch_size, height, width, channels). We use None for the batch size
-    # to indicate it can be flexible.
     iou_aware_model.build(input_shape=(None, *train_X.shape[1:]))
     
     # 3. Now the rest of your code will work as expected
@@ -619,98 +597,61 @@ with tf.device(device):
 # 10) Evaluación & visualización ----------------------------------------------
 print("\n--- Evaluación del modelo final en CPU/GPU disponible ---")
 
-# ==============================================================================
-# === PASO 1: AÑADE TU NUEVA FUNCIÓN AQUÍ =====================================
-# ==============================================================================
 def print_class_iou(model, X, y_true, class_names=None):
     """
     Calcula e imprime el Intersection over Union (IoU) por clase.
-
-    Parámetros
-    ----------
-    model : tf.keras.Model
-        Modelo de segmentación entrenado.
-    X : np.ndarray, shape (B, H, W, C)
-        Imágenes de entrada.
-    y_true : np.ndarray, shape (B, H, W)
-        Máscaras verdaderas con etiquetas de clase (0..num_classes-1).
-    class_names : list de str, opcional
-        Nombres para cada clase; si es None, se usan los índices 0..num_classes-1.
-
-    Retorna
-    -------
-    ious : list de float
-        IoU calculado para cada clase.
     """
     # 1. Predecir máscaras
     preds = model.predict(X)
     pred_labels = np.argmax(preds, axis=-1)  # shape (B, H, W)
 
     # 2. Número de clases
-    # Aseguramos que num_classes se base en el modelo y no solo en el batch de y_true
     num_classes = model.output.shape[-1]
     ious = []
     
-    # Si no se proveen nombres, crear una lista por defecto
     if class_names is None:
         class_names = [f"Clase {i}" for i in range(num_classes)]
     elif len(class_names) != num_classes:
         print(f"Advertencia: Se esperaban {num_classes} nombres de clase, pero se proporcionaron {len(class_names)}. Se usarán los índices.")
         class_names = [f"Clase {i}" for i in range(num_classes)]
 
-
     print("\n--- Reporte de Intersection over Union (IoU) por Clase ---")
     # 3. Calcular IoU por clase
     for cls in range(num_classes):
-        # máscaras binarias para la clase cls
         y_cls_true = (y_true == cls)
         y_cls_pred = (pred_labels == cls)
 
-        # intersección y unión
         intersection = np.logical_and(y_cls_true, y_cls_pred).sum()
         union = np.logical_or(y_cls_true, y_cls_pred).sum()
 
-        # evitar división por cero
         iou = intersection / union if union > 0 else np.nan
         ious.append(iou)
 
-        # nombre de la clase para imprimir
         label = class_names[cls]
         print(f"IoU {label}: {iou:.4f}")
 
-    # 4. Imprimir mean IoU (ignorando clases no presentes en la verdad terreno)
+    # 4. Imprimir mean IoU
     mean_iou = np.nanmean(ious)
     print(f"\nMean IoU (promedio de clases): {mean_iou:.4f}")
 
-    # 5. Calcular Pixel Accuracy (opcional, pero útil)
+    # 5. Calcular Pixel Accuracy
     pixel_accuracy = np.mean(pred_labels == y_true)
     print(f"Pixel Accuracy (todos los píxeles): {pixel_accuracy:.4f}")
 
     return ious
 
-# ==============================================================================
-# === PASO 2: LLAMA A TU NUEVA FUNCIÓN =========================================
-# ==============================================================================
+class_labels = [f"Clase {i}" for i in range(num_classes)] 
 
-# Define los nombres de tus clases. ¡El orden debe coincidir con los índices de las máscaras!
-# Ejemplo: si 0=fondo, 1=carro, 2=carretera...
-# El número de elementos debe ser igual a `num_classes`.
-class_labels = [f"Clase {i}" for i in range(num_classes)] # <-- ¡Personaliza esto!
-
-# Llama a la nueva función de evaluación en lugar de la antigua.
-# La función ahora imprime los resultados directamente.
 class_ious = print_class_iou(eval_model, val_X, val_y, class_names=class_labels)
 
-# La función visualize_predictions puede permanecer igual, ya que es independiente.
 def visualize_predictions(model_to_eval,X,y,num_samples=5):
     idxs = np.random.choice(len(X),num_samples,replace=False)
     preds = model_to_eval.predict(X[idxs])
     masks = np.argmax(preds,axis=-1)
-    # Asegúrate de que cmap se genere con el `num_classes` correcto
     cmap = plt.cm.get_cmap('tab10',num_classes)
     plt.figure(figsize=(12,4*num_samples))
     for i,ix in enumerate(idxs):
-        plt.subplot(num_samples,3,3*i+1); plt.imshow(X[ix]); plt.axis('off'); plt.title('Image')
+        plt.subplot(num_samples,3,3*i+1); plt.imshow(X[ix].astype('uint8')); plt.axis('off'); plt.title('Image')
         plt.subplot(num_samples,3,3*i+2); plt.imshow(y[ix],cmap=cmap,vmin=0,vmax=num_classes-1); plt.axis('off'); plt.title('GT Mask')
         plt.subplot(num_samples,3,3*i+3); plt.imshow(masks[i],cmap=cmap,vmin=0,vmax=num_classes-1); plt.axis('off'); plt.title('Pred Mask')
     plt.tight_layout()
