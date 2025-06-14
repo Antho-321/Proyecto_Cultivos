@@ -335,12 +335,14 @@ def build_model(img_shape=(256, 256, 3), n_classes=2):
 # --------------------------------------------------------------------------- #
 def tversky_loss(y_true, y_pred, n_classes, alpha=0.7, beta=0.3, smooth=1e-7):
     """Calcula la pérdida Tversky, útil para datasets desbalanceados."""
-    y_true_one_hot = tf.one_hot(tf.cast(y_true, tf.int32), depth=n_classes)
+    # y_true tiene forma (B, H, W), y_pred tiene forma (B, H, W, C)
+    y_true_one_hot = tf.one_hot(tf.cast(y_true, tf.int32), depth=n_classes, axis=-1)
     y_pred_probs = y_pred # La salida del modelo ya es softmax
 
-    tp = tf.reduce_sum(y_true_one_hot * y_pred_probs, axis=list(range(1, 4)))
-    fn = tf.reduce_sum(y_true_one_hot * (1 - y_pred_probs), axis=list(range(1, 4)))
-    fp = tf.reduce_sum((1 - y_true_one_hot) * y_pred_probs, axis=list(range(1, 4)))
+    # Sumar sobre los ejes espaciales (H, W)
+    tp = tf.reduce_sum(y_true_one_hot * y_pred_probs, axis=[1, 2])
+    fn = tf.reduce_sum(y_true_one_hot * (1 - y_pred_probs), axis=[1, 2])
+    fp = tf.reduce_sum((1 - y_true_one_hot) * y_pred_probs, axis=[1, 2])
     
     tversky_index = (tp + smooth) / (tp + alpha * fp + beta * fn + smooth)
     return 1.0 - tf.reduce_mean(tversky_index)
@@ -349,8 +351,8 @@ def tversky_loss(y_true, y_pred, n_classes, alpha=0.7, beta=0.3, smooth=1e-7):
 def ultimate_iou_loss(y_true, y_pred, n_classes):
     """Pérdida combinada para optimizar IoU: 60% Lovasz + 40% Tversky."""
     y_true_int = tf.cast(y_true, tf.int32)
-    # y_pred ya está en formato de logits o softmax, lovasz_softmax lo maneja
-    loss_lov = 0.6 * lovasz_softmax(y_pred, tf.squeeze(y_true_int, axis=-1))
+    # y_true ya está 'squeezed' (sin canal extra), por lo que no se necesita tf.squeeze aquí.
+    loss_lov = 0.6 * lovasz_softmax(y_pred, y_true_int)
     loss_tver = 0.4 * tversky_loss(y_true, y_pred, n_classes)
     return loss_lov + loss_tver
 
@@ -439,6 +441,7 @@ class ModeloConEntrenamientoPorFases(tf.keras.Model):
 # 7) CARGA DE DATOS Y AUMENTO
 # --------------------------------------------------------------------------- #
 def get_training_augmentation(size=256):
+    """Pipeline de aumento de datos más completa."""
     return A.Compose([
         A.RandomScale(scale_limit=0.2, p=0.5),
         A.PadIfNeeded(min_height=size, min_width=size, border_mode=cv2.BORDER_REFLECT),
@@ -446,9 +449,13 @@ def get_training_augmentation(size=256):
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
         A.RandomRotate90(p=0.5),
-        A.RandomBrightnessContrast(p=0.3),
+        A.Affine(translate_percent={'x': (-0.1, 0.1), 'y': (-0.1, 0.1)}, scale=(0.9,1.1), rotate=(-15,15), p=0.3),
+        A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.3),
+        A.RandomGamma(gamma_limit=(80,120), p=0.2),
+        A.GaussianBlur(blur_limit=3, p=0.1),
         A.GaussNoise(p=0.1),
-        A.CoarseDropout(max_holes=8, max_height=32, max_width=32, p=0.2),
+        A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=15, val_shift_limit=10, p=0.2),
+        A.CoarseDropout(max_holes=8, max_height=32, max_width=32, min_holes=1, min_height=16, min_width=16, p=0.2),
     ])
 
 def load_dataset_concurrently(img_dir, mask_dir, target_size=(256, 256), augment=False):
@@ -489,6 +496,11 @@ def load_dataset_concurrently(img_dir, mask_dir, target_size=(256, 256), augment
 
     X = np.array(images, dtype='float32') / 255.0
     y = np.array(masks, dtype='int32')
+
+    # Eliminar la dimensión de canal de las máscaras para que tengan forma (B, H, W)
+    if y.shape[-1] == 1:
+        y = np.squeeze(y, axis=-1)
+
     return X, y
 
 
@@ -503,12 +515,11 @@ if __name__ == "__main__":
     EPOCHS_PHASE1 = 5
     EPOCHS_PHASE2 = 5
     
-    # --- Rutas a los datos (modificar según sea necesario) ---
-    # Se recomienda usar rutas absolutas para evitar problemas
-    TRAIN_IMG_DIR = 'data/train/images'
-    TRAIN_MASK_DIR = 'data/train/masks'
-    VAL_IMG_DIR = 'data/val/images'
-    VAL_MASK_DIR = 'data/val/masks'
+    # --- Rutas a los datos (apuntando a la carpeta 'Balanced') ---
+    TRAIN_IMG_DIR = 'Balanced/train/images'
+    TRAIN_MASK_DIR = 'Balanced/train/masks'
+    VAL_IMG_DIR = 'Balanced/val/images'
+    VAL_MASK_DIR = 'Balanced/val/masks'
 
     # --- Carga de datos ---
     print("Cargando datos de entrenamiento...")
@@ -519,7 +530,8 @@ if __name__ == "__main__":
     if train_X.size == 0 or val_X.size == 0:
         print("No se pudieron cargar los datos. Creando datos dummy para una prueba de ejecución.")
         train_X = np.random.rand(8, *IMG_SHAPE).astype('float32')
-        train_y = np.random.randint(0, 2, (8, IMG_SHAPE[0], IMG_SHAPE[1], 1)).astype('int32')
+        # Crear máscaras dummy con forma (B, H, W)
+        train_y = np.random.randint(0, 2, (8, IMG_SHAPE[0], IMG_SHAPE[1])).astype('int32')
         val_X, val_y = train_X, train_y
 
     N_CLASSES = int(np.max(train_y)) + 1
