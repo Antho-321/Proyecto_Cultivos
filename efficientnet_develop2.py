@@ -196,12 +196,15 @@ class SwinTransformerBlock(layers.Layer):
             self.attn_mask = None
 
     def call(self, x):
-        B, L, C = x.shape
+        # Obtener la forma dinámica para manejar el tamaño de lote 'None'
+        dynamic_shape = tf.shape(x)
+        B, L, C = dynamic_shape[0], dynamic_shape[1], dynamic_shape[2]
+        
         H, W = self.H, self.W
         shortcut = x
         
         x = self.norm1(x)
-        x = tf.reshape(x, (B, H, W, C))
+        x = tf.reshape(x, (B, H, W, C)) # Ahora B será un valor numérico en tiempo de ejecución
 
         if any(s > 0 for s in self.shift_size):
             x = tf.roll(x, shift=[-self.shift_size[0], -self.shift_size[1]], axis=[1, 2])
@@ -228,7 +231,8 @@ class SwinTransformerBlock(layers.Layer):
         if any(s > 0 for s in self.shift_size):
             x = tf.roll(x, shift=[self.shift_size[0], self.shift_size[1]], axis=[1, 2])
 
-        x = tf.reshape(x, (B, L, C))
+        # Al final del método, también asegúrate de que el reshape final use la B dinámica
+        x = tf.reshape(x, (B, L, C)) 
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
