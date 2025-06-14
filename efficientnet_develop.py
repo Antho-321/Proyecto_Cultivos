@@ -53,6 +53,7 @@ from tensorflow.keras.callbacks import (
 )
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
 import matplotlib.pyplot as plt
+from iou_por_clase import print_class_iou
 
 # -------------------------------------------------------------------------------
 # Monkey-patch para usar un Lambda layer en SE module de keras_efficientnet_v2
@@ -593,6 +594,13 @@ def evaluate_model(model_to_eval,X,y):
         union = np.sum(yt)+np.sum(yp)-inter
         ious.append(inter/union if union>0 else 0)
     return {'mean_iou':np.mean(ious),'class_ious':ious,'pixel_accuracy':np.mean(mask==y)}
+
+print("Calculando IoU por clase (usando índices como etiquetas):")
+class_ious = print_class_iou(
+    model=eval_model, 
+    X=val_X, 
+    y_true=val_y
+)
 
 metrics = evaluate_model(eval_model,val_X,val_y)
 print(f"Mean IoU: {metrics['mean_iou']:.4f}")
