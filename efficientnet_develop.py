@@ -59,7 +59,7 @@ import matplotlib.pyplot as plt
 # -------------------------------------------------------------------------------
 import keras_efficientnet_v2.efficientnet_v2 as _efn2
 from lovasz_losses_tf import lovasz_softmax
-from typing import Union, List, Dict
+from distribucion_por_clase import calculate_class_weights
 
 def patched_se_module(inputs, se_ratio=0.25, name=""):
     data_format = K.image_data_format()
@@ -99,118 +99,64 @@ def get_validation_augmentation():
     return A.Compose([])
 
 # 3) Data loading -------------------------------------------------------------
-def load_dataset(img_dir, mask_dir, target_size=(256,256), augment=False):
-    images = []
-    masks  = []
-
-    for image_filename in os.listdir(img_dir):
-        if image_filename.lower().endswith(('.jpg', '.png')):
-            # Cargar imagen
-            img_path = os.path.join(img_dir, image_filename)
-            img = load_img(img_path)
-            images.append(img_to_array(img))
-
-            # Cargar máscara asociada
-            name_wo_ext   = os.path.splitext(image_filename)[0]
-            mask_filename = f"{name_wo_ext}_mask.png"
-            mask_path     = os.path.join(mask_dir, mask_filename)
-
-            if os.path.exists(mask_path):
-                mask = load_img(
-                    mask_path,
-                    color_mode='grayscale',      # 1 canal
-                    target_size=target_size      # <-- muy recomendable para asegurar (H, W) idénticos a la imagen
-                )
-                m = img_to_array(mask).astype(np.int32)  # (H, W, 1)
-
-                # La llamada siguiente mantiene un único canal; en realidad, img_to_array ya lo da en (H, W, 1),
-                # así que podrías omitirla si quieres:
-                m = np.expand_dims(np.squeeze(m, -1), -1)
-
-                masks.append(m)                 # Sólo UNA versión de la máscara
-            else:
-                print(f"No se encontró la máscara para: {image_filename}")
-
-    # Convertimos YA aquí en arrays y devolvemos
-    images = np.array(images)    # shape (N, H, W, C)
-    masks  = np.array(masks)      # shape (N, H, W)
-    return images, masks
-
-def calculate_class_weights(masks: Union[np.ndarray, List[np.ndarray]], verbose: bool = True) -> Dict[int, float]:
-    """
-    Calcula los pesos de clase basados en la frecuencia inversa de los píxeles.
-
-    Args:
-        masks (np.ndarray or list of np.ndarray): Máscara o lista de máscaras de segmentación 
-                                                     con forma (H, W) o (N, H, W).
-                                                     Los valores son los índices de clase.
-        verbose (bool): Si es True, imprime un resumen de los pesos calculados.
-
-    Returns:
-        dict: Un diccionario donde las claves son los ID de clase y los valores son sus pesos.
-              Ej: {0: 1.2, 1: 0.8, 2: 3.5}
-    """
-    # Si es lista, convertimos a un único array de numpy
-    masks_arr = np.array(masks)  # Forma resultante: (N, H, W) o (H, W)
+def load_augmented_dataset(img_dir, mask_dir, target_size=(256,256), augment=False):
+    images, masks = [], []
+    files = [f for f in os.listdir(img_dir) if f.lower().endswith(('.jpg','.png'))]
+    aug = get_training_augmentation() if augment else get_validation_augmentation()
     
-    # Aplanamos el array para tener una lista 1D de todos los píxeles de clase
-    flat_pixels = masks_arr.flatten()
-    
-    # Contamos la aparición de cada clase
-    classes, counts = np.unique(flat_pixels, return_counts=True)
-    
-    # Determinamos el número total de clases (basado en el ID de clase más alto)
-    num_classes = int(flat_pixels.max()) + 1
-    total_pixels = flat_pixels.size
+    mask_target_size = (256, 256)
 
-    if verbose:
-        print("\n--- Pesos por clase (calculados por frecuencia inversa) ---")
+    with ThreadPoolExecutor() as exe:
+        futures = {exe.submit(lambda fn: (
+            img_to_array(load_img(os.path.join(img_dir,fn), target_size=target_size)),
+            img_to_array(load_img(os.path.join(mask_dir,fn.rsplit('.',1)[0] + '_mask.png'),
+                                  color_mode='grayscale', target_size=mask_target_size))
+        ), fn): fn for fn in files}
+        for future in tqdm(as_completed(futures), total=len(futures), desc=f"Loading {'train' if augment else 'val'} data"):
+            img_arr, mask_arr = future.result()
+            if augment:
+                augm = aug(image=img_arr.astype('uint8'), mask=mask_arr)
+                img_arr, mask_arr = augm['image'], augm['mask']
+            images.append(img_arr)
+            masks.append(mask_arr)
+            
+    X = np.array(images, dtype='float32') / 255.0
+    y = np.array(masks, dtype='int32')
 
-    weights = {}
-    # Calculamos el peso para las clases que sí aparecen en las máscaras
-    for cls, count in zip(classes, counts):
-        # Fórmula de peso: Inverso de la frecuencia de la clase
-        weight = total_pixels / (num_classes * count)
-        weights[int(cls)] = weight
-        if verbose:
-            percentage = (count / total_pixels) * 100
-            print(f"Clase {cls}: peso = {weight:.4f} ({count} píxeles, {percentage:.2f}%)")
-
-    # Asignamos peso 0 a las clases que no aparecen en ninguna máscara
-    present_classes = set(classes)
-    all_possible_classes = set(range(num_classes))
-    missing_classes = all_possible_classes - present_classes
-    
-    for cls in missing_classes:
-        weights[cls] = 0.0
-        if verbose:
-            print(f"Clase {cls}: peso = 0.0000 (clase ausente)")
-
-    return weights
+    if y.shape[-1] == 1:
+        y = np.squeeze(y, axis=-1)
+        
+    return X, y
 
 # 4) Load / split ------------------------------------------------------------
-train_X, train_y = load_dataset('Balanced/train/images', 'Balanced/train/masks', target_size=(256, 256), augment=True)
-val_X,   val_y   = load_dataset('Balanced/val/images',   'Balanced/val/masks',   target_size=(256, 256), augment=False)
+train_X, train_y = load_augmented_dataset('Balanced/train/images', 'Balanced/train/masks', target_size=(256, 256), augment=True)
+val_X,   val_y   = load_augmented_dataset('Balanced/val/images',   'Balanced/val/masks',   target_size=(256, 256), augment=False)
+
+weights_dict_silent = calculate_class_weights(train_y, verbose=False)
 
 # 5) Número de clases & modelo ----------------------------------------------
 num_classes = int(np.max(train_y) + 1)
 print(f"\nNúmero de clases detectado: {num_classes}")
-weights_dict_silent = calculate_class_weights(train_y, verbose=False)
+
+def focal_loss(alpha=None, gamma=2.0):
+    def loss(y_true, y_pred):
+        y_true = tf.cast(y_true[...,0], tf.int32)
+        y_true_oh = tf.one_hot(y_true, depth=y_pred.shape[-1])
+        p_t = tf.reduce_sum(y_true_oh * y_pred, axis=-1) + 1e-7
+        modulating_factor = tf.pow(1.0 - p_t, gamma)
+        if alpha is not None:
+            alpha_t = tf.reduce_sum(y_true_oh * tf.constant(alpha, dtype=tf.float32), axis=-1)
+        else:
+            alpha_t = 1.0
+        loss = -alpha_t * modulating_factor * tf.math.log(p_t)
+        return tf.reduce_mean(loss)
+    return loss
+
+def weighted_focal_loss(class_weights, gamma=2.0):
+    alpha = [class_weights[i] for i in sorted(class_weights)]
+    return focal_loss(alpha=alpha, gamma=gamma)
 
 # 6) Definición del Modelo (Arquitectura) ------------------------------------
-
-class ResizeLike(layers.Layer):
-    """Capa personalizada para redimensionar un tensor al tamaño de otro."""
-    def call(self, inputs):
-        src, tgt = inputs
-        # Redimensiona 'src' para que coincida con la altura y anchura de 'tgt'
-        return tf.image.resize(src, tf.shape(tgt)[1:3], method='bilinear')
-
-    def compute_output_shape(self, shapes):
-        src_shape, tgt_shape = shapes
-        # El batch size y los canales de salida provienen de 'src_shape'
-        # La altura y anchura de salida provienen de 'tgt_shape'
-        return (src_shape[0], tgt_shape[1], tgt_shape[2], src_shape[3])
 
 def SqueezeAndExcitation(tensor, ratio=16, name="se"):
     """Bloque de atención Squeeze-and-Excitation (SE)."""
@@ -224,14 +170,14 @@ def SqueezeAndExcitation(tensor, ratio=16, name="se"):
     return se
 
 
-def conv_block(x, filters, kernel_size, strides=1, padding='same', dilation_rate=1):
+def conv_block(x, filters, kernel_size, strides=1, padding='same', dilation_rate=1): # <-- Add dilation_rate here
     """Un bloque convolucional que soporta dilatación, con Conv2D, BatchNorm y Swish."""
     x = Conv2D(
         filters, 
         kernel_size, 
         strides=strides, 
         padding=padding, 
-        dilation_rate=dilation_rate, 
+        dilation_rate=dilation_rate, # <-- Pass it to Conv2D
         use_bias=False
     )(x)
     x = BatchNormalization()(x)
@@ -247,6 +193,29 @@ def WASP(x,
          name="WASP"):
     """
     Waterfall Atrous Spatial Pooling.
+    
+    Args
+    ----
+    x : 4-D tensor
+        Entrada (feature map) de forma (B, H, W, C).
+    out_channels : int
+        Nº de filtros en cada rama convolucional.
+    dilation_rates : iterable[int]
+        Tasas de dilatación (p.e. (2,4,6)). Se aplican en cascada:  
+        cada rama recibe la salida de la anterior (“waterfall”).
+    use_global_pool : bool
+        Añade rama de pooling global + 1×1 conv (estilo ASPP).
+    anti_gridding : bool
+        Si r > 1, aplica DepthwiseConv 3×3 extra para suavizar artefactos.
+    use_attention : bool
+        Aplica un bloque SE al tensor fusionado.
+    name : str
+        Prefijo para los nombres de capa.
+    
+    Returns
+    -------
+    y : 4-D tensor
+        Mapa de características fusionado.
     """
     convs = []
 
@@ -265,6 +234,7 @@ def WASP(x,
         branch = layers.BatchNormalization(name=f"{name}_bn_d{r}")(branch)
         branch = layers.Activation("relu", name=f"{name}_relu_d{r}")(branch)
 
+        # Anti-gridding (opcional) — Depthwise 3×3
         if anti_gridding and r > 1:
             branch = layers.DepthwiseConv2D(3, padding="same", use_bias=False,
                                             name=f"{name}_ag_dw{r}")(branch)
@@ -281,8 +251,10 @@ def WASP(x,
                            name=f"{name}_gp_conv")(gp)
         gp = layers.BatchNormalization(name=f"{name}_gp_bn")(gp)
         gp = layers.Activation("relu", name=f"{name}_gp_relu")(gp)
-        # Redimensiona al tamaño espacial de `x` usando la nueva capa
-        gp = ResizeLike(name=f"{name}_gp_resize")([gp, x])
+        # Redimensiona al tamaño espacial de `x`
+        gp = layers.Lambda(lambda t: tf.image.resize(
+                t[0], tf.shape(t[1])[1:3], method="bilinear"),
+                name=f"{name}_gp_resize")([gp, x])
         convs.append(gp)
 
     # 3) Fusión por concatenación + 1×1 conv
@@ -300,78 +272,84 @@ def WASP(x,
 
 def build_model(shape=(256, 256, 3), num_classes_arg=None):
     """
-    Construye un modelo DeepLabV3+-like con EfficientNetV2S de backbone
-    y decodificador tipo U-Net, buscando las skip-connections de forma segura.
+    Construye un modelo de segmentación con un backbone EfficientNetV2S
+    y un decodificador tipo U-Net que usa una búsqueda dinámica de capas
+    y un ASPP_mejorado.
     """
-    backbone = EfficientNetV2S(
+    # --- Definición del backbone ---
+    backbone = EfficientNetV2S(  # Remove tf.keras.applications.
         input_shape=shape,
         num_classes=0,
         pretrained='imagenet',
         include_preprocessing=False
     )
-    _ = backbone(tf.zeros((1, *shape)))
+
+    # --- Extracción dinámica de las skip connections ---
     inp = backbone.input
-    bottleneck = backbone.get_layer('post_swish').output
+    bottleneck = backbone.get_layer('post_swish').output  # Salida del encoder, 8x8
 
-    def _safe_int(x):
-        try:
-            return int(x)
-        except (ValueError, TypeError):
-            return None
+    s1, s2, s3, s4 = None, None, None, None
 
-    s1 = s2 = s3 = s4 = None
+    # Búsqueda hacia atrás para encontrar las últimas capas 'add' de cada tamaño
     for layer in reversed(backbone.layers):
-        h = _safe_int(layer.output.shape[1])
-        if h is None:
-            continue
-        if h == 128 and s1 is None: s1 = layer.output
-        elif h == 64 and s2 is None:  s2 = layer.output
-        elif h == 32 and s3 is None:  s3 = layer.output
-        elif h == 16 and s4 is None:  s4 = layer.output
-
-    if any(skip is None for skip in [s1, s2, s3, s4]):
-        raise ValueError("No se pudieron encontrar todas las capas de skip connection requeridas.")
-
-    x = WASP(
-        bottleneck, out_channels=256, dilation_rates=(2, 4, 6),
-        use_global_pool=True, anti_gridding=True, use_attention=True, name="WASP"
-    )
-
-    # --- Decodificador estilo U-Net con redimensionamiento usando ResizeLike ---
+        if 'add' in layer.name:
+            shape = layer.output.shape[1]
+            if shape == 128 and s1 is None:
+                s1 = layer.output  # 128x128
+            elif shape == 64 and s2 is None:
+                s2 = layer.output  # 64x64
+            elif shape == 32 and s3 is None:
+                s3 = layer.output  # 32x32
+            elif shape == 16 and s4 is None:
+                s4 = layer.output  # 16x16
     
-    # Bloque 1: -> 16x16 (aprox)
-    x = ResizeLike()([x, s4])
-    x = Concatenate()([x, s4])
+    # Verificar que todas las capas fueron encontradas
+    if any(s is None for s in [s1, s2, s3, s4]):
+        raise ValueError("No se pudieron encontrar todas las capas de skip connection requeridas.")
+        
+    # --- Cuello de botella con ASPP Mejorado ---
+    # Se aplican tasas de dilatación pequeñas, adecuadas para el mapa de 8x8
+    x = WASP(bottleneck,
+         out_channels=256,
+         dilation_rates=(2, 4, 6),
+         use_global_pool=True,
+         anti_gridding=True,
+         use_attention=True,
+         name="WASP")
+
+    # --- Rama del decodificador (Upsampling con lógica U-Net) ---
+
+    # Bloque 1: De 8x8 a 16x16
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    x = Concatenate()([x, s4]) # Concatenar con la skip connection de 16x16
     x = conv_block(x, filters=128, kernel_size=3)
     x = conv_block(x, filters=128, kernel_size=3)
 
-    # Bloque 2: -> 32x32 (aprox)
-    x = ResizeLike()([x, s3])
-    x = Concatenate()([x, s3])
+    # Bloque 2: De 16x16 a 32x32
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    x = Concatenate()([x, s3]) # Concatenar con la skip connection de 32x32
     x = conv_block(x, filters=64, kernel_size=3)
     x = conv_block(x, filters=64, kernel_size=3)
 
-    # Bloque 3: -> 64x64 (aprox)
-    x = ResizeLike()([x, s2])
-    x = Concatenate()([x, s2])
+    # Bloque 3: De 32x32 a 64x64
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    x = Concatenate()([x, s2]) # Concatenar con la skip connection de 64x64
     x = conv_block(x, filters=48, kernel_size=3)
     x = conv_block(x, filters=48, kernel_size=3)
 
-    # Bloque 4: -> 128x128 (aprox)
-    x = ResizeLike()([x, s1])
-    x = Concatenate()([x, s1])
+    # Bloque 4: De 64x64 a 128x128
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    x = Concatenate()([x, s1]) # Concatenar con la skip connection de 128x128
     x = conv_block(x, filters=32, kernel_size=3)
     x = conv_block(x, filters=32, kernel_size=3)
 
-    # Upsampling final a la resolución de entrada
-    x = ResizeLike()([x, inp])
+    # Upsampling final para alcanzar la resolución de entrada (256x256)
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    
+    # Capa de salida
+    out = Conv2D(num_classes_arg, 1, padding='same', activation='softmax', dtype='float32')(x)
 
-    out = Conv2D(
-        num_classes_arg, kernel_size=1, padding='same',
-        activation='softmax', dtype='float32'
-    )(x)
-
-    return Model(inputs=inp, outputs=out), backbone
+    return Model(inp, out), backbone
 
 
 # 7) Pérdidas Mejoradas y Métricas Personalizadas ------------------------------
@@ -397,6 +375,7 @@ def tversky_loss(y_true, y_pred, alpha=0.7, beta=0.3, smooth=1e-7):
     
     return 1.0 - tf.reduce_mean(tversky_index)
 
+# Replace your existing function with this one
 def adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0, smooth=1e-7):
     """
     Pérdida de bordes basada en el Dice score, calculado sobre el gradiente
@@ -406,7 +385,10 @@ def adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0, smooth=1e
     y_true_one_hot = tf.one_hot(tf.cast(y_true, tf.int32), depth=num_classes, axis=-1)
     y_pred_probs = tf.nn.softmax(y_pred, axis=-1)
 
+    # Usar max_pool2d para aproximar la dilatación (XLA-friendly)
     y_true_dilated = tf.nn.max_pool2d(y_true_one_hot, ksize=3, strides=1, padding='SAME')
+    
+    # Usar max_pool2d con input negado para aproximar la erosión (XLA-friendly)
     y_true_eroded = -tf.nn.max_pool2d(-y_true_one_hot, ksize=3, strides=1, padding='SAME')
 
     y_true_boundary = y_true_dilated - y_true_eroded
@@ -421,23 +403,15 @@ def adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0, smooth=1e
     dice_score = (2. * intersection + smooth) / (union + smooth)
     return 1.0 - dice_score
 
-def focal_loss(alpha=None, gamma=2.0):
-    def loss(y_true, y_pred):
-        y_true = tf.cast(y_true[...,0], tf.int32)
-        y_true_oh = tf.one_hot(y_true, depth=y_pred.shape[-1])
-        p_t = tf.reduce_sum(y_true_oh * y_pred, axis=-1) + 1e-7
-        modulating_factor = tf.pow(1.0 - p_t, gamma)
-        if alpha is not None:
-            alpha_t = tf.reduce_sum(y_true_oh * tf.constant(alpha, dtype=tf.float32), axis=-1)
-        else:
-            alpha_t = 1.0
-        loss = -alpha_t * modulating_factor * tf.math.log(p_t)
-        return tf.reduce_mean(loss)
-    return loss
-
-def weighted_focal_loss(class_weights, gamma=2.0):
-    alpha = [class_weights[i] for i in sorted(class_weights)]
-    return focal_loss(alpha=alpha, gamma=gamma)
+def ultimate_iou_loss(y_true, y_pred):
+    """
+    Pérdida combinada que optimiza directamente IoU y los bordes.
+    """
+    lov = 0.50 * lovasz_softmax(y_pred, tf.cast(y_true, tf.int32), per_image=True)
+    abe_dice = 0.30 * adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0)
+    tver = 0.20 * tversky_loss(y_true, y_pred, alpha=0.4, beta=0.6) # beta > alpha penaliza más los FNs
+    
+    return lov + abe_dice + tver
 
 class MeanIoU(tf.keras.metrics.Metric):
     def __init__(self,num_classes,name='mean_iou',**kwargs):
@@ -468,49 +442,41 @@ class MeanIoU(tf.keras.metrics.Metric):
     def reset_states(self):
         self.total_cm.assign(tf.zeros_like(self.total_cm))
 
+loss_focal = weighted_focal_loss(weights_dict_silent, gamma=2.0)
+
 # 8) Modelo Personalizado con Bucle de Entrenamiento Optimizado para IoU -----
 class IoUOptimizedModel(keras.Model):
     def __init__(self, shape, num_classes, **kwargs):
         super().__init__(**kwargs)
         self.num_classes = num_classes
         self.seg_model, self.backbone = build_model(shape, num_classes_arg=num_classes)
-        
+
+        # métricas existentes
         self.loss_tracker = keras.metrics.Mean(name="loss")
-        self.iou_metric = MeanIoU(num_classes=num_classes, name='enhanced_mean_iou')
-        self.loss_fn = weighted_focal_loss(weights_dict_silent, gamma=2.0)
-
-    def call(self, inputs, training=False):
-        return self.seg_model(inputs, training=training)
-
-    @property
-    def metrics(self):
-        return [self.loss_tracker, self.iou_metric]
+        self.iou_metric   = MeanIoU(num_classes=num_classes, name='enhanced_mean_iou')
+        # *** nueva pérdida focal ***
+        self.loss_focal = loss_focal
 
     def train_step(self, data):
         x, y_true = data
-
         with tf.GradientTape() as tape:
             y_pred = self.seg_model(x, training=True)
-            loss = self.loss_fn(y_true, y_pred)
+            # sustituye ultimate_iou_loss por focal_loss
+            loss = self.loss_focal(y_true, y_pred)
 
-        trainable_vars = self.seg_model.trainable_variables
-        grads = tape.gradient(loss, trainable_vars)
-        self.optimizer.apply_gradients(zip(grads, trainable_vars))
+        grads = tape.gradient(loss, self.seg_model.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.seg_model.trainable_variables))
 
         self.loss_tracker.update_state(loss)
         self.iou_metric.update_state(y_true, y_pred)
-        
         return {m.name: m.result() for m in self.metrics}
-        
+
     def test_step(self, data):
         x, y_true = data
         y_pred = self.seg_model(x, training=False)
-        
-        loss = self.loss_fn(y_true, y_pred)
-        
+        loss = self.loss_focal(y_true, y_pred)
         self.loss_tracker.update_state(loss)
         self.iou_metric.update_state(y_true, y_pred)
-        
         return {m.name: m.result() for m in self.metrics}
 
 # 9) Entrenamiento por Fases con el Modelo Personalizado ---------------------
@@ -531,6 +497,8 @@ with tf.device(device):
     iou_aware_model = IoUOptimizedModel(shape=train_X.shape[1:], num_classes=num_classes)
     
     # 2. Add this line to explicitly build the model
+    # The input shape is (batch_size, height, width, channels). We use None for the batch size
+    # to indicate it can be flexible.
     iou_aware_model.build(input_shape=(None, *train_X.shape[1:]))
     
     # 3. Now the rest of your code will work as expected
@@ -605,53 +573,22 @@ with tf.device(device):
 
 # 10) Evaluación & visualización ----------------------------------------------
 print("\n--- Evaluación del modelo final en CPU/GPU disponible ---")
-
-def print_class_iou(model, X, y_true, class_names=None):
-    """
-    Calcula e imprime el Intersection over Union (IoU) por clase.
-    """
-    # 1. Predecir máscaras
-    preds = model.predict(X)
-    pred_labels = np.argmax(preds, axis=-1)  # shape (B, H, W)
-
-    # 2. Número de clases
-    num_classes = model.output.shape[-1]
+def evaluate_model(model_to_eval,X,y):
+    preds = model_to_eval.predict(X)
+    mask = np.argmax(preds,axis=-1)
     ious = []
-    
-    if class_names is None:
-        class_names = [f"Clase {i}" for i in range(num_classes)]
-    elif len(class_names) != num_classes:
-        print(f"Advertencia: Se esperaban {num_classes} nombres de clase, pero se proporcionaron {len(class_names)}. Se usarán los índices.")
-        class_names = [f"Clase {i}" for i in range(num_classes)]
-
-    print("\n--- Reporte de Intersection over Union (IoU) por Clase ---")
-    # 3. Calcular IoU por clase
     for cls in range(num_classes):
-        y_cls_true = (y_true == cls)
-        y_cls_pred = (pred_labels == cls)
+        yt = (y==cls).astype(int)
+        yp = (mask==cls).astype(int)
+        inter = np.sum(yt*yp)
+        union = np.sum(yt)+np.sum(yp)-inter
+        ious.append(inter/union if union>0 else 0)
+    return {'mean_iou':np.mean(ious),'class_ious':ious,'pixel_accuracy':np.mean(mask==y)}
 
-        intersection = np.logical_and(y_cls_true, y_cls_pred).sum()
-        union = np.logical_or(y_cls_true, y_cls_pred).sum()
-
-        iou = intersection / union if union > 0 else np.nan
-        ious.append(iou)
-
-        label = class_names[cls]
-        print(f"IoU {label}: {iou:.4f}")
-
-    # 4. Imprimir mean IoU
-    mean_iou = np.nanmean(ious)
-    print(f"\nMean IoU (promedio de clases): {mean_iou:.4f}")
-
-    # 5. Calcular Pixel Accuracy
-    pixel_accuracy = np.mean(pred_labels == y_true)
-    print(f"Pixel Accuracy (todos los píxeles): {pixel_accuracy:.4f}")
-
-    return ious
-
-class_labels = [f"Clase {i}" for i in range(num_classes)] 
-
-class_ious = print_class_iou(eval_model, val_X, val_y, class_names=class_labels)
+metrics = evaluate_model(eval_model,val_X,val_y)
+print(f"Mean IoU: {metrics['mean_iou']:.4f}")
+print(f"Pixel Accuracy: {metrics['pixel_accuracy']:.4f}")
+for i,iou in enumerate(metrics['class_ious']): print(f" Class {i}: {iou:.4f}")
 
 def visualize_predictions(model_to_eval,X,y,num_samples=5):
     idxs = np.random.choice(len(X),num_samples,replace=False)
@@ -660,7 +597,7 @@ def visualize_predictions(model_to_eval,X,y,num_samples=5):
     cmap = plt.cm.get_cmap('tab10',num_classes)
     plt.figure(figsize=(12,4*num_samples))
     for i,ix in enumerate(idxs):
-        plt.subplot(num_samples,3,3*i+1); plt.imshow(X[ix].astype('uint8')); plt.axis('off'); plt.title('Image')
+        plt.subplot(num_samples,3,3*i+1); plt.imshow(X[ix]); plt.axis('off'); plt.title('Image')
         plt.subplot(num_samples,3,3*i+2); plt.imshow(y[ix],cmap=cmap,vmin=0,vmax=num_classes-1); plt.axis('off'); plt.title('GT Mask')
         plt.subplot(num_samples,3,3*i+3); plt.imshow(masks[i],cmap=cmap,vmin=0,vmax=num_classes-1); plt.axis('off'); plt.title('Pred Mask')
     plt.tight_layout()
