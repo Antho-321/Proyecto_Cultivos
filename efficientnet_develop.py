@@ -314,7 +314,7 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
         pretrained='imagenet',
         include_preprocessing=False
     )
-    # Forzar la construcción para que output_shape esté definido
+    # Forzar la construcción para que output.shape esté definido
     _ = backbone(tf.zeros((1, *shape)))
 
     inp = backbone.input
@@ -330,7 +330,7 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
 
     s1 = s2 = s3 = s4 = None
     for layer in reversed(backbone.layers):
-        h = _safe_int(layer.output_shape[1])
+        h = _safe_int(layer.output.shape[1])
         if h is None:
             continue  # saltar capas sin dimensión conocida
         if h == 128 and s1 is None:
@@ -663,7 +663,7 @@ def print_class_iou(model, X, y_true, class_names=None):
 
     # 2. Número de clases
     # Aseguramos que num_classes se base en el modelo y no solo en el batch de y_true
-    num_classes = model.output_shape[-1]
+    num_classes = model.output.shape[-1]
     ious = []
     
     # Si no se proveen nombres, crear una lista por defecto
