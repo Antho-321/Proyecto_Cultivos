@@ -140,8 +140,11 @@ print(f"\nNúmero de clases detectado: {num_classes}")
 
 def focal_loss(alpha=None, gamma=2.0):
     def loss(y_true, y_pred):
-        y_true = tf.cast(y_true[...,0], tf.int32)
+        # 1) Asegúrate de que y_true es [B,H,W]
+        y_true = tf.cast(y_true, tf.int32)
+        # 2) Crea one-hot [B,H,W,C]
         y_true_oh = tf.one_hot(y_true, depth=y_pred.shape[-1])
+        # 3) Ahora sí p_t coincide en [B,H,W]
         p_t = tf.reduce_sum(y_true_oh * y_pred, axis=-1) + 1e-7
         modulating_factor = tf.pow(1.0 - p_t, gamma)
         if alpha is not None:
