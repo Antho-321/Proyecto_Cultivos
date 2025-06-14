@@ -54,6 +54,7 @@ from tensorflow.keras.callbacks import (
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
 import matplotlib.pyplot as plt
 from iou_por_clase import print_class_iou
+import numpy as np
 
 # -------------------------------------------------------------------------------
 # Monkey-patch para usar un Lambda layer en SE module de keras_efficientnet_v2
