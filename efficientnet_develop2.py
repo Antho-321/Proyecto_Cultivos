@@ -591,7 +591,7 @@ with tf.device(device):
         EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=10, restore_best_weights=False),
         TensorBoard(log_dir='./logs/swin_phase1', update_freq='epoch')
     ]
-    iou_aware_model.fit(train_X, train_y, batch_size=12, epochs=20, validation_data=val_gen, callbacks=cbs1)
+    iou_aware_model.fit(train_X, train_y, batch_size=12, epochs=100, validation_data=val_gen, callbacks=cbs1)
     iou_aware_model.load_weights(ckpt1_path)
 
     # Fase 2
@@ -605,7 +605,7 @@ with tf.device(device):
         EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=12, restore_best_weights=False),
         TensorBoard(log_dir='./logs/swin_phase2', update_freq='epoch')
     ]
-    iou_aware_model.fit(train_X, train_y, batch_size=6, epochs=20, validation_data=val_gen, callbacks=cbs2)
+    iou_aware_model.fit(train_X, train_y, batch_size=6, epochs=100, validation_data=val_gen, callbacks=cbs2)
     iou_aware_model.load_weights(ckpt2_path)
 
     # Fase 3
@@ -618,7 +618,7 @@ with tf.device(device):
         ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1),
         TensorBoard(log_dir='./logs/swin_phase3', update_freq='epoch')
     ]
-    iou_aware_model.fit(train_X, train_y, batch_size=4, epochs=20, validation_data=val_gen, callbacks=cbs3)
+    iou_aware_model.fit(train_X, train_y, batch_size=4, epochs=100, validation_data=val_gen, callbacks=cbs3)
     iou_aware_model.load_weights(ckpt3_path)
     eval_model = iou_aware_model.seg_model
 
