@@ -181,9 +181,10 @@ class SwinTransformerBlock(tf.keras.layers.Layer):
             self.attn_mask = None
 
     def call(self, x):
-        shortcut = x
-        B, L, C = x.shape
+        B = tf.shape(x)[0]        # batch dinámico
         H, W = self.H, self.W
+        C = x.shape[-1]           # 160 (conocido)
+
         x = self.norm1(x)
         x = tf.reshape(x, (B, H, W, C))
 
