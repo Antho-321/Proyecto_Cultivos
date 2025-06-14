@@ -118,6 +118,7 @@ def load_dataset(img_dir, mask_dir, target_size=(256,256), augment=False):
             if os.path.exists(mask_path):
                 mask = load_img(mask_path, color_mode='grayscale')
                 m = img_to_array(mask).astype(np.int32)
+                masks.append(np.expand_dims(m, axis=-1))   # (H, W, 1)  <-- Añade esta línea
                 masks.append(np.squeeze(m, axis=-1))  # (H, W)
             else:
                 print(f"No se encontró la máscara para: {image_filename}")
