@@ -299,13 +299,13 @@ backbone_layer.trainable = False
 model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-5), loss=combined_loss, metrics=[iou_metric])
 cbs1 = [EarlyStopping(monitor='val_mean_iou', mode='max', patience=10, restore_best_weights=True), ReduceLROnPlateau(monitor='val_mean_iou', mode='max', factor=0.5, patience=5, min_lr=1e-6), ModelCheckpoint('phase1_custom_model_swin.keras', monitor='val_mean_iou', mode='max', save_best_only=True)]
 print("\n--- Starting Phase 1: Training the Decoder ---")
-model.fit(train_X_processed, train_y, validation_data=(val_X_processed, val_y), batch_size=4, epochs=20, callbacks=cbs1)
+model.fit(train_X_processed, train_y, validation_data=(val_X_processed, val_y), batch_size=4, epochs=100, callbacks=cbs1)
 
 print("\nUnfreezing the backbone for Phase 2...")
 backbone_layer.trainable = True
 model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=1e-4, weight_decay=1e-6), loss=combined_loss, metrics=[iou_metric])
 cbs2 = [EarlyStopping(monitor='val_mean_iou', mode='max', patience=15, restore_best_weights=True), ReduceLROnPlateau(monitor='val_mean_iou', mode='max', factor=0.2, patience=5, min_lr=1e-7), ModelCheckpoint('weed_detector_final_model_swin.keras', monitor='val_mean_iou', mode='max', save_best_only=True)]
 print("\n--- Starting Phase 2: Fine-Tuning the Full Model ---")
-model.fit(train_X_processed, train_y, validation_data=(val_X_processed, val_y), batch_size=2, epochs=20, callbacks=cbs2)
+model.fit(train_X_processed, train_y, validation_data=(val_X_processed, val_y), batch_size=2, epochs=100, callbacks=cbs2)
 
 print("\nTraining complete.")
