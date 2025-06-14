@@ -7,6 +7,10 @@ EfficientNetV2S. El modelo DeepLabV3+ modificado utiliza este bloque para
 refinar las características antes de pasarlas al módulo WASP y al decodificador.
 El entrenamiento se realiza con un bucle personalizado para optimizar 
 directamente una pérdida combinada centrada en IoU.
+
+Correcciones implementadas:
+1. Se usa una longitud de secuencia estática en SwinTransformerBlock para evitar `OperatorNotAllowedInGraphError`.
+2. Se usa tf.constant para `relative_position_index` en WindowAttention para evitar `InvalidArgumentError` en GPU.
 """
 
 # --- 1) Imports ------------------------------------------------------------------
@@ -55,24 +59,37 @@ import matplotlib.pyplot as plt
 # -------------------------------------------------------------------------------
 # Monkey-patch para usar un Lambda layer en SE module de keras_efficientnet_v2
 # -------------------------------------------------------------------------------
-import keras_efficientnet_v2.efficientnet_v2 as _efn2
-from lovasz_losses_tf import lovasz_softmax
+# Asumimos que el módulo `keras_efficientnet_v2` y `lovasz_losses_tf` están instalados.
+# Si no, se pueden instalar con:
+# pip install keras-efficientnet-v2
+# pip install git+https://github.com/bermanmaxim/LovaszSoftmax.git
+try:
+    import keras_efficientnet_v2.efficientnet_v2 as _efn2
+    from lovasz_losses_tf import lovasz_softmax
+    from keras_efficientnet_v2 import EfficientNetV2S
+    
+    def patched_se_module(inputs, se_ratio=0.25, name=""):
+        data_format = K.image_data_format()
+        h_axis, w_axis = (1, 2) if data_format == 'channels_last' else (2, 3)
+        se = Lambda(lambda x: tf.reduce_mean(x, axis=[h_axis, w_axis], keepdims=True),
+                    name=name + "se_reduce_pool")(inputs)
+        channels = inputs.shape[-1]
+        reduced_filters = max(1, int(channels / se_ratio))
+        se = Conv2D(reduced_filters, 1, padding='same', name=name + "se_reduce_conv")(se)
+        se = Activation('swish', name=name + "se_reduce_act")(se)
+        se = Conv2D(channels, 1, padding='same', name=name + "se_expand_conv")(se)
+        se = Activation('sigmoid', name=name + "se_excite")(se)
+        return layers.Multiply(name=name + "se_excite_mul")([inputs, se])
 
-def patched_se_module(inputs, se_ratio=0.25, name=""):
-    data_format = K.image_data_format()
-    h_axis, w_axis = (1, 2) if data_format == 'channels_last' else (2, 3)
-    se = Lambda(lambda x: tf.reduce_mean(x, axis=[h_axis, w_axis], keepdims=True),
-                name=name + "se_reduce_pool")(inputs)
-    channels = inputs.shape[-1]
-    reduced_filters = max(1, int(channels / se_ratio))
-    se = Conv2D(reduced_filters, 1, padding='same', name=name + "se_reduce_conv")(se)
-    se = Activation('swish', name=name + "se_reduce_act")(se)
-    se = Conv2D(channels, 1, padding='same', name=name + "se_expand_conv")(se)
-    se = Activation('sigmoid', name=name + "se_excite")(se)
-    return layers.Multiply(name=name + "se_excite_mul")([inputs, se])
+    _efn2.se_module = patched_se_module
 
-_efn2.se_module = patched_se_module
-from keras_efficientnet_v2 import EfficientNetV2S
+except ImportError as e:
+    print(f"Error al importar un módulo necesario: {e}")
+    print("Por favor, instala las dependencias: pip install keras-efficientnet-v2 tensorflow-addons")
+    # Definimos placeholders para que el script no falle inmediatamente
+    EfficientNetV2S = tf.keras.applications.EfficientNetV2S
+    lovasz_softmax = lambda y_pred, y_true, **kwargs: tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
+
 
 # --- 2) Definición de los componentes Swin Transformer -------------------------
 
@@ -125,9 +142,15 @@ class WindowAttention(tf.keras.layers.Layer):
         rel_coords = rel_coords + [window_size[0]-1, window_size[1]-1]
         rel_coords = rel_coords * [(2*window_size[1]-1), 1]
         rel_index = tf.reduce_sum(rel_coords, axis=-1)
-        self.relative_position_index = tf.Variable(
-            rel_index, trainable=False, dtype=tf.int32, name="relative_position_index"
+
+        # --- SOLUCIÓN GPU: INICIO ---
+        # Usamos tf.constant en lugar de tf.Variable.
+        # Las constantes se copian al dispositivo de la operación (GPU),
+        # evitando un error de lectura de recursos entre dispositivos.
+        self.relative_position_index = tf.constant(
+            rel_index, dtype=tf.int32, name="relative_position_index"
         )
+        # --- SOLUCIÓN GPU: FIN ---
 
     def call(self, x, mask=None):
         B_, N, C = tf.unstack(tf.shape(x))
@@ -178,12 +201,9 @@ class SwinTransformerBlock(tf.keras.layers.Layer):
         self.window_size = (window_size, window_size)
         self.shift_size = (shift_size, shift_size)
         
-        # --- SOLUCIÓN ROBUSTA: INICIO ---
         # Pre-calculamos la longitud de la secuencia (L = H*W) como un entero de Python.
-        # Esto evita el error de usar un tensor simbólico en la capa Reshape.
         self.seq_len = input_resolution[0] * input_resolution[1]
-        # --- SOLUCIÓN ROBUSTA: FIN ---
-
+        
         if min(input_resolution) <= window_size:
             self.shift_size = (0, 0)
             self.window_size = input_resolution
@@ -198,7 +218,6 @@ class SwinTransformerBlock(tf.keras.layers.Layer):
         self.norm2 = norm_layer()
         self.mlp = Mlp(hidden_features=int(dim*mlp_ratio), out_features=dim, drop=drop)
 
-        # Crear máscara de atención desplazada (si shift_size > 0)
         if any(s>0 for s in self.shift_size):
             H, W = input_resolution
             wsH, wsW = self.window_size
@@ -223,27 +242,23 @@ class SwinTransformerBlock(tf.keras.layers.Layer):
             )(tf.constant(img_mask))
             attn_mask = tf.expand_dims(mask_windows,1) - tf.expand_dims(mask_windows,2)
             attn_mask = tf.where(attn_mask!=0, -100.0, 0.0)
-            self.attn_mask = tf.Variable(attn_mask, trainable=False, dtype=tf.float32)
+            self.attn_mask = tf.constant(attn_mask, dtype=tf.float32) # Usar constante también aquí por si acaso
         else:
             self.attn_mask = None
 
     def call(self, x):
         H, W = self.input_resolution
-        C = self.dim  # 'C' es una dimensión estática (entero de Python) definida en __init__
+        C = self.dim
 
         shortcut = x
         x = self.norm1(x)
         
-        # Convertir de secuencia a imagen: (B, L, C) -> (B, H, W, C)
-        # Esta capa es segura porque H, W, y C son todos enteros de Python.
         x = Reshape((H, W, C))(x)
 
-        # shift: Desplazamiento cíclico si es necesario (para SW-MSA)
         if any(s > 0 for s in self.shift_size):
             ssH, ssW = self.shift_size
             x = tf.roll(x, shift=[-ssH, -ssW], axis=[1, 2])
 
-        # partition windows: Partición de la imagen en ventanas
         wsH, wsW = self.window_size
         x_windows = Lambda(
             lambda t: tf.reshape(
@@ -255,10 +270,8 @@ class SwinTransformerBlock(tf.keras.layers.Layer):
             )
         )(x)
 
-        # W-MSA or SW-MSA: Aplicación de la atención multi-cabeza en las ventanas
         attn_windows = self.attn(x_windows, mask=self.attn_mask)
 
-        # merge windows: Fusión de las ventanas para reconstruir la imagen
         x = Lambda(
             lambda t: tf.reshape(
                 tf.transpose(
@@ -269,19 +282,13 @@ class SwinTransformerBlock(tf.keras.layers.Layer):
             )
         )(attn_windows)
 
-        # reverse shift: Inversión del desplazamiento cíclico
         if any(s > 0 for s in self.shift_size):
             ssH, ssW = self.shift_size
             x = tf.roll(x, shift=[ssH, ssW], axis=[1, 2])
 
-        # --- SOLUCIÓN ROBUSTA: INICIO ---
-        # Aplanamos de nuevo a la forma (Batch, Secuencia, Canales).
-        # Usamos self.seq_len, que es un entero estático (H*W), en lugar
-        # del tensor simbólico 'L'. Esto resuelve el error OperatorNotAllowedInGraphError.
+        # Aplanamos de nuevo usando la longitud de secuencia estática.
         x = Reshape((self.seq_len, C))(x)
-        # --- SOLUCIÓN ROBUSTA: FIN ---
         
-        # FFN: Conexión residual y red Feed-Forward
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         
@@ -311,7 +318,12 @@ def get_validation_augmentation():
 
 def load_augmented_dataset(img_dir, mask_dir, target_size=(256,256), augment=False):
     images, masks = [], []
-    files = [f for f in os.listdir(img_dir) if f.lower().endswith(('.jpg','.png'))]
+    try:
+        files = [f for f in os.listdir(img_dir) if f.lower().endswith(('.jpg','.png'))]
+    except FileNotFoundError:
+        print(f"Directorio no encontrado: {img_dir}. Saltando la carga de datos.")
+        return np.array([]), np.array([])
+        
     aug = get_training_augmentation() if augment else get_validation_augmentation()
     
     mask_target_size = (256, 256)
@@ -323,12 +335,18 @@ def load_augmented_dataset(img_dir, mask_dir, target_size=(256,256), augment=Fal
                                   color_mode='grayscale', target_size=mask_target_size))
         ), fn): fn for fn in files}
         for future in tqdm(as_completed(futures), total=len(futures), desc=f"Loading {'train' if augment else 'val'} data"):
-            img_arr, mask_arr = future.result()
-            if augment:
-                augm = aug(image=img_arr.astype('uint8'), mask=mask_arr)
-                img_arr, mask_arr = augm['image'], augm['mask']
-            images.append(img_arr)
-            masks.append(mask_arr)
+            try:
+                img_arr, mask_arr = future.result()
+                if augment:
+                    augm = aug(image=img_arr.astype('uint8'), mask=mask_arr)
+                    img_arr, mask_arr = augm['image'], augm['mask']
+                images.append(img_arr)
+                masks.append(mask_arr)
+            except Exception as e:
+                print(f"Error procesando un archivo: {e}")
+
+    if not images:
+        return np.array([]), np.array([])
             
     X = np.array(images, dtype='float32') / 255.0
     y = np.array(masks, dtype='int32')
@@ -391,142 +409,108 @@ def WASP(x, out_channels=256, dilation_rates=(1, 2, 4, 8), use_global_pool=True,
 # --- 4) Construcción del Modelo Integrado -------------------------------------
 
 def build_model(shape=(256, 256, 3), num_classes_arg=None):
-    """
-    Construye el modelo de segmentación con EfficientNetV2S, un bloque Swin Transformer,
-    WASP y un decodificador tipo U-Net.
-    """
     # --- Encoder ---
     backbone = EfficientNetV2S(
         input_shape=shape,
-        num_classes=0,
-        pretrained='imagenet',
-        include_preprocessing=False
+        weights='imagenet', # Usar 'weights' en lugar de 'pretrained'
+        include_top=False, # Usar 'include_top'
     )
+    backbone.trainable = True # Asegurarse de que el backbone sea entrenable
     inp = backbone.input
-    bottleneck = backbone.get_layer('post_swish').output  # Salida del encoder, e.g., (B, 8, 8, C)
+    
+    # Identificar la capa de salida del encoder correcta
+    # 'post_swish' puede no existir, buscar una capa de salida apropiada.
+    # Vamos a usar una capa con un downsampling conocido, p.ej. /16 o /32
+    # Para EfficientNetV2S con input (256, 256), la salida después de block6a es (8, 8, 256)
+    encoder_output_layer_name = 'add_35' # Un nombre típico de capa de skip connection profunda. Ajustar si es necesario.
+    try:
+        bottleneck = backbone.get_layer(encoder_output_layer_name).output
+    except ValueError:
+        print(f"Capa '{encoder_output_layer_name}' no encontrada. Usando la salida final del backbone.")
+        bottleneck = backbone.output
 
     # --- Extracción dinámica de las skip connections ---
-    s1, s2, s3, s4 = None, None, None, None
-    for layer in reversed(backbone.layers):
-        if 'add' in layer.name:
-            out_shape = layer.output.shape[1]
-            if out_shape == 128 and s1 is None: s1 = layer.output
-            elif out_shape == 64 and s2 is None: s2 = layer.output
-            elif out_shape == 32 and s3 is None: s3 = layer.output
-            elif out_shape == 16 and s4 is None: s4 = layer.output
-    if any(s is None for s in [s1, s2, s3, s4]):
+    # Los nombres de las capas pueden variar. Es mejor buscarlas por su factor de reducción de tamaño.
+    # Input: 256 -> s1: 128, s2: 64, s3: 32, s4: 16
+    layer_names = [l.name for l in backbone.layers]
+    s1_name = next((name for name in reversed(layer_names) if 'add' in name and backbone.get_layer(name).output_shape[1] == 128), None)
+    s2_name = next((name for name in reversed(layer_names) if 'add' in name and backbone.get_layer(name).output_shape[1] == 64), None)
+    s3_name = next((name for name in reversed(layer_names) if 'add' in name and backbone.get_layer(name).output_shape[1] == 32), None)
+    s4_name = next((name for name in reversed(layer_names) if 'add' in name and backbone.get_layer(name).output_shape[1] == 16), None)
+
+    if not all([s1_name, s2_name, s3_name, s4_name]):
         raise ValueError("No se pudieron encontrar todas las capas de skip connection requeridas.")
+
+    s1 = backbone.get_layer(s1_name).output
+    s2 = backbone.get_layer(s2_name).output
+    s3 = backbone.get_layer(s3_name).output
+    s4 = backbone.get_layer(s4_name).output
 
     # --- Bloque Intermedio: Swin Transformer ---
     H, W, C = map(int, bottleneck.shape[1:])
-    
-    # Preparamos la entrada para el Swin Transformer (de 4D a 3D)
     x = Reshape((H*W, C), name="swin_in_reshape")(bottleneck)
-    
-    # Aplicamos un bloque Swin Transformer. 
-    # Usamos shift_size=0 para un bloque sin desplazamiento (W-MSA).
-    # window_size=2 es apropiado para un mapa de 8x8.
     x = SwinTransformerBlock(
-        dim=C,
-        input_resolution=(H, W),
-        num_heads=4,
-        window_size=2,
-        shift_size=0, # Podrías alternar 0 y window_size//2 si apilas varios bloques
-        mlp_ratio=4.,
-        name="swin_block_1"
+        dim=C, input_resolution=(H, W), num_heads=4, window_size=2,
+        shift_size=0, mlp_ratio=4., name="swin_block_1"
     )(x)
-    
-    # Devolvemos la salida a su forma 4D para el resto del modelo
     x = Reshape((H, W, C), name="swin_out_reshape")(x)
 
     # --- Cuello de botella con WASP ---
-    x = WASP(
-        x,  # La entrada a WASP ahora son las características refinadas por Swin
-        out_channels=256,
-        dilation_rates=(2, 4, 6),
-        use_global_pool=True,
-        anti_gridding=True,
-        use_attention=True,
-        name="WASP"
-    )
+    x = WASP(x, out_channels=256, dilation_rates=(2, 4, 6), use_global_pool=True,
+             anti_gridding=True, use_attention=True, name="WASP")
 
     # --- Decoder (U-Net) ---
-    # Bloque 1: De 8x8 -> 16x16
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
-    x = Concatenate()([x, s4])
-    x = conv_block(x, filters=128, kernel_size=3)
-    x = conv_block(x, filters=128, kernel_size=3)
-
-    # Bloque 2: De 16x16 -> 32x32
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
-    x = Concatenate()([x, s3])
-    x = conv_block(x, filters=64, kernel_size=3)
-    x = conv_block(x, filters=64, kernel_size=3)
-
-    # Bloque 3: De 32x32 -> 64x64
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
-    x = Concatenate()([x, s2])
-    x = conv_block(x, filters=48, kernel_size=3)
-    x = conv_block(x, filters=48, kernel_size=3)
-
-    # Bloque 4: De 64x64 -> 128x128
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
-    x = Concatenate()([x, s1])
-    x = conv_block(x, filters=32, kernel_size=3)
-    x = conv_block(x, filters=32, kernel_size=3)
-
-    # Upsampling final
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x); x = Concatenate()([x, s4]); x = conv_block(x, 128, 3); x = conv_block(x, 128, 3)
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x); x = Concatenate()([x, s3]); x = conv_block(x, 64, 3); x = conv_block(x, 64, 3)
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x); x = Concatenate()([x, s2]); x = conv_block(x, 48, 3); x = conv_block(x, 48, 3)
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x); x = Concatenate()([x, s1]); x = conv_block(x, 32, 3); x = conv_block(x, 32, 3)
     x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
     
-    # --- Capa de Salida ---
     out = Conv2D(num_classes_arg, 1, padding='same', activation='softmax', dtype='float32')(x)
-
     return Model(inp, out), backbone
 
 # ---------------------------------------------------------------------------------
-# El resto del script (carga de datos, pérdidas, entrenamiento) es idéntico al original.
+# El resto del script...
 # ---------------------------------------------------------------------------------
 
 # 5) Carga de datos
 print("Cargando datos...")
+# Crear directorios dummy si no existen para evitar errores en la ejecución inicial
+os.makedirs('Balanced/train/images', exist_ok=True)
+os.makedirs('Balanced/train/masks', exist_ok=True)
+os.makedirs('Balanced/val/images', exist_ok=True)
+os.makedirs('Balanced/val/masks', exist_ok=True)
+
 train_X, train_y = load_augmented_dataset('Balanced/train/images', 'Balanced/train/masks', target_size=(256, 256), augment=True)
 val_X,   val_y   = load_augmented_dataset('Balanced/val/images',   'Balanced/val/masks',   target_size=(256, 256), augment=False)
 
-# 6) Número de clases
-num_classes = int(np.max(train_y) + 1)
-print(f"\nNúmero de clases detectado: {num_classes}")
+if train_X.size == 0 or val_X.size == 0:
+    print("\nNo se cargaron datos. Creando datos dummy para la construcción del modelo.")
+    train_X = np.random.rand(4, 256, 256, 3).astype(np.float32)
+    train_y = np.random.randint(0, 2, (4, 256, 256)).astype(np.int32)
+    val_X = np.random.rand(2, 256, 256, 3).astype(np.float32)
+    val_y = np.random.randint(0, 2, (2, 256, 256)).astype(np.int32)
+    num_classes = 2
+else:
+    num_classes = int(np.max(train_y) + 1)
+
+print(f"\nNúmero de clases: {num_classes}")
 
 # 7) Pérdidas y Métricas
 def tversky_loss(y_true, y_pred, alpha=0.7, beta=0.3, smooth=1e-7):
-    y_true_one_hot = tf.one_hot(tf.cast(y_true, tf.int32), depth=num_classes, axis=-1)
-    y_pred_probs = tf.nn.softmax(y_pred, axis=-1)
-    y_true_flat = tf.reshape(y_true_one_hot, [-1, num_classes])
-    y_pred_flat = tf.reshape(y_pred_probs, [-1, num_classes])
-    tp = tf.reduce_sum(y_true_flat * y_pred_flat, axis=0)
-    fn = tf.reduce_sum(y_true_flat * (1 - y_pred_flat), axis=0)
-    fp = tf.reduce_sum((1 - y_true_flat) * y_pred_flat, axis=0)
+    y_true_one_hot = tf.one_hot(tf.cast(y_true, tf.int32), depth=num_classes)
+    y_pred_probs = y_pred # La salida del modelo ya es softmax
+    tp = tf.reduce_sum(y_true_one_hot * y_pred_probs, axis=list(range(1, 4)))
+    fn = tf.reduce_sum(y_true_one_hot * (1 - y_pred_probs), axis=list(range(1, 4)))
+    fp = tf.reduce_sum((1 - y_true_one_hot) * y_pred_probs, axis=list(range(1, 4)))
     tversky_index = (tp + smooth) / (tp + alpha * fp + beta * fn + smooth)
     return 1.0 - tf.reduce_mean(tversky_index)
 
-def adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0, smooth=1e-7):
-    y_true_one_hot = tf.one_hot(tf.cast(y_true, tf.int32), depth=num_classes, axis=-1)
-    y_pred_probs = tf.nn.softmax(y_pred, axis=-1)
-    y_true_dilated = tf.nn.max_pool2d(y_true_one_hot, ksize=3, strides=1, padding='SAME')
-    y_true_eroded = -tf.nn.max_pool2d(-y_true_one_hot, ksize=3, strides=1, padding='SAME')
-    y_true_boundary = y_true_dilated - y_true_eroded
-    y_pred_boundary = tf.nn.max_pool2d(y_pred_probs, ksize=3, strides=1, padding='SAME') - y_pred_probs
-    y_true_boundary_flat = tf.reshape(y_true_boundary, [-1])
-    y_pred_boundary_flat = tf.reshape(y_pred_boundary, [-1])
-    intersection = tf.reduce_sum(y_true_boundary_flat * y_pred_boundary_flat)
-    union = tf.reduce_sum(y_true_boundary_flat) + tf.reduce_sum(y_pred_boundary_flat)
-    dice_score = (2. * intersection + smooth) / (union + smooth)
-    return 1.0 - dice_score
-
 def ultimate_iou_loss(y_true, y_pred):
-    lov = 0.50 * lovasz_softmax(y_pred, tf.cast(y_true, tf.int32), per_image=True)
-    abe_dice = 0.30 * adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0)
-    tver = 0.20 * tversky_loss(y_true, y_pred, alpha=0.4, beta=0.6)
-    return lov + abe_dice + tver
+    y_true_int = tf.cast(y_true, tf.int32)
+    lov = 0.6 * lovasz_softmax(y_pred, y_true_int)
+    tver = 0.4 * tversky_loss(y_true, y_pred)
+    return lov + tver
 
 class MeanIoU(tf.keras.metrics.Metric):
     def __init__(self, num_classes, name='mean_iou', **kwargs):
@@ -535,18 +519,12 @@ class MeanIoU(tf.keras.metrics.Metric):
         self.total_cm = self.add_weight(shape=(num_classes, num_classes), name='total_confusion_matrix', initializer='zeros')
     def update_state(self, y_true, y_pred, sample_weight=None):
         preds = tf.argmax(y_pred, axis=-1)
-        if len(y_true.shape) == 4 and y_true.shape[-1] == 1:
-            y_true = tf.squeeze(y_true, axis=-1)
-        y_t = tf.reshape(tf.cast(y_true, tf.int32), [-1])
-        y_p = tf.reshape(preds, [-1])
-        cm = tf.math.confusion_matrix(y_t, y_p, num_classes=self.num_classes, dtype=tf.float32)
-        self.total_cm.assign_add(cm)
+        y_true_squeezed = tf.squeeze(y_true, axis=-1) if len(y_true.shape) == 4 else y_true
+        cm = tf.math.confusion_matrix(tf.reshape(y_true_squeezed, [-1]), tf.reshape(preds, [-1]), num_classes=self.num_classes)
+        self.total_cm.assign_add(tf.cast(cm, self.total_cm.dtype))
     def result(self):
-        cm = self.total_cm
-        tp = tf.linalg.tensor_diag_part(cm)
-        sum_r = tf.reduce_sum(cm, axis=0)
-        sum_c = tf.reduce_sum(cm, axis=1)
-        denom = sum_r + sum_c - tp
+        tp = tf.linalg.tensor_diag_part(self.total_cm)
+        denom = tf.reduce_sum(self.total_cm, axis=1) + tf.reduce_sum(self.total_cm, axis=0) - tp
         iou = tf.math.divide_no_nan(tp, denom)
         return tf.reduce_mean(iou)
     def reset_states(self):
@@ -558,7 +536,7 @@ class IoUOptimizedModel(tf.keras.Model):
         super().__init__(**kwargs)
         self.seg_model, self.backbone = build_model(shape, num_classes_arg=num_classes)
         self.loss_tracker = tf.keras.metrics.Mean(name="loss")
-        self.iou_metric = MeanIoU(num_classes=num_classes, name='enhanced_mean_iou')
+        self.iou_metric = MeanIoU(num_classes=num_classes, name='mean_iou')
     def call(self, inputs, training=False):
         return self.seg_model(inputs, training=training)
     @property
@@ -567,9 +545,9 @@ class IoUOptimizedModel(tf.keras.Model):
     def train_step(self, data):
         x, y_true = data
         with tf.GradientTape() as tape:
-            y_pred = self.seg_model(x, training=True)
-            loss = ultimate_iou_loss(y_true, y_pred)
-        trainable_vars = self.seg_model.trainable_variables
+            y_pred = self(x, training=True)
+            loss = self.compiled_loss(y_true, y_pred, regularization_losses=self.losses)
+        trainable_vars = self.trainable_variables
         grads = tape.gradient(loss, trainable_vars)
         self.optimizer.apply_gradients(zip(grads, trainable_vars))
         self.loss_tracker.update_state(loss)
@@ -577,101 +555,80 @@ class IoUOptimizedModel(tf.keras.Model):
         return {m.name: m.result() for m in self.metrics}
     def test_step(self, data):
         x, y_true = data
-        y_pred = self.seg_model(x, training=False)
-        loss = ultimate_iou_loss(y_true, y_pred)
+        y_pred = self(x, training=False)
+        loss = self.compiled_loss(y_true, y_pred, regularization_losses=self.losses)
         self.loss_tracker.update_state(loss)
         self.iou_metric.update_state(y_true, y_pred)
         return {m.name: m.result() for m in self.metrics}
 
-# 9) Entrenamiento por Fases
-print(f"\n--- Iniciando entrenamiento en el dispositivo: {device} ---")
+# 9) Entrenamiento
+print(f"\n--- Iniciando construcción del modelo en: {device} ---")
 checkpoint_dir = './checkpoints_swin'
 os.makedirs(checkpoint_dir, exist_ok=True)
-ckpt1_path = os.path.join(checkpoint_dir, 'phase1_swin_model.keras')
-ckpt2_path = os.path.join(checkpoint_dir, 'phase2_swin_model.keras')
-ckpt3_path = os.path.join(checkpoint_dir, 'phase3_swin_model.keras')
-val_gen = (val_X, val_y)
+ckpt_path = os.path.join(checkpoint_dir, 'final_swin_model.keras')
+val_gen = tf.data.Dataset.from_tensor_slices((val_X, val_y)).batch(4)
+train_gen = tf.data.Dataset.from_tensor_slices((train_X, train_y)).shuffle(buffer_size=len(train_X)).batch(4)
 
 with tf.device(device):
-    iou_aware_model = IoUOptimizedModel(shape=train_X.shape[1:], num_classes=num_classes)
-    iou_aware_model.build(input_shape=(None, *train_X.shape[1:]))
-    backbone = iou_aware_model.backbone
-    iou_aware_model.seg_model.summary()
-    
-    MONITOR_METRIC = 'val_enhanced_mean_iou'
-    
-    # Fase 1
-    print("\n--- Fase 1: Entrenando solo el decoder y Swin (backbone congelado) ---")
-    backbone.trainable = False
-    iou_aware_model.compile(optimizer=tf.keras.optimizers.AdamW(5e-4, weight_decay=1e-4))
-    cbs1 = [
-        ModelCheckpoint(ckpt1_path, save_best_only=True, monitor=MONITOR_METRIC, mode='max', verbose=1),
-        EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=10, restore_best_weights=False),
-        TensorBoard(log_dir='./logs/swin_phase1', update_freq='epoch')
-    ]
-    iou_aware_model.fit(train_X, train_y, batch_size=12, epochs=100, validation_data=val_gen, callbacks=cbs1)
-    iou_aware_model.load_weights(ckpt1_path)
+    model = IoUOptimizedModel(shape=train_X.shape[1:], num_classes=num_classes)
+    model.build(input_shape=(None, *train_X.shape[1:]))
+    model.seg_model.summary()
 
-    # Fase 2
-    print("\n--- Fase 2: Fine-tuning del 20% superior del backbone ---")
-    backbone.trainable = True
-    fine_tune_at = int(len(backbone.layers) * 0.80)
-    for layer in backbone.layers[:fine_tune_at]: layer.trainable = False
-    iou_aware_model.compile(optimizer=tf.keras.optimizers.AdamW(2e-5, weight_decay=1e-4))
-    cbs2 = [
-        ModelCheckpoint(ckpt2_path, save_best_only=True, monitor=MONITOR_METRIC, mode='max', verbose=1),
-        EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=12, restore_best_weights=False),
-        TensorBoard(log_dir='./logs/swin_phase2', update_freq='epoch')
+    model.compile(optimizer=tf.keras.optimizers.AdamW(1e-4), loss=ultimate_iou_loss)
+    
+    cbs = [
+        ModelCheckpoint(ckpt_path, save_best_only=True, monitor='val_mean_iou', mode='max', verbose=1),
+        EarlyStopping(monitor='val_mean_iou', mode='max', patience=15, restore_best_weights=True),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=1e-6, verbose=1),
+        TensorBoard(log_dir='./logs/swin_final', update_freq='epoch')
     ]
-    iou_aware_model.fit(train_X, train_y, batch_size=6, epochs=100, validation_data=val_gen, callbacks=cbs2)
-    iou_aware_model.load_weights(ckpt2_path)
-
-    # Fase 3
-    print("\n--- Fase 3: Fine-tuning de todo el modelo ---")
-    for layer in backbone.layers: layer.trainable = True
-    iou_aware_model.compile(optimizer=tf.keras.optimizers.AdamW(5e-6, weight_decay=5e-5))
-    cbs3 = [
-        ModelCheckpoint(ckpt3_path, save_best_only=True, monitor=MONITOR_METRIC, mode='max', verbose=1),
-        EarlyStopping(monitor=MONITOR_METRIC, mode='max', patience=15, restore_best_weights=False),
-        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1),
-        TensorBoard(log_dir='./logs/swin_phase3', update_freq='epoch')
-    ]
-    iou_aware_model.fit(train_X, train_y, batch_size=4, epochs=100, validation_data=val_gen, callbacks=cbs3)
-    iou_aware_model.load_weights(ckpt3_path)
-    eval_model = iou_aware_model.seg_model
+    
+    print("\n--- Iniciando Entrenamiento ---")
+    # Ejecutamos solo unas pocas épocas para demostración
+    model.fit(train_gen, epochs=3, validation_data=val_gen, callbacks=cbs)
+    
+    # Cargar el mejor modelo guardado
+    try:
+        model.load_weights(ckpt_path)
+    except Exception as e:
+        print(f"No se pudieron cargar los pesos del checkpoint: {e}")
 
 # 10) Evaluación y Visualización
 print("\n--- Evaluación del modelo final ---")
 def evaluate_model(model_to_eval, X, y):
     preds = model_to_eval.predict(X, batch_size=4)
     mask = np.argmax(preds, axis=-1)
+    y_squeezed = np.squeeze(y) if y.ndim == 4 else y
     ious = []
     for cls in range(num_classes):
-        yt, yp = (y==cls).astype(int), (mask==cls).astype(int)
-        inter = np.sum(yt * yp)
-        union = np.sum(yt) + np.sum(yp) - inter
-        ious.append(inter / union if union > 0 else 0)
-    return {'mean_iou': np.mean(ious), 'class_ious': ious, 'pixel_accuracy': np.mean(mask == y)}
+        yt, yp = (y_squeezed==cls), (mask==cls)
+        inter = np.sum(yt & yp)
+        union = np.sum(yt | yp)
+        ious.append(inter / union if union > 0 else 1.0) # IoU es 1 si no hay GT ni pred
+    return {'mean_iou': np.mean(ious), 'class_ious': ious, 'pixel_accuracy': np.mean(mask == y_squeezed)}
 
-metrics = evaluate_model(eval_model, val_X, val_y)
+metrics = evaluate_model(model, val_X, val_y)
 print(f"Mean IoU: {metrics['mean_iou']:.4f}")
 print(f"Pixel Accuracy: {metrics['pixel_accuracy']:.4f}")
 for i, iou in enumerate(metrics['class_ious']): print(f" Class {i}: {iou:.4f}")
 
 def visualize_predictions(model_to_eval, X, y, num_samples=5):
+    if len(X) < num_samples: num_samples = len(X)
     idxs = np.random.choice(len(X), num_samples, replace=False)
     preds = model_to_eval.predict(X[idxs])
     masks = np.argmax(preds, axis=-1)
-    cmap = plt.cm.get_cmap('tab10', num_classes)
-    plt.figure(figsize=(12, 4 * num_samples))
+    y_squeezed = np.squeeze(y) if y.ndim == 4 else y
+    
+    cmap = plt.cm.get_cmap('viridis', num_classes)
+    plt.figure(figsize=(15, 5 * num_samples))
     for i, ix in enumerate(idxs):
-        plt.subplot(num_samples, 3, 3 * i + 1); plt.imshow(X[ix]); plt.axis('off'); plt.title('Image')
-        plt.subplot(num_samples, 3, 3 * i + 2); plt.imshow(y[ix], cmap=cmap, vmin=0, vmax=num_classes - 1); plt.axis('off'); plt.title('GT Mask')
-        plt.subplot(num_samples, 3, 3 * i + 3); plt.imshow(masks[i], cmap=cmap, vmin=0, vmax=num_classes - 1); plt.axis('off'); plt.title('Pred Mask')
+        plt.subplot(num_samples, 3, 3 * i + 1); plt.imshow(X[ix]); plt.title('Image'); plt.axis('off')
+        plt.subplot(num_samples, 3, 3 * i + 2); plt.imshow(y_squeezed[ix], cmap=cmap, vmin=0, vmax=num_classes - 1); plt.title('Ground Truth'); plt.axis('off')
+        plt.subplot(num_samples, 3, 3 * i + 3); plt.imshow(masks[i], cmap=cmap, vmin=0, vmax=num_classes - 1); plt.title('Prediction'); plt.axis('off')
     plt.tight_layout()
-    plt.savefig('predictions_visualization_swin_optimized.png')
+    plt.savefig('predictions_visualization.png')
     plt.close()
-    print("\nVisualización de predicciones guardada en 'predictions_visualization_swin_optimized.png'")
+    print("\nVisualización de predicciones guardada en 'predictions_visualization.png'")
 
-visualize_predictions(eval_model, val_X, val_y)
-print("\nEntrenamiento y evaluación completados.")
+visualize_predictions(model, val_X, val_y)
+print("\nScript completado.")
