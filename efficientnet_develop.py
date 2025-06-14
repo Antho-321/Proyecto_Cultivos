@@ -382,15 +382,23 @@ def adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0, smooth=1e
     dice_score = (2. * intersection + smooth) / (union + smooth)
     return 1.0 - dice_score
 
-def ultimate_iou_loss(y_true, y_pred):
-    """
-    Pérdida combinada que optimiza directamente IoU y los bordes.
-    """
-    lov = 0.50 * lovasz_softmax(y_pred, tf.cast(y_true, tf.int32), per_image=True)
-    abe_dice = 0.30 * adaptive_boundary_enhanced_dice_loss_tf(y_true, y_pred, gamma=2.0)
-    tver = 0.20 * tversky_loss(y_true, y_pred, alpha=0.4, beta=0.6) # beta > alpha penaliza más los FNs
-    
-    return lov + abe_dice + tver
+def focal_loss(alpha=None, gamma=2.0):
+    def loss(y_true, y_pred):
+        y_true = tf.cast(y_true[...,0], tf.int32)
+        y_true_oh = tf.one_hot(y_true, depth=y_pred.shape[-1])
+        p_t = tf.reduce_sum(y_true_oh * y_pred, axis=-1) + 1e-7
+        modulating_factor = tf.pow(1.0 - p_t, gamma)
+        if alpha is not None:
+            alpha_t = tf.reduce_sum(y_true_oh * tf.constant(alpha, dtype=tf.float32), axis=-1)
+        else:
+            alpha_t = 1.0
+        loss = -alpha_t * modulating_factor * tf.math.log(p_t)
+        return tf.reduce_mean(loss)
+    return loss
+
+def weighted_focal_loss(class_weights, gamma=2.0):
+    alpha = [class_weights[i] for i in sorted(class_weights)]
+    return focal_loss(alpha=alpha, gamma=gamma)
 
 class MeanIoU(tf.keras.metrics.Metric):
     def __init__(self,num_classes,name='mean_iou',**kwargs):
@@ -443,7 +451,7 @@ class IoUOptimizedModel(keras.Model):
 
         with tf.GradientTape() as tape:
             y_pred = self.seg_model(x, training=True)
-            loss = ultimate_iou_loss(y_true, y_pred)
+            loss = weighted_focal_loss(y_true, y_pred)
 
         trainable_vars = self.seg_model.trainable_variables
         grads = tape.gradient(loss, trainable_vars)
@@ -458,7 +466,7 @@ class IoUOptimizedModel(keras.Model):
         x, y_true = data
         y_pred = self.seg_model(x, training=False)
         
-        loss = ultimate_iou_loss(y_true, y_pred)
+        loss = weighted_focal_loss(y_true, y_pred)
         
         self.loss_tracker.update_state(loss)
         self.iou_metric.update_state(y_true, y_pred)
@@ -559,27 +567,95 @@ with tf.device(device):
 
 # 10) Evaluación & visualización ----------------------------------------------
 print("\n--- Evaluación del modelo final en CPU/GPU disponible ---")
-def evaluate_model(model_to_eval,X,y):
-    preds = model_to_eval.predict(X)
-    mask = np.argmax(preds,axis=-1)
+
+# ==============================================================================
+# === PASO 1: AÑADE TU NUEVA FUNCIÓN AQUÍ =====================================
+# ==============================================================================
+def print_class_iou(model, X, y_true, class_names=None):
+    """
+    Calcula e imprime el Intersection over Union (IoU) por clase.
+
+    Parámetros
+    ----------
+    model : tf.keras.Model
+        Modelo de segmentación entrenado.
+    X : np.ndarray, shape (B, H, W, C)
+        Imágenes de entrada.
+    y_true : np.ndarray, shape (B, H, W)
+        Máscaras verdaderas con etiquetas de clase (0..num_classes-1).
+    class_names : list de str, opcional
+        Nombres para cada clase; si es None, se usan los índices 0..num_classes-1.
+
+    Retorna
+    -------
+    ious : list de float
+        IoU calculado para cada clase.
+    """
+    # 1. Predecir máscaras
+    preds = model.predict(X)
+    pred_labels = np.argmax(preds, axis=-1)  # shape (B, H, W)
+
+    # 2. Número de clases
+    # Aseguramos que num_classes se base en el modelo y no solo en el batch de y_true
+    num_classes = model.output_shape[-1]
     ious = []
+    
+    # Si no se proveen nombres, crear una lista por defecto
+    if class_names is None:
+        class_names = [f"Clase {i}" for i in range(num_classes)]
+    elif len(class_names) != num_classes:
+        print(f"Advertencia: Se esperaban {num_classes} nombres de clase, pero se proporcionaron {len(class_names)}. Se usarán los índices.")
+        class_names = [f"Clase {i}" for i in range(num_classes)]
+
+
+    print("\n--- Reporte de Intersection over Union (IoU) por Clase ---")
+    # 3. Calcular IoU por clase
     for cls in range(num_classes):
-        yt = (y==cls).astype(int)
-        yp = (mask==cls).astype(int)
-        inter = np.sum(yt*yp)
-        union = np.sum(yt)+np.sum(yp)-inter
-        ious.append(inter/union if union>0 else 0)
-    return {'mean_iou':np.mean(ious),'class_ious':ious,'pixel_accuracy':np.mean(mask==y)}
+        # máscaras binarias para la clase cls
+        y_cls_true = (y_true == cls)
+        y_cls_pred = (pred_labels == cls)
 
-metrics = evaluate_model(eval_model,val_X,val_y)
-print(f"Mean IoU: {metrics['mean_iou']:.4f}")
-print(f"Pixel Accuracy: {metrics['pixel_accuracy']:.4f}")
-for i,iou in enumerate(metrics['class_ious']): print(f" Class {i}: {iou:.4f}")
+        # intersección y unión
+        intersection = np.logical_and(y_cls_true, y_cls_pred).sum()
+        union = np.logical_or(y_cls_true, y_cls_pred).sum()
 
+        # evitar división por cero
+        iou = intersection / union if union > 0 else np.nan
+        ious.append(iou)
+
+        # nombre de la clase para imprimir
+        label = class_names[cls]
+        print(f"IoU {label}: {iou:.4f}")
+
+    # 4. Imprimir mean IoU (ignorando clases no presentes en la verdad terreno)
+    mean_iou = np.nanmean(ious)
+    print(f"\nMean IoU (promedio de clases): {mean_iou:.4f}")
+
+    # 5. Calcular Pixel Accuracy (opcional, pero útil)
+    pixel_accuracy = np.mean(pred_labels == y_true)
+    print(f"Pixel Accuracy (todos los píxeles): {pixel_accuracy:.4f}")
+
+    return ious
+
+# ==============================================================================
+# === PASO 2: LLAMA A TU NUEVA FUNCIÓN =========================================
+# ==============================================================================
+
+# Define los nombres de tus clases. ¡El orden debe coincidir con los índices de las máscaras!
+# Ejemplo: si 0=fondo, 1=carro, 2=carretera...
+# El número de elementos debe ser igual a `num_classes`.
+class_labels = [f"Clase {i}" for i in range(num_classes)] # <-- ¡Personaliza esto!
+
+# Llama a la nueva función de evaluación en lugar de la antigua.
+# La función ahora imprime los resultados directamente.
+class_ious = print_class_iou(eval_model, val_X, val_y, class_names=class_labels)
+
+# La función visualize_predictions puede permanecer igual, ya que es independiente.
 def visualize_predictions(model_to_eval,X,y,num_samples=5):
     idxs = np.random.choice(len(X),num_samples,replace=False)
     preds = model_to_eval.predict(X[idxs])
     masks = np.argmax(preds,axis=-1)
+    # Asegúrate de que cmap se genere con el `num_classes` correcto
     cmap = plt.cm.get_cmap('tab10',num_classes)
     plt.figure(figsize=(12,4*num_samples))
     for i,ix in enumerate(idxs):
