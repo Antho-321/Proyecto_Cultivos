@@ -119,29 +119,19 @@ class WindowAttention(tf.keras.layers.Layer):
         rel_coords = rel_coords * [(2*window_size[1]-1), 1]
         rel_index = tf.reduce_sum(rel_coords, axis=-1)
 
-        # --- SOLUCIÓN GPU: INICIO ---
-        # Forzamos la creación del peso (variable no entrenable) en la GPU
-        # para evitar un error de lectura de recursos entre dispositivos.
-        # Nota: Esto asume que se está entrenando en /GPU:0 y fallará si no hay GPU.
-        # Una solución más robusta usaría el método build() de la capa.
-        if gpus:
-            with tf.device('/GPU:0'):
-                self.relative_position_index = self.add_weight(
-                    shape=rel_index.shape,
-                    dtype=tf.int32,
-                    trainable=False,
-                    initializer=tf.constant_initializer(rel_index),
-                    name='relative_position_index'
-                )
-        else:
-             self.relative_position_index = self.add_weight(
-                    shape=rel_index.shape,
-                    dtype=tf.int32,
-                    trainable=False,
-                    initializer=tf.constant_initializer(rel_index),
-                    name='relative_position_index'
-                )
-        # --- SOLUCIÓN GPU: FIN ---
+        # --- IMPLEMENTACIÓN DE LA SOLUCIÓN 1: INICIO ---
+        # Convertir el tensor `rel_index` (EagerTensor) a un array de NumPy
+        # antes de pasarlo al inicializador para evitar el TypeError.
+        rel_index_np = rel_index.numpy()
+        self.relative_position_index = self.add_weight(
+            shape=rel_index_np.shape,
+            dtype=tf.int32,
+            trainable=False,
+            # Se usa tf.keras.initializers.Constant que acepta arrays de NumPy.
+            initializer=tf.keras.initializers.Constant(rel_index_np),
+            name='relative_position_index'
+        )
+        # --- IMPLEMENTACIÓN DE LA SOLUCIÓN 1: FIN ---
 
     def call(self, x, mask=None):
         B_, N, C = tf.unstack(tf.shape(x))
@@ -154,11 +144,11 @@ class WindowAttention(tf.keras.layers.Layer):
         attn = tf.matmul(q, k, transpose_b=True)
 
         rel_bias = tf.gather(self.relative_position_bias_table,
-                             tf.reshape(self.relative_position_index, [-1]))
+                              tf.reshape(self.relative_position_index, [-1]))
         rel_bias = tf.reshape(rel_bias,
-                              (self.window_size[0]*self.window_size[1],
-                               self.window_size[0]*self.window_size[1],
-                               -1))
+                                (self.window_size[0]*self.window_size[1],
+                                 self.window_size[0]*self.window_size[1],
+                                 -1))
         rel_bias = tf.transpose(rel_bias, (2,0,1))
         attn = attn + tf.expand_dims(rel_bias, 0)
 
