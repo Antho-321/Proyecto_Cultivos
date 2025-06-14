@@ -55,6 +55,7 @@ from tensorflow.keras.callbacks import (
 )
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
 import matplotlib.pyplot as plt
+from lovasz_losses_tf import lovasz_softmax
 
 # -------------------------------------------------------------------------------
 # Monkey-patch para usar un Lambda layer en SE module de keras_efficientnet_v2
@@ -65,7 +66,6 @@ import matplotlib.pyplot as plt
 # pip install git+https://github.com/bermanmaxim/LovaszSoftmax.git
 try:
     import keras_efficientnet_v2.efficientnet_v2 as _efn2
-    from lovasz_losses_tf import lovasz_softmax
     from keras_efficientnet_v2 import EfficientNetV2S
     
     def patched_se_module(inputs, se_ratio=0.25, name=""):
@@ -88,7 +88,6 @@ except ImportError as e:
     print("Por favor, instala las dependencias: pip install keras-efficientnet-v2 tensorflow-addons")
     # Definimos placeholders para que el script no falle inmediatamente
     EfficientNetV2S = tf.keras.applications.EfficientNetV2S
-    lovasz_softmax = lambda y_pred, y_true, **kwargs: tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
 
 
 # --- 2) Definición de los componentes Swin Transformer -------------------------
