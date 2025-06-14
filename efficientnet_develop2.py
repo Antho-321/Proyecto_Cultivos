@@ -444,10 +444,10 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
     # Los nombres de las capas pueden variar. Es mejor buscarlas por su factor de reducción de tamaño.
     # Input: 256 -> s1: 128, s2: 64, s3: 32, s4: 16
     layer_names = [l.name for l in backbone.layers]
-    s1_name = next((name for name in reversed(layer_names) if 'add' in name and backbone.get_layer(name).output_shape[1] == 128), None)
-    s2_name = next((name for name in reversed(layer_names) if 'add' in name and backbone.get_layer(name).output_shape[1] == 64), None)
-    s3_name = next((name for name in reversed(layer_names) if 'add' in name and backbone.get_layer(name).output_shape[1] == 32), None)
-    s4_name = next((name for name in reversed(layer_names) if 'add' in name and backbone.get_layer(name).output_shape[1] == 16), None)
+    s1_name = next((name for name in reversed(layer_names) if 'add' in name and backbone.get_layer(name).output.shape[1] == 128), None)
+    s2_name = next((name for name in reversed(layer_names) if 'add' in name and backbone.get_layer(name).output.shape[1] == 64), None)
+    s3_name = next((name for name in reversed(layer_names) if 'add' in name and backbone.get_layer(name).output.shape[1] == 32), None)
+    s4_name = next((name for name in reversed(layer_names) if 'add' in name and backbone.get_layer(name).output.shape[1] == 16), None)
 
     if not all([s1_name, s2_name, s3_name, s4_name]):
         raise ValueError("No se pudieron encontrar todas las capas de skip connection requeridas.")
