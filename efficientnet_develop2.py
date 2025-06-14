@@ -262,9 +262,16 @@ def WASP(x, out_filters=256, dilations=(1, 2, 4, 8), use_gap=True, use_attention
             
         # Rama de Global Average Pooling
         if use_gap:
+            # La forma espacial de 'x' a la que queremos volver (ej: (16, 16))
+            target_shape = x.shape[1:3]
+            
             g = GlobalAveragePooling2D(keepdims=True)(x)
             g = conv_block(g, out_filters, 1)
-            g = tf.image.resize(g, tf.shape(x)[1:3], method='bilinear')
+            
+            # --- CORRECCIÓN ---
+            # Usa una capa Keras para redimensionar el tensor simbólico
+            g = UpSampling2D(size=target_shape, interpolation='bilinear')(g)
+            
             convs.append(g)
             
         # Fusión y proyección final
