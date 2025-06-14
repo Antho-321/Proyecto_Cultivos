@@ -196,14 +196,24 @@ def build_model(shape=(256,256,3), num_classes_arg=None):
     inp = backbone.input
     bottleneck = backbone.get_layer('post_swish').output
 
-    # extraer skip connections
-    skips = {}
+    s1, s2, s3, s4 = None, None, None, None
+
+    # Búsqueda hacia atrás para encontrar las últimas capas 'add' de cada tamaño
     for layer in reversed(backbone.layers):
         if 'add' in layer.name:
-            h = layer.output.shape[1]
-            if h in (128,64,32,16) and h not in skips:
-                skips[h] = layer.output
-    s1,s2,s3,s4 = skips[128], skips[64], skips[32], skips[16]
+            shape = layer.output.shape[1]
+            if shape == 128 and s1 is None:
+                s1 = layer.output  # 128x128
+            elif shape == 64 and s2 is None:
+                s2 = layer.output  # 64x64
+            elif shape == 32 and s3 is None:
+                s3 = layer.output  # 32x32
+            elif shape == 16 and s4 is None:
+                s4 = layer.output  # 16x16
+    
+    # Verificar que todas las capas fueron encontradas
+    if any(s is None for s in [s1, s2, s3, s4]):
+        raise ValueError("No se pudieron encontrar todas las capas de skip connection requeridas.")
 
     x = WASP(bottleneck, out_channels=256, dilation_rates=(2,4,6),
              use_attention=True, name="WASP")
