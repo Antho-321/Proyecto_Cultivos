@@ -254,11 +254,10 @@ def WASP(x,
 
 def build_model(shape=(256, 256, 3), num_classes_arg=None):
     """
-    Construye un modelo de segmentación con backbone EfficientNetV2S
-    y un decodificador tipo U-Net que usa una búsqueda dinámica de capas
-    y un ASPP mejorado.
+    Construye un modelo DeepLab-like con EfficientNetV2S + decoder tipo U-Net.
+    La selección de *skip connections* se hace de forma automática.
     """
-    # --- Definición del backbone ---
+    # --- Backbone -----------------------------------------------------------
     backbone = EfficientNetV2S(
         input_shape=shape,
         num_classes=0,
@@ -266,31 +265,46 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
         include_preprocessing=False
     )
 
-    inp = backbone.input
-    bottleneck = backbone.get_layer('post_swish').output  # salida del encoder, 8×8
+    # Resoluciones objetivo (H == W) empezando en 1/2 y terminando en 1/16
+    h0 = shape[0]               # 256
+    targets = [h0 // (2 ** i) for i in range(1, 5)]   # [128, 64, 32, 16]
 
-    # Inicializar skips
-    s1 = s2 = s3 = s4 = None
+    # Palabras clave que preferimos para los *skip* (en orden)
+    prefer = ('add', 'project', 'activation', 'bn')
 
-    # Búsqueda hacia atrás de las últimas capas 'add' para cada resolución
-    for layer in reversed(backbone.layers):
-        if 'add' in layer.name:
-            h, w = K.int_shape(layer.output)[1:3]
-            if h == 128 and s1 is None:
-                s1 = layer.output  # 128×128
-            elif h == 64 and s2 is None:
-                s2 = layer.output  # 64×64
-            elif h == 32 and s3 is None:
-                s3 = layer.output  # 32×32
-            elif h == 16 and s4 is None:
-                s4 = layer.output  # 16×16
+    def _find_skip(target_h):
+        """
+        Devuelve el `tensor` de la primera capa (recorriendo de abajo arriba)
+        cuyo alto sea `target_h`.  Se priorizan capas con nombres en `prefer`.
+        """
+        # 1) Buscar capas preferidas
+        for key in prefer:
+            for layer in reversed(backbone.layers):
+                out_shape = K.int_shape(layer.output)
+                if out_shape[1] == target_h and key in layer.name:
+                    return layer.output
+        # 2) Si no hay preferidas, tomar la primera que coincida en tamaño
+        for layer in reversed(backbone.layers):
+            out_shape = K.int_shape(layer.output)
+            if out_shape[1] == target_h:
+                return layer.output
+        # 3) Si aún no se encuentra, devuelve None
+        return None
 
-    # Verificar que todas las skips fueron encontradas
-    if any(s is None for s in [s1, s2, s3, s4]):
-        raise ValueError("No se pudieron encontrar todas las capas de skip connection requeridas.")
+    # Buscar los cuatro *skips*
+    s1, s2, s3, s4 = [_find_skip(h) for h in targets]
 
-    # --- Ejemplo de cuello de botella (ASPP mejorado) ---
-    # (Aquí iría tu implementación de WASP o ASPP)
+    # Verificación final
+    if any(s is None for s in (s1, s2, s3, s4)):
+        raise ValueError(
+            "No se pudieron localizar todas las capas de skip connection.\n"
+            f"Encontradas: {[s is not None for s in (s1, s2, s3, s4)]}\n"
+            "Revisa la tabla de capas del backbone o ajusta la heurística."
+        )
+
+    bottleneck = backbone.get_layer('post_swish').output  # 8×8
+
+    # --- WASP (ASPP mejorado) ----------------------------------------------
     x = WASP(bottleneck,
              out_channels=256,
              dilation_rates=(2, 4, 6),
@@ -299,39 +313,40 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
              use_attention=True,
              name="WASP")
 
-    # --- Decoder tipo U-Net usando los skips ---
-    # Bloque 1: 8×8 → 16×16
+    # --- Decoder tipo U-Net -------------------------------------------------
+    # 1) 8→16
     x = UpSampling2D()(x)
     x = Concatenate()([x, s4])
     x = conv_block(x, 128, 3)
     x = conv_block(x, 128, 3)
 
-    # Bloque 2: 16×16 → 32×32
+    # 2) 16→32
     x = UpSampling2D()(x)
     x = Concatenate()([x, s3])
     x = conv_block(x, 64, 3)
     x = conv_block(x, 64, 3)
 
-    # Bloque 3: 32×32 → 64×64
+    # 3) 32→64
     x = UpSampling2D()(x)
     x = Concatenate()([x, s2])
     x = conv_block(x, 48, 3)
     x = conv_block(x, 48, 3)
 
-    # Bloque 4: 64×64 → 128×128
+    # 4) 64→128
     x = UpSampling2D()(x)
     x = Concatenate()([x, s1])
     x = conv_block(x, 32, 3)
     x = conv_block(x, 32, 3)
 
-    # Upsample final a 256×256
+    # Upsample final 128→256
     x = UpSampling2D()(x)
 
     # Capa de salida
-    out = Conv2D(num_classes_arg, 1, padding='same', activation='softmax', dtype='float32')(x)
+    out = Conv2D(num_classes_arg, 1, padding='same',
+                 activation='softmax',
+                 dtype='float32')(x)
 
-    return Model(inp, out), backbone
-
+    return Model(backbone.input, out), backbone
 
 # 7) Pérdidas Mejoradas y Métricas Personalizadas ------------------------------
 
