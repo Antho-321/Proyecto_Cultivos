@@ -507,7 +507,7 @@ with tf.device(device):
         TensorBoard(log_dir='./logs/iou_phase1_head', update_freq='epoch')
     ]
     
-    iou_aware_model.fit(train_X, train_y, batch_size=12, epochs=10,
+    iou_aware_model.fit(train_X, train_y, batch_size=12, epochs=5,
                         validation_data=val_gen, callbacks=cbs1)
     
     print(f"Cargando mejores pesos de la fase 1 desde: {ckpt1_path}")
@@ -528,7 +528,7 @@ with tf.device(device):
         TensorBoard(log_dir='./logs/iou_phase2_partial', update_freq='epoch')
     ]
 
-    iou_aware_model.fit(train_X, train_y, batch_size=6, epochs=10,
+    iou_aware_model.fit(train_X, train_y, batch_size=6, epochs=5,
                         validation_data=val_gen, callbacks=cbs2)
 
     print(f"Cargando mejores pesos de la fase 2 desde: {ckpt2_path}")
@@ -548,7 +548,7 @@ with tf.device(device):
         TensorBoard(log_dir='./logs/iou_phase3_full', update_freq='epoch')
     ]
     
-    iou_aware_model.fit(train_X, train_y, batch_size=4, epochs=10,
+    iou_aware_model.fit(train_X, train_y, batch_size=4, epochs=5,
                         validation_data=val_gen, callbacks=cbs3)
     
     print(f"Cargando pesos finales desde: {ckpt3_path}")
