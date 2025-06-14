@@ -92,7 +92,13 @@ def get_training_augmentation():
         A.GaussianBlur(blur_limit=3, p=0.1),
         A.GaussNoise(p=0.1),
         A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=15, val_shift_limit=10, p=0.2),
-        A.CoarseDropout(max_holes=8, max_height=32, max_width=32, min_holes=1, min_height=16, min_width=16, p=0.2),
+        A.CoarseDropout(
+            num_holes_range=(8, 8),
+            hole_height_range=(16, 32),
+            hole_width_range=(16, 32),
+            fill_value=0,
+            p=0.2,
+        )
     ])
 
 def get_validation_augmentation():
