@@ -429,11 +429,33 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
              anti_gridding=True, use_attention=True, name="WASP")
 
     # --- Decoder (U-Net) ---
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x); x = Concatenate()([x, s4]); x = conv_block(x, 128, 3); x = conv_block(x, 128, 3)
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x); x = Concatenate()([x, s3]); x = conv_block(x, 64, 3); x = conv_block(x, 64, 3)
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x); x = Concatenate()([x, s2]); x = conv_block(x, 48, 3); x = conv_block(x, 48, 3)
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x); x = Concatenate()([x, s1]); x = conv_block(x, 32, 3); x = conv_block(x, 32, 3)
-    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    # -- SOLUCIÓN ROBUSTA: Se reestructura todo el decodificador para seguir un patrón consistente
+    # y arquitectónicamente sólido (Concat -> Conv -> Conv -> Up), que resuelve todos los
+    # errores de dimensión en cascada del código original.
+
+    # Etapa 1: Salida 32x32
+    x = Concatenate()([x, s4])  # x (16x16) y s4 (16x16) se unen primero.
+    x = conv_block(x, 128, 3)
+    x = conv_block(x, 128, 3)
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x) # -> 32x32
+
+    # Etapa 2: Salida 64x64
+    x = Concatenate()([x, s3])  # x (32x32) y s3 (32x32)
+    x = conv_block(x, 64, 3)
+    x = conv_block(x, 64, 3)
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x) # -> 64x64
+
+    # Etapa 3: Salida 128x128
+    x = Concatenate()([x, s2])  # x (64x64) y s2 (64x64)
+    x = conv_block(x, 48, 3)
+    x = conv_block(x, 48, 3)
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x) # -> 128x128
+
+    # Etapa 4: Salida 256x256
+    x = Concatenate()([x, s1])  # x (128x128) y s1 (128x128)
+    x = conv_block(x, 32, 3)
+    x = conv_block(x, 32, 3)
+    x = UpSampling2D(size=(2, 2), interpolation='bilinear')(x) # -> 256x256
     
     out = Conv2D(num_classes_arg, 1, padding='same', activation='softmax', dtype='float32')(x)
     return Model(inp, out), backbone
