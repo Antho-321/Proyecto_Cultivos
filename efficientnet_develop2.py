@@ -218,7 +218,7 @@ class SwinTransformerBlock(layers.Layer):
             (-1, wsH * wsW, C)
         )
 
-        attn_windows = self.attn(x_windows, self.attn_mask)
+        attn_windows = self.attn(x_windows, mask=self.attn_mask)
 
         x = tf.reshape(
             tf.transpose(
