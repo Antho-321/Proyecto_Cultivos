@@ -140,11 +140,11 @@ class WindowAttention(tf.keras.layers.Layer):
         attn = tf.matmul(q, k, transpose_b=True)
 
         rel_bias = tf.gather(self.relative_position_bias_table,
-                              tf.reshape(self.relative_position_index, [-1]))
+                             tf.reshape(self.relative_position_index, [-1]))
         rel_bias = tf.reshape(rel_bias,
-                               (self.window_size[0]*self.window_size[1],
-                                self.window_size[0]*self.window_size[1],
-                                -1))
+                              (self.window_size[0]*self.window_size[1],
+                               self.window_size[0]*self.window_size[1],
+                               -1))
         rel_bias = tf.transpose(rel_bias, (2,0,1))
         attn = attn + tf.expand_dims(rel_bias, 0)
 
@@ -177,6 +177,13 @@ class SwinTransformerBlock(tf.keras.layers.Layer):
         self.num_heads = num_heads
         self.window_size = (window_size, window_size)
         self.shift_size = (shift_size, shift_size)
+        
+        # --- SOLUCIÓN ROBUSTA: INICIO ---
+        # Pre-calculamos la longitud de la secuencia (L = H*W) como un entero de Python.
+        # Esto evita el error de usar un tensor simbólico en la capa Reshape.
+        self.seq_len = input_resolution[0] * input_resolution[1]
+        # --- SOLUCIÓN ROBUSTA: FIN ---
+
         if min(input_resolution) <= window_size:
             self.shift_size = (0, 0)
             self.window_size = input_resolution
@@ -222,20 +229,13 @@ class SwinTransformerBlock(tf.keras.layers.Layer):
 
     def call(self, x):
         H, W = self.input_resolution
-        
-        # --- FIX ---
-        # Obtenemos la longitud de la secuencia (L) de forma dinámica,
-        # pero usamos la dimensión de canales (C) que es estática y se
-        # definió como 'self.dim' en el constructor __init__.
-        # Esto evita pasar un tensor simbólico a la capa Reshape.
-        shape = tf.shape(x)
-        L = shape[1]
-        C = self.dim
+        C = self.dim  # 'C' es una dimensión estática (entero de Python) definida en __init__
 
         shortcut = x
         x = self.norm1(x)
         
-        # Esta línea ahora es segura porque H, W, y C son enteros de Python.
+        # Convertir de secuencia a imagen: (B, L, C) -> (B, H, W, C)
+        # Esta capa es segura porque H, W, y C son todos enteros de Python.
         x = Reshape((H, W, C))(x)
 
         # shift: Desplazamiento cíclico si es necesario (para SW-MSA)
@@ -274,8 +274,12 @@ class SwinTransformerBlock(tf.keras.layers.Layer):
             ssH, ssW = self.shift_size
             x = tf.roll(x, shift=[ssH, ssW], axis=[1, 2])
 
-        # Aplanamos de nuevo a la forma (Batch, Secuencia, Canales)
-        x = Reshape((L, C))(x)
+        # --- SOLUCIÓN ROBUSTA: INICIO ---
+        # Aplanamos de nuevo a la forma (Batch, Secuencia, Canales).
+        # Usamos self.seq_len, que es un entero estático (H*W), en lugar
+        # del tensor simbólico 'L'. Esto resuelve el error OperatorNotAllowedInGraphError.
+        x = Reshape((self.seq_len, C))(x)
+        # --- SOLUCIÓN ROBUSTA: FIN ---
         
         # FFN: Conexión residual y red Feed-Forward
         x = shortcut + self.drop_path(x)
