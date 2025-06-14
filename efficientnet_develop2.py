@@ -425,11 +425,7 @@ def WASP(x, out_channels=256, dilation_rates=(1, 2, 4, 8), use_global_pool=True,
 
 def build_model(shape=(256, 256, 3), num_classes_arg=None):
     # --- Encoder ---
-    backbone = EfficientNetV2S(
-        input_shape=shape,
-        weights='imagenet', # Usar 'weights' en lugar de 'pretrained'
-        include_top=False, # Usar 'include_top'
-    )
+    backbone = EfficientNetV2S( input_shape=shape, pretrained="imagenet", include_top=False )
     backbone.trainable = True # Asegurarse de que el backbone sea entrenable
     inp = backbone.input
     
