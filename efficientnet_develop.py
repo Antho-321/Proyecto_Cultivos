@@ -59,6 +59,7 @@ import matplotlib.pyplot as plt
 # -------------------------------------------------------------------------------
 import keras_efficientnet_v2.efficientnet_v2 as _efn2
 from lovasz_losses_tf import lovasz_softmax
+from typing import Union, List, Dict
 
 def patched_se_module(inputs, se_ratio=0.25, name=""):
     data_format = K.image_data_format()
@@ -134,6 +135,7 @@ val_X,   val_y   = load_augmented_dataset('Balanced/val/images',   'Balanced/val
 # 5) Número de clases & modelo ----------------------------------------------
 num_classes = int(np.max(train_y) + 1)
 print(f"\nNúmero de clases detectado: {num_classes}")
+weights_dict_silent = calculate_class_weights(train_y, verbose=False)
 
 # 6) Definición del Modelo (Arquitectura) ------------------------------------
 
@@ -400,6 +402,58 @@ def weighted_focal_loss(class_weights, gamma=2.0):
     alpha = [class_weights[i] for i in sorted(class_weights)]
     return focal_loss(alpha=alpha, gamma=gamma)
 
+def calculate_class_weights(masks: Union[np.ndarray, List[np.ndarray]], verbose: bool = True) -> Dict[int, float]:
+    """
+    Calcula los pesos de clase basados en la frecuencia inversa de los píxeles.
+
+    Args:
+        masks (np.ndarray or list of np.ndarray): Máscara o lista de máscaras de segmentación 
+                                                  con forma (H, W) o (N, H, W).
+                                                  Los valores son los índices de clase.
+        verbose (bool): Si es True, imprime un resumen de los pesos calculados.
+
+    Returns:
+        dict: Un diccionario donde las claves son los ID de clase y los valores son sus pesos.
+              Ej: {0: 1.2, 1: 0.8, 2: 3.5}
+    """
+    # Si es lista, convertimos a un único array de numpy
+    masks_arr = np.array(masks)  # Forma resultante: (N, H, W) o (H, W)
+    
+    # Aplanamos el array para tener una lista 1D de todos los píxeles de clase
+    flat_pixels = masks_arr.flatten()
+    
+    # Contamos la aparición de cada clase
+    classes, counts = np.unique(flat_pixels, return_counts=True)
+    
+    # Determinamos el número total de clases (basado en el ID de clase más alto)
+    num_classes = int(flat_pixels.max()) + 1
+    total_pixels = flat_pixels.size
+
+    if verbose:
+        print("\n--- Pesos por clase (calculados por frecuencia inversa) ---")
+
+    weights = {}
+    # Calculamos el peso para las clases que sí aparecen en las máscaras
+    for cls, count in zip(classes, counts):
+        # Fórmula de peso: Inverso de la frecuencia de la clase
+        weight = total_pixels / (num_classes * count)
+        weights[int(cls)] = weight
+        if verbose:
+            percentage = (count / total_pixels) * 100
+            print(f"Clase {cls}: peso = {weight:.4f} ({count} píxeles, {percentage:.2f}%)")
+
+    # Asignamos peso 0 a las clases que no aparecen en ninguna máscara
+    present_classes = set(classes)
+    all_possible_classes = set(range(num_classes))
+    missing_classes = all_possible_classes - present_classes
+    
+    for cls in missing_classes:
+        weights[cls] = 0.0
+        if verbose:
+            print(f"Clase {cls}: peso = 0.0000 (clase ausente)")
+
+    return weights
+
 class MeanIoU(tf.keras.metrics.Metric):
     def __init__(self,num_classes,name='mean_iou',**kwargs):
         super().__init__(name=name,**kwargs)
@@ -438,6 +492,7 @@ class IoUOptimizedModel(keras.Model):
         
         self.loss_tracker = keras.metrics.Mean(name="loss")
         self.iou_metric = MeanIoU(num_classes=num_classes, name='enhanced_mean_iou')
+        self.loss_fn = weighted_focal_loss(weights_dict_silent, gamma=2.0)
 
     def call(self, inputs, training=False):
         return self.seg_model(inputs, training=training)
@@ -451,7 +506,7 @@ class IoUOptimizedModel(keras.Model):
 
         with tf.GradientTape() as tape:
             y_pred = self.seg_model(x, training=True)
-            loss = weighted_focal_loss(y_true, y_pred)
+            loss = self.loss_fn(y_true, y_pred)
 
         trainable_vars = self.seg_model.trainable_variables
         grads = tape.gradient(loss, trainable_vars)
@@ -466,7 +521,7 @@ class IoUOptimizedModel(keras.Model):
         x, y_true = data
         y_pred = self.seg_model(x, training=False)
         
-        loss = weighted_focal_loss(y_true, y_pred)
+        loss = self.loss_fn(y_true, y_pred)
         
         self.loss_tracker.update_state(loss)
         self.iou_metric.update_state(y_true, y_pred)
