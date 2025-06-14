@@ -429,17 +429,6 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
     backbone.trainable = True # Asegurarse de que el backbone sea entrenable
     inp = backbone.input
     
-    # Identificar la capa de salida del encoder correcta
-    # 'post_swish' puede no existir, buscar una capa de salida apropiada.
-    # Vamos a usar una capa con un downsampling conocido, p.ej. /16 o /32
-    # Para EfficientNetV2S con input (256, 256), la salida después de block6a es (8, 8, 256)
-    encoder_output_layer_name = 'add_35' # Un nombre típico de capa de skip connection profunda. Ajustar si es necesario.
-    try:
-        bottleneck = backbone.get_layer(encoder_output_layer_name).output
-    except ValueError:
-        print(f"Capa '{encoder_output_layer_name}' no encontrada. Usando la salida final del backbone.")
-        bottleneck = backbone.output
-
     # --- Extracción dinámica de las skip connections ---
     # Los nombres de las capas pueden variar. Es mejor buscarlas por su factor de reducción de tamaño.
     # Input: 256 -> s1: 128, s2: 64, s3: 32, s4: 16
@@ -456,6 +445,9 @@ def build_model(shape=(256, 256, 3), num_classes_arg=None):
     s2 = backbone.get_layer(s2_name).output
     s3 = backbone.get_layer(s3_name).output
     s4 = backbone.get_layer(s4_name).output
+
+    # Use the deepest feature map (s4) as the input for the next block.
+    bottleneck = s4
 
     # --- Bloque Intermedio: Swin Transformer ---
     H, W, C = map(int, bottleneck.shape[1:])
