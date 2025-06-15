@@ -1,10 +1,11 @@
+
 # train.py
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -16,90 +17,69 @@ import numpy as np
 from model import CloudDeepLabV3Plus
 from distribucion_por_clase import imprimir_distribucion_clases_post_augmentation 
 
-# =================================================================================
-# 1. CONFIGURACIÓN
-# Centraliza todos los hiperparámetros y rutas aquí.
-# =================================================================================
+# ---------------------------------------------------------------------------------
+# 1. CONFIGURACIÓN  (añadimos dos hiperparámetros nuevos)
+# ---------------------------------------------------------------------------------
 class Config:
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    # --- MUY IMPORTANTE: Modifica estas rutas a tus directorios de datos ---
-    TRAIN_IMG_DIR = "Balanced/train/images"
-    TRAIN_MASK_DIR = "Balanced/train/masks"
-    VAL_IMG_DIR = "Balanced/val/images"
-    VAL_MASK_DIR = "Balanced/val/masks"
-    
-    # --- Hiperparámetros de entrenamiento ---
-    LEARNING_RATE = 1e-4
-    BATCH_SIZE = 8
-    NUM_EPOCHS = 50
-    NUM_WORKERS = 2
-    
-    # --- Dimensiones de la imagen ---
-    IMAGE_HEIGHT = 256
-    IMAGE_WIDTH = 256
-    
-    # --- Configuraciones adicionales ---
-    PIN_MEMORY = True
-    LOAD_MODEL = False # Poner a True si quieres continuar un entrenamiento
-    MODEL_SAVE_PATH = "best_model.pth.tar"
+    DEVICE            = "cuda" if torch.cuda.is_available() else "cpu"
 
-# =================================================================================
-# 2. DATASET PERSONALIZADO
-# Clase para cargar las imágenes y sus máscaras de segmentación.
-# =================================================================================
-# =================================================================================
-# 2. DATASET PERSONALIZADO (versión alineada con load_dataset)
-# =================================================================================
+    TRAIN_IMG_DIR     = "Balanced/train/images"
+    TRAIN_MASK_DIR    = "Balanced/train/masks"
+    VAL_IMG_DIR       = "Balanced/val/images"
+    VAL_MASK_DIR      = "Balanced/val/masks"
+
+    LEARNING_RATE     = 1e-4
+    BATCH_SIZE        = 8
+    NUM_EPOCHS        = 50
+    NUM_WORKERS       = 2
+
+    IMAGE_HEIGHT      = 256
+    IMAGE_WIDTH       = 256
+
+    # —— NUEVO ——
+    CLASS4_WEIGHT     = 6      # cuántas veces “vale” una imagen con clase 4
+    CROP_P_ALWAYS     = 1.0    # fuerza el CropAroundClass4 cuando haya píxeles de clase 4
+
+    PIN_MEMORY        = True
+    LOAD_MODEL        = False
+    MODEL_SAVE_PATH   = "best_model.pth.tar"
+
+# ---------------------------------------------------------------------------------
+# 2. DATASET PERSONALIZADO con flag ‘contains_class4’
+# ---------------------------------------------------------------------------------
 class CloudDataset(torch.utils.data.Dataset):
-    """
-    Dataset para segmentación de nubes que asume:
-      • Las imágenes están en image_dir y se llaman *.jpg* o *.png*.
-      • Las máscaras correspondientes están en mask_dir y se llaman
-        '{nombre_imagen_sin_extensión}_mask.png'.
-      • Las máscaras son imágenes en escala de grises con 0-255
-        (0 = fondo, 255 = nube). Se normalizan a 0-1.
-    """
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
     def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
-        self.image_dir = image_dir
-        self.mask_dir = mask_dir
-        self.transform = transform
+        self.image_dir  = image_dir
+        self.mask_dir   = mask_dir
+        self.transform  = transform
+        self.images     = [f for f in os.listdir(image_dir)
+                           if f.lower().endswith(self._IMG_EXTENSIONS)]
 
-        # Lista de archivos que cumplen con las extensiones permitidas
-        self.images = [
-            f for f in os.listdir(image_dir)
-            if f.lower().endswith(self._IMG_EXTENSIONS)
-        ]
+        # Pre-escaneamos las máscaras UNA sola vez para saber si incluyen clase 4
+        self.contains_class4 = []
+        for img_file in self.images:
+            mask_path = self._mask_path_from_image_name(img_file)
+            mask = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)
+            self.contains_class4.append((mask == 4).any())
 
-    def __len__(self) -> int:
-        return len(self.images)
+    def __len__(self):  return len(self.images)
 
     def _mask_path_from_image_name(self, image_filename: str) -> str:
-        """
-        Convierte 'foto123.jpg' -> 'foto123_mask.png'
-        """
-        name_without_ext = image_filename.rsplit('.', 1)[0]
-        mask_filename = f"{name_without_ext}_mask.png"
-        return os.path.join(self.mask_dir, mask_filename)
+        name = image_filename.rsplit('.', 1)[0]
+        return os.path.join(self.mask_dir, f"{name}_mask.png")
 
     def __getitem__(self, idx: int):
-        img_filename = self.images[idx]
-        img_path = os.path.join(self.image_dir, img_filename)
+        img_path  = os.path.join(self.image_dir, self.images[idx])
+        mask_path = self._mask_path_from_image_name(self.images[idx])
 
-        mask_path = self._mask_path_from_image_name(img_filename)
-        if not os.path.exists(mask_path):
-            raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
-
-        # Carga la imagen RGB y la máscara en escala de grises
         image = np.array(Image.open(img_path).convert("RGB"))
-        mask = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
+        mask  = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
 
         if self.transform:
-            augmented = self.transform(image=image, mask=mask)
-            image = augmented["image"]           # Tensor C×H×W, float32
-            mask  = augmented["mask"]            # Tensor H×W, int64
+            aug = self.transform(image=image, mask=mask)
+            image, mask = aug["image"], aug["mask"]
 
         return image, mask
 
@@ -131,6 +111,50 @@ class CropAroundClass4(A.DualTransform):
     def apply_to_mask(self, mask, y1=0, x1=0, **params):
         return mask[y1 : y1 + self.ch,
                     x1 : x1 + self.cw]
+
+class CropWithoutBackground(A.DualTransform):
+    """
+    Recorta un patch que NO contenga píxeles de clase 0 (background).
+    • Se activa con probabilidad p (por defecto 0.7).  
+    • Si la máscara ya carece de fondo, simplemente pasa de largo.  
+    • Intentará hasta 10 veces encontrar un recorte válido; si no lo
+      consigue, hace un recorte aleatorio normal.
+    """
+    def __init__(self, crop_size=(96, 96), p: float = 0.7):
+        super().__init__(always_apply=False, p=p)
+        self.ch, self.cw = crop_size
+
+    # ------------------------------------------------------------------
+    def get_params_dependent_on_targets(self, params):
+        image, mask = params["image"], params["mask"]
+        h, w        = mask.shape[:2]
+
+        # -- Si la imagen NO contiene fondo ⇒ no hacemos nada especial
+        if not (mask == 0).any():
+            return {"y1": 0, "x1": 0, "skip": True}
+
+        # -- Hasta 10 intentos para encontrar un recorte sin fondo
+        ys_fg, xs_fg = np.where(mask != 0)
+        for _ in range(10):
+            i          = np.random.randint(len(ys_fg))
+            cy, cx     = int(ys_fg[i]), int(xs_fg[i])
+            y1         = int(np.clip(cy - self.ch // 2, 0, h - self.ch))
+            x1         = int(np.clip(cx - self.cw // 2, 0, w - self.cw))
+            crop_mask  = mask[y1:y1 + self.ch, x1:x1 + self.cw]
+            if (crop_mask == 0).sum() == 0:          # ¡Sin fondo!
+                return {"y1": y1, "x1": x1, "skip": False}
+
+        # Fall-back: recorte aleatorio
+        y1 = np.random.randint(0, h - self.ch + 1)
+        x1 = np.random.randint(0, w - self.cw + 1)
+        return {"y1": y1, "x1": x1, "skip": False}
+
+    # ------------------------------------------------------------------
+    def apply(self, img, y1=0, x1=0, skip=False, **params):
+        return img if skip else img[y1:y1 + self.ch, x1:x1 + self.cw]
+
+    def apply_to_mask(self, mask, y1=0, x1=0, skip=False, **params):
+        return mask if skip else mask[y1:y1 + self.ch, x1:x1 + self.cw]
 
 # =================================================================================
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN
@@ -215,53 +239,56 @@ def main():
     
     # --- Transformaciones y Aumento de Datos ---
     train_transform = A.Compose([
-        CropAroundClass4(crop_size=(256, 256), p=0.7),   # 70 % de los casos
+        CropAroundClass4(crop_size=(96, 96), p=Config.CROP_P_ALWAYS),
+        CropWithoutBackground(
+            crop_size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),  # igual al tamaño final
+            p=0.7                                                 # ← 70 %
+        ),
         A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
-        A.Normalize(
-            mean=[0.0, 0.0, 0.0],
-            std=[1.0, 1.0, 1.0],
-            max_pixel_value=255.0,
-        ),
-        ToTensorV2(),
+        A.Normalize(mean=[0, 0, 0], std=[1, 1, 1], max_pixel_value=255),
+        ToTensorV2()
     ])
 
     val_transform = A.Compose([
         A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
-        A.Normalize(
-            mean=[0.0, 0.0, 0.0],
-            std=[1.0, 1.0, 1.0],
-            max_pixel_value=255.0,
-        ),
-        ToTensorV2(),
+        A.Normalize(mean=[0, 0, 0], std=[1, 1, 1], max_pixel_value=255),
+        ToTensorV2()
     ])
 
     # --- Creación de Datasets y DataLoaders ---
-    train_dataset = CloudDataset(
-        image_dir=Config.TRAIN_IMG_DIR,
-        mask_dir=Config.TRAIN_MASK_DIR,
-        transform=train_transform
+    train_dataset = CloudDataset(Config.TRAIN_IMG_DIR, Config.TRAIN_MASK_DIR, transform=train_transform)
+
+    # --- Ponderaciones: alto peso si la imagen tiene clase 4, 1 en caso contrario ---
+    weights = [
+        Config.CLASS4_WEIGHT if has_c4 else 1
+        for has_c4 in train_dataset.contains_class4
+    ]
+
+    # Mantenemos ‘replacement=True’ para que una misma imagen pueda salir varias veces en una época
+    sampler = WeightedRandomSampler(
+        weights=weights,
+        num_samples=len(weights) * Config.CLASS4_WEIGHT,  # p. ej. 210 × 6 = 1260
+        replacement=True
     )
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=Config.BATCH_SIZE,
+        sampler=sampler,          # << NO usar shuffle cuando hay sampler
         num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY,
-        shuffle=True
+        pin_memory=Config.PIN_MEMORY
     )
 
-    val_dataset = CloudDataset(
-        image_dir=Config.VAL_IMG_DIR,
-        mask_dir=Config.VAL_MASK_DIR,
-        transform=val_transform
-    )
+    val_dataset   = CloudDataset(Config.VAL_IMG_DIR,   Config.VAL_MASK_DIR,   transform=val_transform)
+
     val_loader = DataLoader(
         val_dataset,
         batch_size=Config.BATCH_SIZE,
+        shuffle=False,
         num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY,
-        shuffle=False
+        pin_memory=Config.PIN_MEMORY
     )
 
     imprimir_distribucion_clases_post_augmentation(
