@@ -454,11 +454,7 @@ def weighted_focal_loss(class_weights, gamma=2.0):
     alpha = [class_weights[i] for i in sorted(class_weights)]
     return focal_loss(alpha=alpha, gamma=gamma)
 
-# Al compilar tu modelo:
-loss_fn = weighted_focal_loss(class_weights, gamma=2.0)
-model.compile(optimizer='adam', loss=loss_fn, metrics=['accuracy'])
-
-loss_fn = weighted_focal_loss(class_weights, gamma=2.0)
+loss_fn = weighted_focal_loss(weights_dict_silent, gamma=2.0)
 
 model.compile(optimizer='adam',
               loss=loss_fn,
