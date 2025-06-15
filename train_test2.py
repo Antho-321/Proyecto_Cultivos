@@ -202,7 +202,7 @@ def main():
     
     # --- Transformaciones y Aumento de Datos ---
     train_transform = A.Compose([
-        SmartCrop(crop_size=(96, 96), p=0.7),      # ← único crop
+        SmartCrop(crop_size=(64, 64), p=0.7),      # ← único crop
         A.Rotate(limit=35, p=0.7, border_mode=0, value=0, mask_value=0),  # sigue añadiendo algo de 0 pero muucho menos
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
