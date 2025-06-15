@@ -16,9 +16,10 @@ import numpy as np
 from model import CloudDeepLabV3Plus
 from distribucion_por_clase import imprimir_distribucion_clases_post_augmentation 
 
-# ---------------------------------------------------------------------------------
-# 1. CONFIGURACIÓN  (añadimos 1 hiperparámetros nuevos)
-# ---------------------------------------------------------------------------------
+# =================================================================================
+# 1. CONFIGURACIÓN
+# Centraliza todos los hiperparámetros y rutas aquí.
+# =================================================================================
 class Config:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
@@ -37,8 +38,6 @@ class Config:
     # --- Dimensiones de la imagen ---
     IMAGE_HEIGHT = 256
     IMAGE_WIDTH = 256
-
-    CROP_P_ALWAYS     = 1.0    # fuerza el CropAroundClass4 cuando haya píxeles de clase 4
     
     # --- Configuraciones adicionales ---
     PIN_MEMORY = True
@@ -49,55 +48,63 @@ class Config:
 # 2. DATASET PERSONALIZADO
 # Clase para cargar las imágenes y sus máscaras de segmentación.
 # =================================================================================
+# =================================================================================
+# 2. DATASET PERSONALIZADO (versión alineada con load_dataset)
+# =================================================================================
 class CloudDataset(torch.utils.data.Dataset):
+    """
+    Dataset para segmentación de nubes que asume:
+      • Las imágenes están en image_dir y se llaman *.jpg* o *.png*.
+      • Las máscaras correspondientes están en mask_dir y se llaman
+        '{nombre_imagen_sin_extensión}_mask.png'.
+      • Las máscaras son imágenes en escala de grises con 0-255
+        (0 = fondo, 255 = nube). Se normalizan a 0-1.
+    """
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
-    def __init__(self, image_dir, mask_dir,
-                 tf_with_c4: A.Compose | None = None,
-                 tf_no_c4:   A.Compose | None = None,
-                 transform:  A.Compose | None = None):
-        if transform is not None:
-            # Un solo pipeline para todo el dataset
-            tf_with_c4 = tf_no_c4 = transform
-        self.image_dir   = image_dir
-        self.mask_dir    = mask_dir
-        self.tf_with_c4  = tf_with_c4
-        self.tf_no_c4    = tf_no_c4
+    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
+        self.image_dir = image_dir
+        self.mask_dir = mask_dir
+        self.transform = transform
 
-        self.images = [f for f in os.listdir(image_dir)
-                       if f.lower().endswith(self._IMG_EXTENSIONS)]
+        # Lista de archivos que cumplen con las extensiones permitidas
+        self.images = [
+            f for f in os.listdir(image_dir)
+            if f.lower().endswith(self._IMG_EXTENSIONS)
+        ]
 
-        # Pre-escaneo de máscaras
-        self.contains_class4 = []
-        for img_file in self.images:
-            mask_path = self._mask_path_from_image_name(img_file)
-            mask = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)
-            self.contains_class4.append((mask == 4).any())
-
-    def __len__(self):  return len(self.images)
+    def __len__(self) -> int:
+        return len(self.images)
 
     def _mask_path_from_image_name(self, image_filename: str) -> str:
-        name = image_filename.rsplit('.', 1)[0]
-        return os.path.join(self.mask_dir, f"{name}_mask.png")
+        """
+        Convierte 'foto123.jpg' -> 'foto123_mask.png'
+        """
+        name_without_ext = image_filename.rsplit('.', 1)[0]
+        mask_filename = f"{name_without_ext}_mask.png"
+        return os.path.join(self.mask_dir, mask_filename)
 
     def __getitem__(self, idx: int):
-        img_path  = os.path.join(self.image_dir, self.images[idx])
-        mask_path = self._mask_path_from_image_name(self.images[idx])
+        img_filename = self.images[idx]
+        img_path = os.path.join(self.image_dir, img_filename)
 
+        mask_path = self._mask_path_from_image_name(img_filename)
+        if not os.path.exists(mask_path):
+            raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
+
+        # Carga la imagen RGB y la máscara en escala de grises
         image = np.array(Image.open(img_path).convert("RGB"))
-        mask  = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
+        mask = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
 
-        # ---------- DECISIÓN CONDICIONAL -----------------------------
-        if self.contains_class4[idx]:
-            aug = self.tf_with_c4(image=image, mask=mask)
-        else:
-            aug = self.tf_no_c4(image=image, mask=mask)
-        # --------------------------------------------------------------
-        image, mask = aug["image"], aug["mask"]
+        if self.transform:
+            augmented = self.transform(image=image, mask=mask)
+            image = augmented["image"]           # Tensor C×H×W, float32
+            mask  = augmented["mask"]            # Tensor H×W, int64
+
         return image, mask
 
 class CropAroundClass4(A.DualTransform):
-    def __init__(self, crop_size=(96,96), p=0.5):
+    def __init__(self, crop_size=(256,256), p=0.5):
         super().__init__(always_apply=False, p=p)
         self.ch, self.cw = crop_size
 
@@ -206,22 +213,20 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 def main():
     print(f"Using device: {Config.DEVICE}")
     
-    # --- 1.a  Aumentos COMPLETOS (cuando SÍ hay clase 4) --------------------------
-    train_tf_with_c4 = A.Compose([
-        CropAroundClass4(crop_size=(96, 96), p=Config.CROP_P_ALWAYS),
+    # --- Transformaciones y Aumento de Datos ---
+    train_transform = A.Compose([
+        CropAroundClass4(crop_size=(256, 256), p=0.7),   # 70 % de los casos
         A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
-        A.Normalize(mean=[0, 0, 0], std=[1, 1, 1], max_pixel_value=255),
+        A.Normalize(
+            mean=[0.0, 0.0, 0.0],
+            std=[1.0, 1.0, 1.0],
+            max_pixel_value=255.0,
+        ),
         ToTensorV2(),
     ])
 
-    # --- 1.b  Aumentos LIGEROS (cuando NO hay clase 4) ----------------------------
-    train_tf_no_c4 = A.Compose([
-        CropAroundClass4(crop_size=(96, 96), p=Config.CROP_P_ALWAYS),  # hará crop aleatorio
-        A.Normalize(mean=[0, 0, 0], std=[1, 1, 1], max_pixel_value=255),
-        ToTensorV2(),
-    ])
     val_transform = A.Compose([
         A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
         A.Normalize(
@@ -234,10 +239,9 @@ def main():
 
     # --- Creación de Datasets y DataLoaders ---
     train_dataset = CloudDataset(
-        image_dir = Config.TRAIN_IMG_DIR,
-        mask_dir  = Config.TRAIN_MASK_DIR,
-        tf_with_c4 = train_tf_with_c4,
-        tf_no_c4   = train_tf_no_c4,
+        image_dir=Config.TRAIN_IMG_DIR,
+        mask_dir=Config.TRAIN_MASK_DIR,
+        transform=train_transform
     )
     train_loader = DataLoader(
         train_dataset,
