@@ -119,7 +119,7 @@ class CropWithoutBackground(A.DualTransform):
     • Intentará hasta 10 veces encontrar un recorte válido; si no lo
       consigue, hace un recorte aleatorio normal.
     """
-    def __init__(self, crop_size=(256, 256), p: float = 0.7):
+    def __init__(self, crop_size=(96, 96), p: float = 0.7):
         super().__init__(always_apply=False, p=p)
         self.ch, self.cw = crop_size
 
