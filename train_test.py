@@ -105,6 +105,30 @@ class CloudDataset(torch.utils.data.Dataset):
 
         return image, mask
 
+class CropAroundClass4(A.DualTransform):
+    def __init__(self, crop_size=(256, 256), p=0.5):  # p = probabilidad de activar
+        super().__init__(always_apply=False, p=p)
+        self.ch, self.cw = crop_size
+
+    def apply(self, img, mask=None, **params):
+        # Encuentra píxeles == 4 en la máscara
+        ys, xs = np.where(mask == 4)
+        if len(xs) == 0:      # no hay clase 4 → caída a centro aleatorio
+            return self.random_crop(img), self.random_crop(mask)
+        # Eliges uno al azar
+        i = np.random.randint(0, len(xs))
+        cy, cx = ys[i], xs[i]          # centro del crop
+        # Coordinadas seguras
+        y1 = np.clip(cy - self.ch//2, 0, img.shape[0]-self.ch)
+        x1 = np.clip(cx - self.cw//2, 0, img.shape[1]-self.cw)
+        y2, x2 = y1 + self.ch, x1 + self.cw
+        return img[y1:y2, x1:x2], mask[y1:y2, x1:x2]
+
+    def random_crop(self, arr):
+        y1 = np.random.randint(0, arr.shape[0]-self.ch+1)
+        x1 = np.random.randint(0, arr.shape[1]-self.cw+1)
+        return arr[y1:y1+self.ch, x1:x1+self.cw]
+
 # =================================================================================
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN
 # =================================================================================
@@ -188,7 +212,7 @@ def main():
     
     # --- Transformaciones y Aumento de Datos ---
     train_transform = A.Compose([
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
+        CropAroundClass4(crop_size=(256, 256), p=0.7),   # 70 % de los casos
         A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
