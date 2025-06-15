@@ -31,10 +31,6 @@ model.compile(optimizer='adam',
               loss=loss_fn,
               metrics=['accuracy'])
 
-#**************************************************
-# COMBINANDO EL CODIGO ANTERIOR CON LOVASZ-SOFTMAX
-#**************************************************
-
 def weighted_focal_lovasz_loss(class_weights, gamma=2.0, lovasz_weight=1.0):
     # Focal modulado
     fl = weighted_focal_loss(class_weights, gamma)
