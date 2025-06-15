@@ -96,7 +96,7 @@ class CloudDataset(torch.utils.data.Dataset):
 
         # Carga la imagen RGB y la máscara en escala de grises
         image = np.array(Image.open(img_path).convert("RGB"))
-        mask = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
+        mask = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)
 
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
@@ -145,6 +145,13 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.eval()
 
     with torch.no_grad():
+        preds = model(data)
+        per_pix = nn.functional.cross_entropy(
+            preds, targets, weight=Config.CLASS_WEIGHTS,
+            reduction='none'
+        )
+        print("media loss fondo :", per_pix[targets==0].mean().item())
+        print("media loss clase4:", per_pix[targets==4].mean().item())
         for x, y in loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()      # (N, H, W)
@@ -192,11 +199,7 @@ def main():
         A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
-        A.Normalize(
-            mean=[0.0, 0.0, 0.0],
-            std=[1.0, 1.0, 1.0],
-            max_pixel_value=255.0,
-        ),
+        A.Normalize(mean=[0, 0, 0], std=[1, 1, 1], max_pixel_value=255.0),
         ToTensorV2(),
     ])
 
