@@ -111,6 +111,50 @@ class CropAroundClass4(A.DualTransform):
         return mask[y1 : y1 + self.ch,
                     x1 : x1 + self.cw]
 
+class CropWithoutBackground(A.DualTransform):
+    """
+    Recorta un patch que NO contenga píxeles de clase 0 (background).
+    • Se activa con probabilidad p (por defecto 0.7).  
+    • Si la máscara ya carece de fondo, simplemente pasa de largo.  
+    • Intentará hasta 10 veces encontrar un recorte válido; si no lo
+      consigue, hace un recorte aleatorio normal.
+    """
+    def __init__(self, crop_size=(256, 256), p: float = 0.7):
+        super().__init__(always_apply=False, p=p)
+        self.ch, self.cw = crop_size
+
+    # ------------------------------------------------------------------
+    def get_params_dependent_on_targets(self, params):
+        image, mask = params["image"], params["mask"]
+        h, w        = mask.shape[:2]
+
+        # -- Si la imagen NO contiene fondo ⇒ no hacemos nada especial
+        if not (mask == 0).any():
+            return {"y1": 0, "x1": 0, "skip": True}
+
+        # -- Hasta 10 intentos para encontrar un recorte sin fondo
+        ys_fg, xs_fg = np.where(mask != 0)
+        for _ in range(10):
+            i          = np.random.randint(len(ys_fg))
+            cy, cx     = int(ys_fg[i]), int(xs_fg[i])
+            y1         = int(np.clip(cy - self.ch // 2, 0, h - self.ch))
+            x1         = int(np.clip(cx - self.cw // 2, 0, w - self.cw))
+            crop_mask  = mask[y1:y1 + self.ch, x1:x1 + self.cw]
+            if (crop_mask == 0).sum() == 0:          # ¡Sin fondo!
+                return {"y1": y1, "x1": x1, "skip": False}
+
+        # Fall-back: recorte aleatorio
+        y1 = np.random.randint(0, h - self.ch + 1)
+        x1 = np.random.randint(0, w - self.cw + 1)
+        return {"y1": y1, "x1": x1, "skip": False}
+
+    # ------------------------------------------------------------------
+    def apply(self, img, y1=0, x1=0, skip=False, **params):
+        return img if skip else img[y1:y1 + self.ch, x1:x1 + self.cw]
+
+    def apply_to_mask(self, mask, y1=0, x1=0, skip=False, **params):
+        return mask if skip else mask[y1:y1 + self.ch, x1:x1 + self.cw]
+
 # =================================================================================
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN
 # =================================================================================
@@ -195,6 +239,10 @@ def main():
     # --- Transformaciones y Aumento de Datos ---
     train_transform = A.Compose([
         CropAroundClass4(crop_size=(96, 96), p=Config.CROP_P_ALWAYS),
+        CropWithoutBackground(
+            crop_size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),  # igual al tamaño final
+            p=0.7                                                 # ← 70 %
+        ),
         A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
