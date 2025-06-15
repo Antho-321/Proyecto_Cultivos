@@ -32,8 +32,8 @@ class Config:
     NUM_EPOCHS        = 50
     NUM_WORKERS       = 2
 
-    IMAGE_HEIGHT      = 256
-    IMAGE_WIDTH       = 256
+    IMAGE_HEIGHT      = 128
+    IMAGE_WIDTH       = 128
 
     # —— NUEVO ——
     CLASS4_WEIGHT     = 6      # cuántas veces “vale” una imagen con clase 4
@@ -208,9 +208,7 @@ def main():
         A.VerticalFlip(p=0.3),
 
         # 🔽🔽 Forzamos dimensión única 🔽🔽
-        # A.Resize(height=128, width=128),        # usa 128×128 si tu modelo lo admite
-        # o, si quieres 256×256:
-        A.Resize(height=256, width=256),
+        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
 
         A.Normalize(mean=[0,0,0], std=[1,1,1]),
         ToTensorV2()
