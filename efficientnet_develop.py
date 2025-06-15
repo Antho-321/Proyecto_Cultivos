@@ -438,7 +438,7 @@ class MeanIoU(tf.keras.metrics.Metric):
 
 def focal_loss(alpha=None, gamma=2.0):
     def loss(y_true, y_pred):
-        y_true = tf.cast(y_true[...,0], tf.int32)
+        y_true = tf.cast(tf.squeeze(y_true, axis=-1), tf.int32)
         y_true_oh = tf.one_hot(y_true, depth=y_pred.shape[-1])
         p_t = tf.reduce_sum(y_true_oh * y_pred, axis=-1) + 1e-7
         modulating_factor = tf.pow(1.0 - p_t, gamma)
