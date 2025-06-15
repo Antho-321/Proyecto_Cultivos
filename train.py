@@ -136,6 +136,7 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     Devuelve mIoU macro y Dice macro.
     Imprime IoU y Dice por clase.
     """
+    weight = Config.CLASS_WEIGHTS.to(device)
     eps = 1e-8                          # para evitar divisiones por 0
     intersection_sum = torch.zeros(n_classes, dtype=torch.float64, device=device)
     union_sum        = torch.zeros_like(intersection_sum)
@@ -152,7 +153,9 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
             logits = model(x)
             
             per_pix = nn.functional.cross_entropy(
-                logits, y, weight=Config.CLASS_WEIGHTS, reduction='none'
+                logits, y,
+                weight=weight,        # YA en cuda
+                reduction='none'
             )
             print("media loss fondo :", per_pix[y == 0].mean().item())
             print("media loss clase4:", per_pix[y == 4].mean().item())
