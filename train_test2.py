@@ -202,10 +202,16 @@ def main():
     
     # --- Transformaciones y Aumento de Datos ---
     train_transform = A.Compose([
-        SmartCrop(crop_size=(64, 64), p=0.7),      # ← único crop
-        A.Rotate(limit=35, p=0.7, border_mode=0, value=0, mask_value=0),  # sigue añadiendo algo de 0 pero muucho menos
+        SmartCrop(crop_size=(64, 64), p=0.7),
+        A.Rotate(limit=35, p=0.7, border_mode=0, value=0, mask_value=0),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
+
+        # 🔽🔽 Forzamos dimensión única 🔽🔽
+        # A.Resize(height=128, width=128),        # usa 128×128 si tu modelo lo admite
+        # o, si quieres 256×256:
+        A.Resize(height=256, width=256),
+
         A.Normalize(mean=[0,0,0], std=[1,1,1]),
         ToTensorV2()
     ])
