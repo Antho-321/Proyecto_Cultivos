@@ -27,7 +27,7 @@
 import os
 import numpy as np
 from tensorflow.keras.utils import load_img, img_to_array
-from typing import Union, List, Dict    # <-- IMPORTAR AQUÍ
+from typing import Union, List, Dict, Optional    # <-- IMPORTAR AQUÍ
 
 def load_dataset(image_directory, mask_directory):
     images = []
@@ -143,6 +143,59 @@ def calculate_class_weights(masks: Union[np.ndarray, List[np.ndarray]], verbose:
 
     return weights
 
-# # Cargo las listas
+def print_class_distribution_by_object(
+    masks: Union[np.ndarray, List[np.ndarray]],
+    class_names: Optional[Dict[int, str]] = None,
+    include_background: bool = True  # <-- Nuevo parámetro para controlar el comportamiento
+) -> None:
+    """
+    Analiza y muestra en cuántas máscaras (imágenes) aparece cada clase.
+
+    Permite incluir o excluir la clase de fondo (clase 0) del análisis
+    a través del parámetro `include_background`.
+
+    Parámetros
+    ----------
+    masks : np.ndarray or list of np.ndarray
+        Un array de numpy de forma (N, H, W) o una lista de máscaras (H, W).
+    class_names : dict, opcional
+        Un diccionario para mapear los ID de clase a nombres legibles.
+        Ej: {0: 'Fondo', 1: 'Edificio'}
+    include_background : bool, default=True
+        Si es True, la clase 0 se cuenta como las demás. Si es False, se omite.
+    """
+    masks_arr = np.array(masks)
+    class_image_counts = {}
+
+    for i in range(masks_arr.shape[0]):
+        mask = masks_arr[i]
+        present_classes = np.unique(mask)
+
+        for cls_id in present_classes:
+            # --- MODIFICACIÓN CLAVE ---
+            # Ahora, solo omitimos el fondo si el usuario lo pide explícitamente.
+            if not include_background and cls_id == 0:
+                continue
+            
+            class_image_counts[cls_id] = class_image_counts.get(cls_id, 0) + 1
+
+    header_note = "(incluyendo fondo)" if include_background else "(omitiendo fondo)"
+    print(f"\n--- Distribución de Clases por nº de imágenes {header_note} ---")
+    
+    if not class_image_counts:
+        print("No se encontraron clases en las máscaras proporcionadas.")
+        return
+
+    sorted_classes = sorted(class_image_counts.keys())
+
+    for cls_id in sorted_classes:
+        count = class_image_counts[cls_id]
+        name_str = f" ({class_names[cls_id]})" if class_names and cls_id in class_names else ""
+        print(f"Clase {int(cls_id)}{name_str}: aparece en {count} imágenes/máscaras.")
+
+# # # Cargo las listas
 # images_list, masks_list = load_dataset("Balanced/train/images", "Balanced/train/masks")
-# weights_dict_silent = calculate_class_weights(masks_list, verbose=True)
+# # weights_dict_silent = calculate_class_weights(masks_list, verbose=True)
+
+# # 3. Llama a la nueva función para ver la distribución por objetos
+# print_class_distribution_by_object(masks_list)
