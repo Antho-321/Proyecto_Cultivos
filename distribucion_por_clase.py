@@ -23,7 +23,7 @@ def imprimir_distribucion_clases_post_augmentation(loader, n_classes=6, title="D
         # Cuenta los píxeles para cada clase en el batch actual
         # torch.bincount es muy eficiente para esta tarea
         # Aplanamos todas las máscaras del batch a un solo vector
-        counts = torch.bincount(masks.flatten(), minlength=n_classes)
+        counts = torch.bincount(masks.flatten().long(), minlength=n_classes)
         class_counts += counts
 
     # Calcula el porcentaje para cada clase
