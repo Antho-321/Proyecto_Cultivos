@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -65,15 +65,12 @@ class CloudDataset(torch.utils.data.Dataset):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
         self.transform = transform
-        self.has_cls4 = [] 
+
+        # Lista de archivos que cumplen con las extensiones permitidas
         self.images = [
             f for f in os.listdir(image_dir)
             if f.lower().endswith(self._IMG_EXTENSIONS)
         ]
-        for f in self.images:
-            mask_path = self._mask_path_from_image_name(f)
-            mask_arr  = np.array(Image.open(mask_path).convert("L"))
-            self.has_cls4.append((mask_arr == 4).any())
 
     def __len__(self) -> int:
         return len(self.images)
@@ -240,18 +237,12 @@ def main():
         mask_dir=Config.TRAIN_MASK_DIR,
         transform=train_transform
     )
-
-    sample_weights = [6 if c4 else 1 for c4 in train_dataset.has_cls4]
-    sampler = WeightedRandomSampler(sample_weights,
-                                num_samples=len(sample_weights),
-                                replacement=True)
-    
     train_loader = DataLoader(
         train_dataset,
         batch_size=Config.BATCH_SIZE,
         num_workers=Config.NUM_WORKERS,
         pin_memory=Config.PIN_MEMORY,
-        sampler=sampler,          # <-- en vez de shuffle=True
+        shuffle=True
     )
 
     val_dataset = CloudDataset(
@@ -269,21 +260,9 @@ def main():
     
     # --- Instanciación del Modelo, Loss y Optimizador ---
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
-
-    # ========================== INICIO DEL CÓDIGO A INSERTAR ==========================
-    # Frecuencias relativas (en fracción, no %)
-    # NOTA: Estos valores deberían calcularse a partir de tu dataset de entrenamiento.
-    freq = torch.tensor([0.8283, 0.0279, 0.0144, 0.0231, 0.0062, 0.1002])
     
-    # Calcula los pesos inversos y normalizados
-    class_weights = 1.0 / freq
-    class_weights = class_weights / class_weights.sum()
-    class_weights = class_weights.to(Config.DEVICE)
+    loss_fn = nn.CrossEntropyLoss()
     
-    print(f"Pesos de clase aplicados a la loss: {class_weights.cpu().numpy()}")
-
-    loss_fn = nn.CrossEntropyLoss(weight=class_weights)
-
     # AdamW es una buena elección de optimizador por defecto.
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
 
