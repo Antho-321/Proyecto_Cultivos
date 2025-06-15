@@ -145,18 +145,18 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.eval()
 
     with torch.no_grad():
-        preds = model(data)
-        per_pix = nn.functional.cross_entropy(
-            preds, targets, weight=Config.CLASS_WEIGHTS,
-            reduction='none'
-        )
-        print("media loss fondo :", per_pix[targets==0].mean().item())
-        print("media loss clase4:", per_pix[targets==4].mean().item())
         for x, y in loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()      # (N, H, W)
 
-            logits = model(x)                               # (N, 6, H, W)
+            logits = model(x)
+            
+            per_pix = nn.functional.cross_entropy(
+                logits, y, weight=Config.CLASS_WEIGHTS, reduction='none'
+            )
+            print("media loss fondo :", per_pix[y == 0].mean().item())
+            print("media loss clase4:", per_pix[y == 4].mean().item())
+                                           # (N, 6, H, W)
             preds  = torch.argmax(logits, dim=1)            # (N, H, W)
 
             for cls in range(n_classes):
