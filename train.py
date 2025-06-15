@@ -19,6 +19,7 @@ from model import CloudDeepLabV3Plus
 # Centraliza todos los hiperparámetros y rutas aquí.
 # =================================================================================
 class Config:
+
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
     # --- MUY IMPORTANTE: Modifica estas rutas a tus directorios de datos ---
@@ -39,8 +40,11 @@ class Config:
     
     # --- Configuraciones adicionales ---
     PIN_MEMORY = True
-    LOAD_MODEL = False # Poner a True si quieres continuar un entrenamiento
     MODEL_SAVE_PATH = "best_model.pth.tar"
+    CLASS_WEIGHTS = torch.tensor(
+        [0.2012, 5.9698, 11.5819, 7.2159, 27.0968, 1.6638],
+        dtype=torch.float32
+    )
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO
@@ -236,7 +240,7 @@ def main():
     # --- Instanciación del Modelo, Loss y Optimizador ---
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss(weight=Config.CLASS_WEIGHTS.to(Config.DEVICE))
     
     # AdamW es una buena elección de optimizador por defecto.
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
@@ -244,7 +248,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="max",        # porque maximizamos mIoU
-        factor=0.5,        # LR nuevo = LR viejo * 0.5  (ajústalo a tu gusto)
+        factor=0.9,        # LR nuevo = LR viejo * <factor>  (ajústalo a tu gusto)
         patience=3,        # ⇠ lo que pediste
         verbose=True
     )
