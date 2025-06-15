@@ -83,7 +83,7 @@ class CloudDataset(torch.utils.data.Dataset):
         return image, mask
 
 class CropAroundClass4(A.DualTransform):
-    def __init__(self, crop_size=(256,256), p=0.5):
+    def __init__(self, crop_size=(96,96), p=0.5):
         super().__init__(always_apply=False, p=p)
         self.ch, self.cw = crop_size
 
@@ -194,7 +194,7 @@ def main():
     
     # --- Transformaciones y Aumento de Datos ---
     train_transform = A.Compose([
-        CropAroundClass4(crop_size=(256, 256), p=Config.CROP_P_ALWAYS),
+        CropAroundClass4(crop_size=(96, 96), p=Config.CROP_P_ALWAYS),
         A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),

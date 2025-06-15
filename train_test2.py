@@ -194,7 +194,7 @@ def main():
     
     # --- Transformaciones y Aumento de Datos ---
     train_transform = A.Compose([
-        CropAroundClass4(crop_size=(256, 256), p=Config.CROP_P_ALWAYS),
+        CropAroundClass4(crop_size=(96, 96), p=Config.CROP_P_ALWAYS),
         A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
@@ -218,7 +218,11 @@ def main():
     ]
 
     # Mantenemos ‘replacement=True’ para que una misma imagen pueda salir varias veces en una época
-    sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+    sampler = WeightedRandomSampler(
+        weights=weights,
+        num_samples=len(weights) * Config.CLASS4_WEIGHT,  # p. ej. 210 × 6 = 1260
+        replacement=True
+    )
 
     train_loader = DataLoader(
         train_dataset,
