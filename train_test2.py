@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -211,12 +211,21 @@ def main():
     # --- Creación de Datasets y DataLoaders ---
     train_dataset = CloudDataset(Config.TRAIN_IMG_DIR, Config.TRAIN_MASK_DIR, transform=train_transform)
 
+    # --- Ponderaciones: alto peso si la imagen tiene clase 4, 1 en caso contrario ---
+    weights = [
+        Config.CLASS4_WEIGHT if has_c4 else 1
+        for has_c4 in train_dataset.contains_class4
+    ]
+
+    # Mantenemos ‘replacement=True’ para que una misma imagen pueda salir varias veces en una época
+    sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=Config.BATCH_SIZE,
+        sampler=sampler,          # << NO usar shuffle cuando hay sampler
         num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY,
-        shuffle=True
+        pin_memory=Config.PIN_MEMORY
     )
 
     val_dataset   = CloudDataset(Config.VAL_IMG_DIR,   Config.VAL_MASK_DIR,   transform=val_transform)
@@ -224,9 +233,9 @@ def main():
     val_loader = DataLoader(
         val_dataset,
         batch_size=Config.BATCH_SIZE,
+        shuffle=False,
         num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY,
-        shuffle=False
+        pin_memory=Config.PIN_MEMORY
     )
 
     imprimir_distribucion_clases_post_augmentation(
