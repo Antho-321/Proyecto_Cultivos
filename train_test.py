@@ -1,6 +1,7 @@
 # train.py
 
 import torch
+#import torch_directml
 import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler
@@ -20,6 +21,7 @@ from model import CloudDeepLabV3Plus
 # Centraliza todos los hiperparámetros y rutas aquí.
 # =================================================================================
 class Config:
+    #DEVICE = torch_directml.device() if torch_directml.is_available() else "cpu"
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
     # --- MUY IMPORTANTE: Modifica estas rutas a tus directorios de datos ---
@@ -39,6 +41,7 @@ class Config:
     IMAGE_WIDTH = 256
     
     # --- Configuraciones adicionales ---
+    # PIN_MEMORY = False
     PIN_MEMORY = True
     LOAD_MODEL = False # Poner a True si quieres continuar un entrenamiento
     MODEL_SAVE_PATH = "best_model.pth.tar"
@@ -103,28 +106,33 @@ class CloudDataset(torch.utils.data.Dataset):
         return image, mask
 
 class CropAroundClass4(A.DualTransform):
-    def __init__(self, crop_size=(256, 256), p=0.5):  # p = probabilidad de activar
+    def __init__(self, crop_size=(256,256), p=0.5):
         super().__init__(always_apply=False, p=p)
         self.ch, self.cw = crop_size
 
-    def apply(self, img, mask=None, **params):
-        # Encuentra píxeles == 4 en la máscara
+    def get_params_dependent_on_targets(self, params):
+        image = params["image"]
+        mask  = params["mask"]
         ys, xs = np.where(mask == 4)
-        if len(xs) == 0:      # no hay clase 4 → caída a centro aleatorio
-            return self.random_crop(img), self.random_crop(mask)
-        # Eliges uno al azar
-        i = np.random.randint(0, len(xs))
-        cy, cx = ys[i], xs[i]          # centro del crop
-        # Coordinadas seguras
-        y1 = np.clip(cy - self.ch//2, 0, img.shape[0]-self.ch)
-        x1 = np.clip(cx - self.cw//2, 0, img.shape[1]-self.cw)
-        y2, x2 = y1 + self.ch, x1 + self.cw
-        return img[y1:y2, x1:x2], mask[y1:y2, x1:x2]
+        if ys.size:
+            # pick one random pixel of class 4
+            i = np.random.randint(ys.shape[0])
+            cy, cx = ys[i], xs[i]
+            y1 = int(np.clip(cy - self.ch//2, 0, image.shape[0] - self.ch))
+            x1 = int(np.clip(cx - self.cw//2, 0, image.shape[1] - self.cw))
+        else:
+            # no class-4 pixels → random crop
+            y1 = np.random.randint(0, image.shape[0] - self.ch + 1)
+            x1 = np.random.randint(0, image.shape[1] - self.cw + 1)
+        return {"y1": y1, "x1": x1}
 
-    def random_crop(self, arr):
-        y1 = np.random.randint(0, arr.shape[0]-self.ch+1)
-        x1 = np.random.randint(0, arr.shape[1]-self.cw+1)
-        return arr[y1:y1+self.ch, x1:x1+self.cw]
+    def apply(self, img, y1=0, x1=0, **params):
+        return img[y1 : y1 + self.ch,
+                   x1 : x1 + self.cw]
+
+    def apply_to_mask(self, mask, y1=0, x1=0, **params):
+        return mask[y1 : y1 + self.ch,
+                    x1 : x1 + self.cw]
 
 # =================================================================================
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN
@@ -139,7 +147,8 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
         targets  = targets.to(Config.DEVICE, non_blocking=True).long()  # <- importante
 
         # Forward
-        with torch.cuda.amp.autocast(): # Para entrenamiento de precisión mixta
+        #with torch.autocast(device_type=Config.DEVICE.type): # Para entrenamiento de precisión mixta
+        with torch.cuda.amp.autocast():
             predictions = model(data)
             loss = loss_fn(predictions, targets)
 
@@ -267,7 +276,8 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
 
     # El scaler es para el entrenamiento de precisión mixta (acelera el entrenamiento en GPUs compatibles)
-    scaler = GradScaler() 
+    #scaler = GradScaler(enabled=(Config.DEVICE.type == 'privateuseone'))
+    scaler = GradScaler()
 
     best_mIoU = -1.0
 
