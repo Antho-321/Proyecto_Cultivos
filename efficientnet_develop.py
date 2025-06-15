@@ -455,14 +455,14 @@ def weighted_focal_loss(class_weights, gamma=2.0):
     return focal_loss(alpha=alpha, gamma=gamma)
 
 def weighted_focal_lovasz_loss(class_weights, gamma=2.0, lovasz_weight=1.0):
-    # Focal modulado
     fl = weighted_focal_loss(class_weights, gamma)
-    # Lovász-Softmax
-    ls = lovasz_softmax()
-
+    # No llamamos aquí lovasz_softmax(), sino que la usamos después:
     def loss(y_true, y_pred):
-        return fl(y_true, y_pred) + lovasz_weight * ls(y_true, y_pred)
-
+        # y_pred: «probas», y_true: «labels»
+        lov = lovasz_weight * lovasz_softmax(y_pred, 
+                                             tf.cast(y_true, tf.int32),
+                                             per_image=True)
+        return fl(y_true, y_pred) + lov
     return loss
 
 # Usamos el vector que definimos antes
