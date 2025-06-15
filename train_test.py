@@ -14,7 +14,8 @@ from PIL import Image
 import numpy as np
 
 # Importa la arquitectura del otro archivo
-from model import CloudDeepLabV3Plus 
+from model import CloudDeepLabV3Plus
+from distribucion_por_clase import imprimir_distribucion_clases_post_augmentation 
 
 # =================================================================================
 # 1. CONFIGURACIÓN
@@ -265,6 +266,12 @@ def main():
         num_workers=Config.NUM_WORKERS,
         pin_memory=Config.PIN_MEMORY,
         shuffle=False
+    )
+
+    imprimir_distribucion_clases_post_augmentation(
+        train_loader, 
+        n_classes=6, 
+        title="Distribución de clases en el set de ENTRENAMIENTO (post-augmentation)"
     )
     
     # --- Instanciación del Modelo, Loss y Optimizador ---
