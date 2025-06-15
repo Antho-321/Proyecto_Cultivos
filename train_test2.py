@@ -53,8 +53,12 @@ class CloudDataset(torch.utils.data.Dataset):
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
     def __init__(self, image_dir, mask_dir,
-                 tf_with_c4: A.Compose,
-                 tf_no_c4:   A.Compose):
+                 tf_with_c4: A.Compose | None = None,
+                 tf_no_c4:   A.Compose | None = None,
+                 transform:  A.Compose | None = None):
+        if transform is not None:
+            # Un solo pipeline para todo el dataset
+            tf_with_c4 = tf_no_c4 = transform
         self.image_dir   = image_dir
         self.mask_dir    = mask_dir
         self.tf_with_c4  = tf_with_c4
