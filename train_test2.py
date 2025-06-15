@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -52,14 +52,18 @@ class Config:
 class CloudDataset(torch.utils.data.Dataset):
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
-    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
-        self.image_dir  = image_dir
-        self.mask_dir   = mask_dir
-        self.transform  = transform
-        self.images     = [f for f in os.listdir(image_dir)
-                           if f.lower().endswith(self._IMG_EXTENSIONS)]
+    def __init__(self, image_dir, mask_dir,
+                 tf_with_c4: A.Compose,
+                 tf_no_c4:   A.Compose):
+        self.image_dir   = image_dir
+        self.mask_dir    = mask_dir
+        self.tf_with_c4  = tf_with_c4
+        self.tf_no_c4    = tf_no_c4
 
-        # Pre-escaneamos las máscaras UNA sola vez para saber si incluyen clase 4
+        self.images = [f for f in os.listdir(image_dir)
+                       if f.lower().endswith(self._IMG_EXTENSIONS)]
+
+        # Pre-escaneo de máscaras
         self.contains_class4 = []
         for img_file in self.images:
             mask_path = self._mask_path_from_image_name(img_file)
@@ -79,10 +83,13 @@ class CloudDataset(torch.utils.data.Dataset):
         image = np.array(Image.open(img_path).convert("RGB"))
         mask  = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
 
-        if self.transform:
-            aug = self.transform(image=image, mask=mask)
-            image, mask = aug["image"], aug["mask"]
-
+        # ---------- DECISIÓN CONDICIONAL -----------------------------
+        if self.contains_class4[idx]:
+            aug = self.tf_with_c4(image=image, mask=mask)
+        else:
+            aug = self.tf_no_c4(image=image, mask=mask)
+        # --------------------------------------------------------------
+        image, mask = aug["image"], aug["mask"]
         return image, mask
 
 class CropAroundClass4(A.DualTransform):
@@ -195,16 +202,22 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 def main():
     print(f"Using device: {Config.DEVICE}")
     
-    # --- Transformaciones y Aumento de Datos ---
-    train_transform = A.Compose([
+    # --- 1.a  Aumentos COMPLETOS (cuando SÍ hay clase 4) --------------------------
+    train_tf_with_c4 = A.Compose([
         CropAroundClass4(crop_size=(96, 96), p=Config.CROP_P_ALWAYS),
         A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
         A.Normalize(mean=[0, 0, 0], std=[1, 1, 1], max_pixel_value=255),
-        ToTensorV2()
+        ToTensorV2(),
     ])
 
+    # --- 1.b  Aumentos LIGEROS (cuando NO hay clase 4) ----------------------------
+    train_tf_no_c4 = A.Compose([
+        CropAroundClass4(crop_size=(96, 96), p=Config.CROP_P_ALWAYS),  # hará crop aleatorio
+        A.Normalize(mean=[0, 0, 0], std=[1, 1, 1], max_pixel_value=255),
+        ToTensorV2(),
+    ])
     val_transform = A.Compose([
         A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
         A.Normalize(
@@ -217,9 +230,10 @@ def main():
 
     # --- Creación de Datasets y DataLoaders ---
     train_dataset = CloudDataset(
-        image_dir=Config.TRAIN_IMG_DIR,
-        mask_dir=Config.TRAIN_MASK_DIR,
-        transform=train_transform
+        image_dir = Config.TRAIN_IMG_DIR,
+        mask_dir  = Config.TRAIN_MASK_DIR,
+        tf_with_c4 = train_tf_with_c4,
+        tf_no_c4   = train_tf_no_c4,
     )
     train_loader = DataLoader(
         train_dataset,
