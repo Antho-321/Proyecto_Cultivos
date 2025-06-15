@@ -1,10 +1,9 @@
 # train.py
 
 import torch
-#import torch_directml
 import torch.nn as nn
 import torch.optim as optim
-from torch.amp import GradScaler
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
@@ -22,7 +21,6 @@ from distribucion_por_clase import imprimir_distribucion_clases_post_augmentatio
 # Centraliza todos los hiperparámetros y rutas aquí.
 # =================================================================================
 class Config:
-    #DEVICE = torch_directml.device() if torch_directml.is_available() else "cpu"
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
     # --- MUY IMPORTANTE: Modifica estas rutas a tus directorios de datos ---
@@ -42,7 +40,6 @@ class Config:
     IMAGE_WIDTH = 256
     
     # --- Configuraciones adicionales ---
-    # PIN_MEMORY = False
     PIN_MEMORY = True
     LOAD_MODEL = False # Poner a True si quieres continuar un entrenamiento
     MODEL_SAVE_PATH = "best_model.pth.tar"
@@ -148,8 +145,7 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
         targets  = targets.to(Config.DEVICE, non_blocking=True).long()  # <- importante
 
         # Forward
-        #with torch.autocast(device_type=Config.DEVICE.type): # Para entrenamiento de precisión mixta
-        with torch.cuda.amp.autocast():
+        with autocast(device_type='cuda', dtype=torch.float16):
             predictions = model(data)
             loss = loss_fn(predictions, targets)
 
@@ -283,7 +279,6 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
 
     # El scaler es para el entrenamiento de precisión mixta (acelera el entrenamiento en GPUs compatibles)
-    #scaler = GradScaler(enabled=(Config.DEVICE.type == 'privateuseone'))
     scaler = GradScaler()
 
     best_mIoU = -1.0
