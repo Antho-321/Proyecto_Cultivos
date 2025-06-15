@@ -19,7 +19,6 @@ from model import CloudDeepLabV3Plus
 # Centraliza todos los hiperparámetros y rutas aquí.
 # =================================================================================
 class Config:
-
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
     # --- MUY IMPORTANTE: Modifica estas rutas a tus directorios de datos ---
@@ -31,7 +30,7 @@ class Config:
     # --- Hiperparámetros de entrenamiento ---
     LEARNING_RATE = 1e-4
     BATCH_SIZE = 8
-    NUM_EPOCHS = 25
+    NUM_EPOCHS = 50
     NUM_WORKERS = 2
     
     # --- Dimensiones de la imagen ---
@@ -40,11 +39,8 @@ class Config:
     
     # --- Configuraciones adicionales ---
     PIN_MEMORY = True
+    LOAD_MODEL = False # Poner a True si quieres continuar un entrenamiento
     MODEL_SAVE_PATH = "best_model.pth.tar"
-    CLASS_WEIGHTS = torch.tensor(
-        [0.2012, 5.9698, 11.5819, 7.2159, 27.0968, 1.6638],
-        dtype=torch.float32
-    )
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO
@@ -96,7 +92,7 @@ class CloudDataset(torch.utils.data.Dataset):
 
         # Carga la imagen RGB y la máscara en escala de grises
         image = np.array(Image.open(img_path).convert("RGB"))
-        mask = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)
+        mask = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
 
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
@@ -136,7 +132,6 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     Devuelve mIoU macro y Dice macro.
     Imprime IoU y Dice por clase.
     """
-    weight = Config.CLASS_WEIGHTS.to(device)
     eps = 1e-8                          # para evitar divisiones por 0
     intersection_sum = torch.zeros(n_classes, dtype=torch.float64, device=device)
     union_sum        = torch.zeros_like(intersection_sum)
@@ -150,16 +145,7 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()      # (N, H, W)
 
-            logits = model(x)
-            
-            per_pix = nn.functional.cross_entropy(
-                logits, y,
-                weight=weight,        # YA en cuda
-                reduction='none'
-            )
-            print("media loss fondo :", per_pix[y == 0].mean().item())
-            print("media loss clase4:", per_pix[y == 4].mean().item())
-                                           # (N, 6, H, W)
+            logits = model(x)                               # (N, 6, H, W)
             preds  = torch.argmax(logits, dim=1)            # (N, H, W)
 
             for cls in range(n_classes):
@@ -202,7 +188,11 @@ def main():
         A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
-        A.Normalize(mean=[0, 0, 0], std=[1, 1, 1], max_pixel_value=255.0),
+        A.Normalize(
+            mean=[0.0, 0.0, 0.0],
+            std=[1.0, 1.0, 1.0],
+            max_pixel_value=255.0,
+        ),
         ToTensorV2(),
     ])
 
@@ -246,18 +236,10 @@ def main():
     # --- Instanciación del Modelo, Loss y Optimizador ---
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     
-    loss_fn = nn.CrossEntropyLoss(weight=Config.CLASS_WEIGHTS.to(Config.DEVICE))
+    loss_fn = nn.CrossEntropyLoss()
     
     # AdamW es una buena elección de optimizador por defecto.
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
-
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",        # porque maximizamos mIoU
-        factor=0.9,        # LR nuevo = LR viejo * <factor>  (ajústalo a tu gusto)
-        patience=3,        # ⇠ lo que pediste
-        verbose=True
-    )
 
     # El scaler es para el entrenamiento de precisión mixta (acelera el entrenamiento en GPUs compatibles)
     scaler = torch.cuda.amp.GradScaler()
@@ -285,41 +267,27 @@ def main():
             device=Config.DEVICE
         )
 
-        scheduler.step(current_mIoU) 
-
         # 3) Guardar checkpoint si hubo mejora en mIoU
         if current_mIoU > best_mIoU:
             best_mIoU = current_mIoU
             print(f"🔹 Nuevo mejor mIoU: {best_mIoU:.4f} | Dice: {current_dice:.4f}  →  guardando modelo…")
 
             checkpoint = {
-                "epoch":      epoch,
+                "epoch":     epoch,
                 "state_dict": model.state_dict(),
                 "optimizer":  optimizer.state_dict(),
                 "best_mIoU":  best_mIoU,
             }
             torch.save(checkpoint, Config.MODEL_SAVE_PATH)
 
-        else:
-            # ⤺ El modelo empeoró: volvemos al mejor conocido
-            print(f"⤺  mIoU = {current_mIoU:.4f} no superó el mejor ({best_mIoU:.4f}). "
-                "Restaurando pesos del checkpoint…")
-
-            checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
-            model.load_state_dict(checkpoint["state_dict"])
-            optimizer.load_state_dict(checkpoint["optimizer"])
-
-    checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
-    model.load_state_dict(checkpoint["state_dict"])
-
-    print("\nEvaluando el modelo con mejor mIoU guardado…")
-    best_mIoU, best_dice = check_metrics(
-        val_loader,
-        model,
-        n_classes=6,
-        device=Config.DEVICE
-    )
-    print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
+        print("\nEvaluando el modelo con mejor mIoU guardado…")
+        best_mIoU, best_dice = check_metrics(
+            val_loader,
+            model,
+            n_classes=6,
+            device=Config.DEVICE
+        )
+        print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
 
 if __name__ == "__main__":
     main()
