@@ -60,6 +60,7 @@ from iou_por_clase import print_class_iou
 # -------------------------------------------------------------------------------
 import keras_efficientnet_v2.efficientnet_v2 as _efn2
 from lovasz_losses_tf import lovasz_softmax
+from distribucion_por_clase import calculate_class_weights
 
 def patched_se_module(inputs, se_ratio=0.25, name=""):
     data_format = K.image_data_format()
@@ -137,6 +138,9 @@ def load_augmented_dataset(img_dir, mask_dir, target_size=(256,256), augment=Fal
 # 4) Load / split ------------------------------------------------------------
 train_X, train_y = load_augmented_dataset('Balanced/train/images', 'Balanced/train/masks', target_size=(256, 256), augment=True)
 val_X,   val_y   = load_augmented_dataset('Balanced/val/images',   'Balanced/val/masks',   target_size=(256, 256), augment=False)
+
+print("Distribucion de pesos por clase:")
+class_distribution = calculate_class_weights(train_y, verbose=True)
 
 class_weights = np.array([0.2012, 5.9698, 11.5819, 7.2159, 27.0968, 1.6638],
                          dtype=np.float32)
