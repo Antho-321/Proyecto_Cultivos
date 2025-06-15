@@ -3,6 +3,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.amp import GradScaler
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 import albumentations as A
@@ -244,14 +245,26 @@ def main():
     
     # --- Instanciación del Modelo, Loss y Optimizador ---
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
+
+    # ========================== INICIO DEL CÓDIGO A INSERTAR ==========================
+    # Frecuencias relativas (en fracción, no %)
+    # NOTA: Estos valores deberían calcularse a partir de tu dataset de entrenamiento.
+    freq = torch.tensor([0.8283, 0.0279, 0.0144, 0.0231, 0.0062, 0.1002])
     
-    loss_fn = nn.CrossEntropyLoss()
+    # Calcula los pesos inversos y normalizados
+    class_weights = 1.0 / freq
+    class_weights = class_weights / class_weights.sum()
+    class_weights = class_weights.to(Config.DEVICE)
     
+    print(f"Pesos de clase aplicados a la loss: {class_weights.cpu().numpy()}")
+
+    loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+
     # AdamW es una buena elección de optimizador por defecto.
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
 
     # El scaler es para el entrenamiento de precisión mixta (acelera el entrenamiento en GPUs compatibles)
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = GradScaler() 
 
     best_mIoU = -1.0
 

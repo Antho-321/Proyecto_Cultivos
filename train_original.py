@@ -3,6 +3,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
@@ -242,7 +243,7 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
 
     # El scaler es para el entrenamiento de precisión mixta (acelera el entrenamiento en GPUs compatibles)
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = GradScaler() 
 
     best_mIoU = -1.0
 
