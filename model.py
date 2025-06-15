@@ -123,7 +123,7 @@ class CloudDeepLabV3Plus(nn.Module):
         # 'out_indices=(1, 3)' selecciona las salidas de la etapa 1 (stride 4, low-level)
         # y la etapa 3 (stride 16, high-level). Esto implementa la idea de "eliminar la última etapa".
         self.backbone = timm.create_model(
-            'tf_efficientnetv2_s_in21k',
+            'tf_efficientnetv2_s.in21k',
             pretrained=True,
             features_only=True,
             out_indices=(1, 3)
