@@ -132,9 +132,9 @@ class CropWithoutBackground(A.DualTransform):
         if not (mask == 0).any():
             return {"y1": 0, "x1": 0, "skip": True}
 
-        # -- Hasta 10 intentos para encontrar un recorte sin fondo
+        # -- Hasta 30 intentos para encontrar un recorte sin fondo
         ys_fg, xs_fg = np.where(mask != 0)
-        for _ in range(10):
+        for _ in range(30):
             i          = np.random.randint(len(ys_fg))
             cy, cx     = int(ys_fg[i]), int(xs_fg[i])
             y1         = int(np.clip(cy - self.ch // 2, 0, h - self.ch))
@@ -238,11 +238,8 @@ def main():
     
     # --- Transformaciones y Aumento de Datos ---
     train_transform = A.Compose([
+        CropWithoutBackground(crop_size=(96, 96), p=0.7),
         CropAroundClass4(crop_size=(96, 96), p=Config.CROP_P_ALWAYS),
-        CropWithoutBackground(
-            crop_size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),  # igual al tamaño final
-            p=0.7                                                 # ← 70 %
-        ),
         A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
