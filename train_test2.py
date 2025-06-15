@@ -17,7 +17,7 @@ from model import CloudDeepLabV3Plus
 from distribucion_por_clase import imprimir_distribucion_clases_post_augmentation 
 
 # ---------------------------------------------------------------------------------
-# 1. CONFIGURACIÓN  (añadimos 1 hiperparámetros nuevos)
+# 1. CONFIGURACIÓN  (añadimos dos hiperparámetros nuevos)
 # ---------------------------------------------------------------------------------
 class Config:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -38,6 +38,8 @@ class Config:
     IMAGE_HEIGHT = 256
     IMAGE_WIDTH = 256
 
+    # —— NUEVO ——
+    CLASS4_WEIGHT     = 7   # peso de las imágenes con clase 4 (6 veces más que las demás)
     CROP_P_ALWAYS     = 1.0    # fuerza el CropAroundClass4 cuando haya píxeles de clase 4
     
     # --- Configuraciones adicionales ---
@@ -207,39 +209,42 @@ def main():
 
     val_transform = A.Compose([
         A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
-        A.Normalize(
-            mean=[0.0, 0.0, 0.0],
-            std=[1.0, 1.0, 1.0],
-            max_pixel_value=255.0,
-        ),
-        ToTensorV2(),
+        A.Normalize(mean=[0, 0, 0], std=[1, 1, 1], max_pixel_value=255),
+        ToTensorV2()
     ])
 
     # --- Creación de Datasets y DataLoaders ---
-    train_dataset = CloudDataset(
-        image_dir=Config.TRAIN_IMG_DIR,
-        mask_dir=Config.TRAIN_MASK_DIR,
-        transform=train_transform
+    train_dataset = CloudDataset(Config.TRAIN_IMG_DIR, Config.TRAIN_MASK_DIR, transform=train_transform)
+
+    # --- Ponderaciones: alto peso si la imagen tiene clase 4, 1 en caso contrario ---
+    weights = [
+        Config.CLASS4_WEIGHT if has_c4 else 1
+        for has_c4 in train_dataset.contains_class4
+    ]
+
+    # Mantenemos ‘replacement=True’ para que una misma imagen pueda salir varias veces en una época
+    sampler = WeightedRandomSampler(
+        weights=weights,
+        num_samples=len(weights) * Config.CLASS4_WEIGHT,  # p. ej. 210 × 6 = 1260
+        replacement=True
     )
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=Config.BATCH_SIZE,
+        sampler=sampler,          # << NO usar shuffle cuando hay sampler
         num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY,
-        shuffle=True
+        pin_memory=Config.PIN_MEMORY
     )
 
-    val_dataset = CloudDataset(
-        image_dir=Config.VAL_IMG_DIR,
-        mask_dir=Config.VAL_MASK_DIR,
-        transform=val_transform
-    )
+    val_dataset   = CloudDataset(Config.VAL_IMG_DIR,   Config.VAL_MASK_DIR,   transform=val_transform)
+
     val_loader = DataLoader(
         val_dataset,
         batch_size=Config.BATCH_SIZE,
+        shuffle=False,
         num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY,
-        shuffle=False
+        pin_memory=Config.PIN_MEMORY
     )
 
     imprimir_distribucion_clases_post_augmentation(
