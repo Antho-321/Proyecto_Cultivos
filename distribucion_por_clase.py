@@ -193,9 +193,11 @@ def print_class_distribution_by_object(
         name_str = f" ({class_names[cls_id]})" if class_names and cls_id in class_names else ""
         print(f"Clase {int(cls_id)}{name_str}: aparece en {count} imágenes/máscaras.")
 
-# # # Cargo las listas
-# images_list, masks_list = load_dataset("Balanced/train/images", "Balanced/train/masks")
-# # weights_dict_silent = calculate_class_weights(masks_list, verbose=True)
+# Cargo las listas
+images_list, masks_list = load_dataset("Balanced/train/images", "Balanced/train/masks")
+# weights_dict_silent = calculate_class_weights(masks_list, verbose=True)
 
-# # 3. Llama a la nueva función para ver la distribución por objetos
+# 3. Llama a la nueva función para ver la distribución por objetos
 # print_class_distribution_by_object(masks_list)
+# distribucion por pixeles
+# print_pixel_percentage(images_list, masks_list)
