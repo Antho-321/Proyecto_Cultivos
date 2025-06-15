@@ -94,13 +94,10 @@ class CloudDataset(torch.utils.data.Dataset):
         image = np.array(Image.open(img_path).convert("RGB"))
         mask = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
 
-        # Normalizar la máscara 0/255 → 0/1
-        mask[mask == 255.0] = 1.0
-
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
-            image = augmented["image"]               # Tensor C×H×W
-            mask  = augmented["mask"].unsqueeze(0)   # 1×H×W
+            image = augmented["image"]           # Tensor C×H×W, float32
+            mask  = augmented["mask"]            # Tensor H×W, int64
 
         return image, mask
 
@@ -113,8 +110,8 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
     model.train()
 
     for batch_idx, (data, targets) in enumerate(loop):
-        data = data.to(device=Config.DEVICE)
-        targets = targets.to(device=Config.DEVICE)
+        data     = data.to(Config.DEVICE, non_blocking=True)
+        targets  = targets.to(Config.DEVICE, non_blocking=True).long()  # <- importante
 
         # Forward
         with torch.cuda.amp.autocast(): # Para entrenamiento de precisión mixta
@@ -130,47 +127,54 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
         # Actualizar la barra de progreso
         loop.set_postfix(loss=loss.item())
 
-def check_metrics(loader, model, device="cuda"):
-    """Calcula métricas de validación (mIoU, accuracy, dice score)."""
-    num_correct = 0
-    num_pixels = 0
-    dice_score = 0
-    intersection_sum = 0
-    union_sum = 0
-    
+def check_metrics(loader, model, n_classes=6, device="cuda"):
+    """
+    Devuelve mIoU macro y Dice macro.
+    Imprime IoU y Dice por clase.
+    """
+    eps = 1e-8                          # para evitar divisiones por 0
+    intersection_sum = torch.zeros(n_classes, dtype=torch.float64, device=device)
+    union_sum        = torch.zeros_like(intersection_sum)
+    dice_num_sum     = torch.zeros_like(intersection_sum)   # 2*intersección
+    dice_den_sum     = torch.zeros_like(intersection_sum)   # pred + gt
+
     model.eval()
 
     with torch.no_grad():
-        for x, y in tqdm(loader, leave=True, desc="Validating"):
-            x = x.to(device)
-            y = y.to(device)
-            
-            preds = torch.sigmoid(model(x))
-            preds = (preds > 0.5).float() # Convertir a máscara binaria
-            
-            # Accuracy
-            num_correct += (preds == y).sum()
-            num_pixels += torch.numel(preds)
-            
-            # Dice Score
-            dice_score += (2 * (preds * y).sum()) / ((preds + y).sum() + 1e-8)
-            
-            # IoU (Intersection over Union)
-            intersection = (preds * y).sum()
-            union = (preds + y).sum() - intersection # Union = A + B - Intersection
-            intersection_sum += intersection
-            union_sum += union
+        for x, y in loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True).long()      # (N, H, W)
 
-    accuracy = num_correct / num_pixels * 100
-    avg_dice_score = dice_score / len(loader)
-    mIoU = intersection_sum / (union_sum + 1e-8) # mIoU para la clase "nube"
+            logits = model(x)                               # (N, 6, H, W)
+            preds  = torch.argmax(logits, dim=1)            # (N, H, W)
 
-    print(f"Validation Accuracy: {accuracy:.2f}%")
-    print(f"Average Dice Score: {avg_dice_score:.4f}")
-    print(f"Mean IoU (mIoU): {mIoU:.4f}")
-    
+            for cls in range(n_classes):
+                pred_c   = (preds == cls)
+                true_c   = (y == cls)
+                inter    = (pred_c & true_c).sum().double()
+                pred_sum = pred_c.sum().double()
+                true_sum = true_c.sum().double()
+                union    = pred_sum + true_sum - inter
+
+                intersection_sum[cls] += inter
+                union_sum[cls]        += union
+                dice_num_sum[cls]     += 2 * inter
+                dice_den_sum[cls]     += pred_sum + true_sum
+
+    # IoU y Dice por clase
+    iou_per_class   = (intersection_sum + eps) / (union_sum + eps)
+    dice_per_class  = (dice_num_sum   + eps) / (dice_den_sum + eps)
+
+    # Promedios macro
+    miou_macro  = iou_per_class.mean()
+    dice_macro  = dice_per_class.mean()
+
+    print("IoU por clase :", iou_per_class.cpu().numpy())
+    print("Dice por clase:", dice_per_class.cpu().numpy())
+    print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
+
     model.train()
-    return mIoU
+    return miou_macro, dice_macro
 
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN
@@ -230,12 +234,9 @@ def main():
     )
     
     # --- Instanciación del Modelo, Loss y Optimizador ---
-    # Asumimos que la segmentación es binaria (1 clase de salida: nube)
-    model = CloudDeepLabV3Plus(num_classes=1).to(Config.DEVICE)
+    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     
-    # La función de pérdida BCEWithLogitsLoss es ideal para segmentación binaria.
-    # Es numéricamente más estable que usar Sigmoid + BCELoss por separado.
-    loss_fn = nn.BCEWithLogitsLoss() 
+    loss_fn = nn.CrossEntropyLoss()
     
     # AdamW es una buena elección de optimizador por defecto.
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
@@ -247,19 +248,35 @@ def main():
 
     # --- Bucle Principal de Entrenamiento ---
     for epoch in range(Config.NUM_EPOCHS):
-        print(f"\n--- Epoch {epoch+1}/{Config.NUM_EPOCHS} ---")
-        train_fn(train_loader, model, optimizer, loss_fn, scaler)
-        
-        # Comprobar métricas en el conjunto de validación
-        current_mIoU = check_metrics(val_loader, model, device=Config.DEVICE)
+        print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
 
-        # Guardar el mejor modelo basado en mIoU
+        # 1) Entrenamiento de una época
+        train_fn(
+            train_loader,
+            model,
+            optimizer,
+            loss_fn,
+            scaler
+        )
+
+        # 2) Evaluación en el conjunto de validación
+        current_mIoU, current_dice = check_metrics(
+            val_loader,
+            model,
+            n_classes=6,
+            device=Config.DEVICE
+        )
+
+        # 3) Guardar checkpoint si hubo mejora en mIoU
         if current_mIoU > best_mIoU:
             best_mIoU = current_mIoU
-            print(f"New best mIoU: {best_mIoU:.4f}! Saving model...")
+            print(f"🔹 Nuevo mejor mIoU: {best_mIoU:.4f} | Dice: {current_dice:.4f}  →  guardando modelo…")
+
             checkpoint = {
+                "epoch":     epoch,
                 "state_dict": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
+                "optimizer":  optimizer.state_dict(),
+                "best_mIoU":  best_mIoU,
             }
             torch.save(checkpoint, Config.MODEL_SAVE_PATH)
 
