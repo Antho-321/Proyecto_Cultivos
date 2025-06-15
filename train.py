@@ -241,6 +241,14 @@ def main():
     # AdamW es una buena elección de optimizador por defecto.
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
 
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max",        # porque maximizamos mIoU
+        factor=0.5,        # LR nuevo = LR viejo * 0.5  (ajústalo a tu gusto)
+        patience=3,        # ⇠ lo que pediste
+        verbose=True
+    )
+
     # El scaler es para el entrenamiento de precisión mixta (acelera el entrenamiento en GPUs compatibles)
     scaler = torch.cuda.amp.GradScaler()
 
@@ -267,18 +275,41 @@ def main():
             device=Config.DEVICE
         )
 
+        scheduler.step(current_mIoU) 
+
         # 3) Guardar checkpoint si hubo mejora en mIoU
         if current_mIoU > best_mIoU:
             best_mIoU = current_mIoU
             print(f"🔹 Nuevo mejor mIoU: {best_mIoU:.4f} | Dice: {current_dice:.4f}  →  guardando modelo…")
 
             checkpoint = {
-                "epoch":     epoch,
+                "epoch":      epoch,
                 "state_dict": model.state_dict(),
                 "optimizer":  optimizer.state_dict(),
                 "best_mIoU":  best_mIoU,
             }
             torch.save(checkpoint, Config.MODEL_SAVE_PATH)
+
+        else:
+            # ⤺ El modelo empeoró: volvemos al mejor conocido
+            print(f"⤺  mIoU = {current_mIoU:.4f} no superó el mejor ({best_mIoU:.4f}). "
+                "Restaurando pesos del checkpoint…")
+
+            checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
+            model.load_state_dict(checkpoint["state_dict"])
+            optimizer.load_state_dict(checkpoint["optimizer"])
+
+    checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
+    model.load_state_dict(checkpoint["state_dict"])
+
+    print("\nEvaluando el modelo con mejor mIoU guardado…")
+    best_mIoU, best_dice = check_metrics(
+        val_loader,
+        model,
+        n_classes=6,
+        device=Config.DEVICE
+    )
+    print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
 
 if __name__ == "__main__":
     main()
