@@ -143,6 +143,6 @@ def calculate_class_weights(masks: Union[np.ndarray, List[np.ndarray]], verbose:
 
     return weights
 
-# Cargo las listas
-images_list, masks_list = load_dataset("Balanced/train/images", "Balanced/train/masks")
-weights_dict_silent = calculate_class_weights(masks_list, verbose=True)
+# # Cargo las listas
+# images_list, masks_list = load_dataset("Balanced/train/images", "Balanced/train/masks")
+# weights_dict_silent = calculate_class_weights(masks_list, verbose=True)
