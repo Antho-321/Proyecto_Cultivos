@@ -1,9 +1,15 @@
-# pixel_level_augment.py
+# pixel_level_augment_gpu.py
 import os, uuid, math, random, shutil
 from pathlib import Path
 from typing import Tuple, List
 
-import numpy as np
+# --- Cambios para la GPU ---
+# Se importa CuPy. Debe instalarse con el kit de herramientas CUDA correcto.
+# Ejemplo: pip install cupy-cuda11x
+import cupy as cp
+# -------------------------
+
+import numpy as np # NumPy sigue siendo útil para operaciones en la CPU
 from PIL import Image
 
 
@@ -11,8 +17,10 @@ def _safe_crop_coords(cy: int, cx: int,
                       h: int, w: int,
                       ch: int, cw: int) -> Tuple[int, int]:
     """
-    Returns the top-left coordinate (y1, x1) of a crop centred at (cy, cx),
-    clipped so the crop fits inside the original image.
+    Devuelve la coordenada superior izquierda (y1, x1) de un recorte centrado en (cy, cx),
+    ajustada para que el recorte quepa dentro de la imagen original.
+    Esta función sigue usando tipos de Python nativos y NumPy, ya que la lógica es simple
+    y no requiere aceleración en la GPU.
     """
     y1 = int(np.clip(cy - ch // 2, 0, h - ch))
     x1 = int(np.clip(cx - cw // 2, 0, w - cw))
@@ -25,9 +33,9 @@ def _save_patch(img_arr: np.ndarray,
                 out_msk_dir: Path,
                 suffix: str) -> int:
     """
-    Saves the patch to disk using a random UUID + suffix.
-    Returns the number of *foreground* pixels (all ≠0) in the mask patch
-    — the caller may use this for bookkeeping if desired.
+    Guarda el parche en el disco usando un UUID aleatorio + sufijo.
+    Los arrays de entrada DEBEN ser arrays de NumPy (en la CPU).
+    Retorna el número de píxeles de primer plano (todos ≠0) en el parche de la máscara.
     """
     name = f"{uuid.uuid4().hex}_{suffix}.png"
     Image.fromarray(img_arr).save(out_img_dir / name)
@@ -46,36 +54,15 @@ def pixel_level_augment(image_dir: str,
                         max_trials_per_image: int = 200
                         ) -> None:
     """
-    Create extra image/mask pairs so that *approximately* `extra_pixels`
-    additional pixels of `target_class` are written to `out_img_dir`
-    / `out_mask_dir`.
-
-    Parameters
-    ----------
-    image_dir, mask_dir
-        Existing dataset folders (original size / resolution).
-    out_img_dir, out_mask_dir
-        Where to store augmented samples.  
-        *Tip:* if these are the same as `image_dir`/`mask_dir`, the function
-        will simply append new files into the original dataset.
-    target_class : int
-        Desired pixel value to oversample (0–5).
-    extra_pixels : int
-        How many *pixels* (not images) of `target_class` you want *added*.
-        The function keeps sampling until the running sum ≥ this value.
-    crop_size : (H, W)
-        The patch size to harvest around each seed pixel.
-    min_pixels_in_crop : int
-        Reject crops that contain fewer than this number of pixels of
-        `target_class` (avoids writing almost-empty patches).
-    max_trials_per_image : int
-        Safety stop to avoid infinite loops with extremely rare classes.
+    Crea pares adicionales de imagen/máscara para que *aproximadamente* `extra_pixels`
+    píxeles adicionales de `target_class` se escriban en `out_img_dir` / `out_mask_dir`.
+    Esta versión está optimizada para ejecutarse en una GPU NVIDIA usando CuPy.
     """
     # ------------------------------------------------------------------ #
-    # Sanity checks & folder prep
+    # Comprobaciones de seguridad y preparación de carpetas
     # ------------------------------------------------------------------ #
-    if target_class < 0 or target_class > 5:
-        raise ValueError("`target_class` must be between 0 and 5")
+    if not (0 <= target_class <= 255):
+        raise ValueError("`target_class` must be a valid pixel value (0-255)")
     image_dir, mask_dir = Path(image_dir), Path(mask_dir)
     out_img_dir, out_mask_dir = Path(out_img_dir), Path(out_mask_dir)
     out_img_dir.mkdir(parents=True, exist_ok=True)
@@ -88,65 +75,103 @@ def pixel_level_augment(image_dir: str,
         raise RuntimeError(f"No images found in {image_dir}")
 
     # ------------------------------------------------------------------ #
-    # Main loop
+    # Bucle principal
     # ------------------------------------------------------------------ #
     h_crop, w_crop = crop_size
     cumulative_pixels = 0
-
+    
+    # El generador de números aleatorios de NumPy sigue siendo adecuado para la CPU.
     rng = np.random.default_rng()
 
+    print(f"Iniciando aumento en la GPU para la clase {target_class}...")
     while cumulative_pixels < extra_pixels:
-        # Randomly choose an image; we will attempt to mine one patch from it.
+        # Elige una imagen al azar
         img_path: Path = rng.choice(img_files)
         base_name = img_path.stem
         msk_path: Path = mask_dir / f"{base_name}_mask.png"
-
-        # Load arrays (Pillow → numpy, *no* resize!)
-        img_arr = np.asarray(Image.open(img_path).convert("RGB"))
-        msk_arr = np.asarray(Image.open(msk_path).convert("L"), dtype=np.uint8)
-
-        ys, xs = np.where(msk_arr == target_class)
-        if ys.size == 0:
-            # No pixels of this class in this image; pick another image.
+        
+        if not msk_path.exists():
+            print(f"Advertencia: No se encontró la máscara {msk_path}, saltando imagen.")
             continue
 
-        h, w = msk_arr.shape[:2]
+        # Carga los arrays en la CPU primero usando Pillow/NumPy
+        img_arr_cpu = np.asarray(Image.open(img_path).convert("RGB"))
+        msk_arr_cpu = np.asarray(Image.open(msk_path).convert("L"), dtype=np.uint8)
 
-        # Try a few seeds in this image to get a crop with enough target pixels
+        # --- MODIFICACIÓN GPU: Mueve los arrays a la GPU ---
+        img_arr_gpu = cp.asarray(img_arr_cpu)
+        msk_arr_gpu = cp.asarray(msk_arr_cpu)
+        
+        # --- MODIFICACIÓN GPU: Realiza la búsqueda en la GPU ---
+        ys_gpu, xs_gpu = cp.where(msk_arr_gpu == target_class)
+        
+        # .size funciona tanto en NumPy como en CuPy
+        if ys_gpu.size == 0:
+            # No hay píxeles de esta clase en la imagen; elige otra.
+            continue
+
+        h, w = msk_arr_gpu.shape[:2]
+
+        # Intenta varias semillas en esta imagen para obtener un buen recorte
         for _ in range(max_trials_per_image):
-            idx = rng.integers(low=0, high=len(ys))
-            cy, cx = int(ys[idx]), int(xs[idx])
-            y1, x1 = _safe_crop_coords(cy, cx, h, w, h_crop, w_crop)
-            img_patch = img_arr[y1:y1 + h_crop, x1:x1 + w_crop, :]
-            msk_patch = msk_arr[y1:y1 + h_crop, x1:x1 + w_crop]
+            # Elige un índice aleatorio de un píxel objetivo
+            idx = rng.integers(low=0, high=len(ys_gpu))
 
-            n_target_pixels = int((msk_patch == target_class).sum())
+            # --- MODIFICACIÓN GPU: Obtiene las coordenadas del píxel semilla ---
+            # .get() transfiere un único valor de la GPU a la CPU
+            cy, cx = int(ys_gpu[idx].get()), int(xs_gpu[idx].get())
+
+            y1, x1 = _safe_crop_coords(cy, cx, h, w, h_crop, w_crop)
+            
+            # --- MODIFICACIÓN GPU: Recorta el parche directamente en la GPU ---
+            img_patch_gpu = img_arr_gpu[y1:y1 + h_crop, x1:x1 + w_crop, :]
+            msk_patch_gpu = msk_arr_gpu[y1:y1 + h_crop, x1:x1 + w_crop]
+
+            # --- MODIFICACIÓN GPU: Cuenta los píxeles en la GPU ---
+            # .sum() en CuPy devuelve un array de 0 dimensiones.
+            n_target_pixels = int((msk_patch_gpu == target_class).sum())
+            
             if n_target_pixels >= min_pixels_in_crop:
+                # --- MODIFICACIÓN GPU: Mueve el parche de vuelta a la CPU para guardarlo ---
+                img_patch_cpu = cp.asnumpy(img_patch_gpu)
+                msk_patch_cpu = cp.asnumpy(msk_patch_gpu)
+
                 _ = _save_patch(
-                    img_patch,
-                    msk_patch,
+                    img_patch_cpu,
+                    msk_patch_cpu,
                     out_img_dir,
                     out_mask_dir,
                     suffix=f"cls{target_class}"
                 )
                 cumulative_pixels += n_target_pixels
-                break  # go back to the while-loop / pick new image
-        # end for
-    # end while
+                
+                # Opcional: Imprime el progreso
+                print(f"\rProgreso: {cumulative_pixels / extra_pixels * 100:.2f}% ({cumulative_pixels:,}/{extra_pixels:,} píxeles añadidos)...", end="")
+                
+                break  # Vuelve al bucle while para elegir una nueva imagen
+        # fin del bucle for
+    # fin del bucle while
 
-    print(f"✔ Added ~{cumulative_pixels:,} pixels of class {target_class} "
-          f"in {out_img_dir.relative_to(Path.cwd())}")
+    print(f"\n✔ Se añadieron ~{cumulative_pixels:,} píxeles de la clase {target_class} "
+          f"en {out_img_dir.relative_to(Path.cwd())}")
 
 
-# ------------------------- Usage example ------------------------- #
+# ------------------------- Ejemplo de uso ------------------------- #
 if __name__ == "__main__":
-    # Add ~50 000 extra pixels of class-4
-    pixel_level_augment(
-        image_dir="Balanced/train/images",
-        mask_dir="Balanced/train/masks",
-        out_img_dir="Balanced/train/images",   # append to same folder
-        out_mask_dir="Balanced/train/masks",
-        target_class=1,
-        extra_pixels=22029888,
-        crop_size=(96, 96)                     # match your CropAroundClass4
-    )
+    # Asegúrate de que las rutas y los parámetros son correctos para tu caso de uso.
+    # Este es solo un ejemplo.
+    try:
+        pixel_level_augment(
+            image_dir="Balanced/train/images",
+            mask_dir="Balanced/train/masks",
+            out_img_dir="Balanced_augmented/train/images", # Es mejor escribir en una nueva carpeta
+            out_mask_dir="Balanced_augmented/train/masks",
+            target_class=1,
+            extra_pixels=50000,
+            crop_size=(256, 256),
+            min_pixels_in_crop=100
+        )
+    except FileNotFoundError:
+        print("Error: Los directorios de entrada no existen. Por favor, ajusta las rutas en el bloque `if __name__ == '__main__'`.")
+    except Exception as e:
+        print(f"Ocurrió un error inesperado: {e}")
