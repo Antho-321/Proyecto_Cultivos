@@ -201,36 +201,3 @@ class CloudDeepLabV3Plus(nn.Module):
         )
         
         return final_logits_upsampled
-
-# =================================================================================
-# 4. SCRIPT DE PRUEBA
-# Para verificar que la arquitectura está correctamente ensamblada.
-# =================================================================================
-if __name__ == '__main__':
-    # Parámetros del modelo
-    NUM_CLASSES = 1  # Segmentación binaria (nube vs no-nube)
-    INPUT_SIZE = (256, 256)
-    
-    # Crear una instancia del modelo
-    model = CloudDeepLabV3Plus(num_classes=NUM_CLASSES)
-    model.eval() # Poner en modo de evaluación
-    
-    # Crear un tensor de entrada de prueba (batch_size=1, canales=3, altura=256, ancho=256)
-    dummy_input = torch.randn(1, 3, *INPUT_SIZE)
-    
-    # Realizar una pasada hacia adelante (forward pass)
-    with torch.no_grad():
-        output = model(dummy_input)
-    
-    # Imprimir información para verificación
-    print("Arquitectura CloudDeepLabV3+ instanciada correctamente.")
-    print(f"Tamaño de la entrada: {dummy_input.shape}")
-    print(f"Tamaño de la salida: {output.shape}")
-    
-    # Verificar que el tamaño de salida coincide con el de entrada (y canales de clase)
-    assert output.shape == (1, NUM_CLASSES, *INPUT_SIZE)
-    print("¡La forma de la salida es correcta!")
-
-    # Contar parámetros para tener una idea de la complejidad
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Número total de parámetros entrenables: {total_params / 1e6:.2f} M")
