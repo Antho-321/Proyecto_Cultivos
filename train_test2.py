@@ -301,7 +301,11 @@ def main():
     # --- Instanciación del Modelo, Loss y Optimizador ---
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     
-    alpha = torch.tensor([0.25, 1, 1, 1, 1, 1], device=Config.DEVICE)
+    alpha = torch.tensor(
+        [0.0353, 0.6920, 1.6204, 1.1658, 2.0863, 0.4002],
+        dtype=torch.float32,
+        device=Config.DEVICE
+    )
 
     loss_fn = ComboLoss(
         lambda_focal = 1.0,        # peso del término Focal
