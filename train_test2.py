@@ -203,7 +203,7 @@ def main():
     # --- Transformaciones y Aumento de Datos ---
     train_transform = A.Compose([
         SmartCrop(crop_size=(64, 64), p=0.7),
-        A.Rotate(limit=35, p=0.7, border_mode=0, value=0, mask_value=0),
+        A.Rotate(limit=35, p=0.3, border_mode=0, value=0, mask_value=0),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
 
@@ -263,7 +263,7 @@ def main():
     # --- Instanciación del Modelo, Loss y Optimizador ---
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss(ignore_index=0)
     
     # AdamW es una buena elección de optimizador por defecto.
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
