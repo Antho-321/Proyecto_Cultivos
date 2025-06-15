@@ -46,36 +46,61 @@ class Config:
 # 2. DATASET PERSONALIZADO
 # Clase para cargar las imágenes y sus máscaras de segmentación.
 # =================================================================================
+# =================================================================================
+# 2. DATASET PERSONALIZADO (versión alineada con load_dataset)
+# =================================================================================
 class CloudDataset(torch.utils.data.Dataset):
-    def __init__(self, image_dir, mask_dir, transform=None):
+    """
+    Dataset para segmentación de nubes que asume:
+      • Las imágenes están en image_dir y se llaman *.jpg* o *.png*.
+      • Las máscaras correspondientes están en mask_dir y se llaman
+        '{nombre_imagen_sin_extensión}_mask.png'.
+      • Las máscaras son imágenes en escala de grises con 0-255
+        (0 = fondo, 255 = nube). Se normalizan a 0-1.
+    """
+    _IMG_EXTENSIONS = ('.jpg', '.png')
+
+    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
         self.transform = transform
-        self.images = os.listdir(image_dir)
 
-    def __len__(self):
+        # Lista de archivos que cumplen con las extensiones permitidas
+        self.images = [
+            f for f in os.listdir(image_dir)
+            if f.lower().endswith(self._IMG_EXTENSIONS)
+        ]
+
+    def __len__(self) -> int:
         return len(self.images)
 
-    def __getitem__(self, index):
-        img_path = os.path.join(self.image_dir, self.images[index])
-        # Asumimos que las máscaras tienen el mismo nombre de archivo
-        mask_path = os.path.join(self.mask_dir, self.images[index])
-        
-        # Las máscaras pueden tener un formato diferente (ej: .gif, .png), ajusta si es necesario
-        # mask_path = mask_path.replace(".jpg", "_mask.gif") 
+    def _mask_path_from_image_name(self, image_filename: str) -> str:
+        """
+        Convierte 'foto123.jpg' -> 'foto123_mask.png'
+        """
+        name_without_ext = image_filename.rsplit('.', 1)[0]
+        mask_filename = f"{name_without_ext}_mask.png"
+        return os.path.join(self.mask_dir, mask_filename)
 
+    def __getitem__(self, idx: int):
+        img_filename = self.images[idx]
+        img_path = os.path.join(self.image_dir, img_filename)
+
+        mask_path = self._mask_path_from_image_name(img_filename)
+        if not os.path.exists(mask_path):
+            raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
+
+        # Carga la imagen RGB y la máscara en escala de grises
         image = np.array(Image.open(img_path).convert("RGB"))
-        mask = np.array(Image.open(mask_path).convert("L"), dtype=np.float32) # L = Grayscale
-        
-        # Las máscaras de nubes suelen tener valores 0 (fondo) y 255 (nube). Normalizamos a 0 y 1.
+        mask = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
+
+        # Normalizar la máscara 0/255 → 0/1
         mask[mask == 255.0] = 1.0
 
         if self.transform:
-            augmentations = self.transform(image=image, mask=mask)
-            image = augmentations["image"]
-            mask = augmentations["mask"]
-            # Añadir una dimensión de canal a la máscara
-            mask = mask.unsqueeze(0)
+            augmented = self.transform(image=image, mask=mask)
+            image = augmented["image"]               # Tensor C×H×W
+            mask  = augmented["mask"].unsqueeze(0)   # 1×H×W
 
         return image, mask
 
