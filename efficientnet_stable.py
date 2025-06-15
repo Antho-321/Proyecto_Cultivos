@@ -59,6 +59,7 @@ import matplotlib.pyplot as plt
 # -------------------------------------------------------------------------------
 import keras_efficientnet_v2.efficientnet_v2 as _efn2
 from lovasz_losses_tf import lovasz_softmax
+from iou_por_clase import print_class_iou
 
 def patched_se_module(inputs, se_ratio=0.25, name=""):
     data_format = K.image_data_format()
@@ -543,6 +544,13 @@ def visualize_predictions(model_to_eval,X,y,num_samples=5):
     plt.savefig('predictions_visualization_iou_optimized.png')
     plt.close()
     print("\nVisualización de predicciones guardada en 'predictions_visualization_iou_optimized.png'")
+
+print("Calculando IoU por clase (usando índices como etiquetas):")
+class_ious = print_class_iou(
+    model=eval_model, 
+    X=val_X, 
+    y_true=val_y
+)
 
 visualize_predictions(eval_model,val_X,val_y)
 print("\nEntrenamiento y evaluación completados.")
