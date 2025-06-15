@@ -454,12 +454,6 @@ def weighted_focal_loss(class_weights, gamma=2.0):
     alpha = [class_weights[i] for i in sorted(class_weights)]
     return focal_loss(alpha=alpha, gamma=gamma)
 
-loss_fn = weighted_focal_loss(weights_dict_silent, gamma=2.0)
-
-model.compile(optimizer='adam',
-              loss=loss_fn,
-              metrics=['accuracy'])
-
 def weighted_focal_lovasz_loss(class_weights, gamma=2.0, lovasz_weight=1.0):
     # Focal modulado
     fl = weighted_focal_loss(class_weights, gamma)
