@@ -26,22 +26,20 @@ def _safe_crop_coords(cy: int, cx: int,
     x1 = int(np.clip(cx - cw // 2, 0, w - cw))
     return y1, x1
 
-
 def _save_patch(img_arr: np.ndarray,
                 msk_arr: np.ndarray,
                 out_img_dir: Path,
                 out_msk_dir: Path,
+                target_class: int,
                 suffix: str) -> int:
     """
-    Guarda el parche en el disco usando un UUID aleatorio + sufijo.
-    Los arrays de entrada DEBEN ser arrays de NumPy (en la CPU).
-    Retorna el número de píxeles de primer plano (todos ≠0) en el parche de la máscara.
+    Guarda el parche tal cual y devuelve solo el nº de píxeles == target_class.
+    NO modifica los valores de la máscara.
     """
     name = f"{uuid.uuid4().hex}_{suffix}.png"
     Image.fromarray(img_arr).save(out_img_dir / name)
     Image.fromarray(msk_arr).save(out_msk_dir / (name.replace('.png', '_mask.png')))
-    return int((msk_arr != 0).sum())
-
+    return int((msk_arr == target_class).sum())
 
 def pixel_level_augment(image_dir: str,
                         mask_dir: str,
@@ -114,25 +112,21 @@ def pixel_level_augment(image_dir: str,
 
         # Intenta varias semillas en esta imagen para obtener un buen recorte
         for _ in range(max_trials_per_image):
-            # Elige un índice aleatorio de un píxel objetivo
             idx = rng.integers(low=0, high=len(ys_gpu))
-
-            # --- MODIFICACIÓN GPU: Obtiene las coordenadas del píxel semilla ---
-            # .get() transfiere un único valor de la GPU a la CPU
             cy, cx = int(ys_gpu[idx].get()), int(xs_gpu[idx].get())
 
             y1, x1 = _safe_crop_coords(cy, cx, h, w, h_crop, w_crop)
-            
-            # --- MODIFICACIÓN GPU: Recorta el parche directamente en la GPU ---
+
             img_patch_gpu = img_arr_gpu[y1:y1 + h_crop, x1:x1 + w_crop, :]
             msk_patch_gpu = msk_arr_gpu[y1:y1 + h_crop, x1:x1 + w_crop]
 
-            # --- MODIFICACIÓN GPU: Cuenta los píxeles en la GPU ---
-            # .sum() en CuPy devuelve un array de 0 dimensiones.
-            n_target_pixels = int((msk_patch_gpu == target_class).sum())
-            
-            if n_target_pixels >= min_pixels_in_crop:
-                # --- MODIFICACIÓN GPU: Mueve el parche de vuelta a la CPU para guardarlo ---
+            # Conteos en GPU
+            n_target = int((msk_patch_gpu == target_class).sum())
+            # “Otro” = cualquier valor distinto de target_class
+            n_other  = int((msk_patch_gpu != target_class).sum())
+
+            # Aceptar solo si TODO el parche es de la clase objetivo
+            if n_target >= min_pixels_in_crop and n_other == 0:
                 img_patch_cpu = cp.asnumpy(img_patch_gpu)
                 msk_patch_cpu = cp.asnumpy(msk_patch_gpu)
 
@@ -141,14 +135,14 @@ def pixel_level_augment(image_dir: str,
                     msk_patch_cpu,
                     out_img_dir,
                     out_mask_dir,
+                    target_class=target_class,
                     suffix=f"cls{target_class}"
                 )
-                cumulative_pixels += n_target_pixels
-                
-                # Opcional: Imprime el progreso
-                print(f"\rProgreso: {cumulative_pixels / extra_pixels * 100:.2f}% ({cumulative_pixels:,}/{extra_pixels:,} píxeles añadidos)...", end="")
-                
-                break  # Vuelve al bucle while para elegir una nueva imagen
+                cumulative_pixels += n_target
+                print(f"\rProgreso: {cumulative_pixels / extra_pixels * 100:.2f}% "
+                      f"({cumulative_pixels:,}/{extra_pixels:,} píxeles añadidos)...",
+                      end="")
+                break
         # fin del bucle for
     # fin del bucle while
 
