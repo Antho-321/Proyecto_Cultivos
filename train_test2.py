@@ -82,42 +82,34 @@ class CloudDataset(torch.utils.data.Dataset):
 
         return image, mask
 
-class SmartCrop(A.DualTransform):
-    def __init__(self, crop_size=(64, 64), p=0.7, focus_cls=4, max_tries=30):
+class CropAroundClass4(A.DualTransform):
+    def __init__(self, crop_size=(96,96), p=0.5):
         super().__init__(always_apply=False, p=p)
-        self.ch, self.cw  = crop_size
-        self.focus_cls    = focus_cls
-        self.max_tries    = max_tries
+        self.ch, self.cw = crop_size
 
     def get_params_dependent_on_targets(self, params):
-        mask = params["mask"]
-        h, w = mask.shape[:2]
+        image = params["image"]
+        mask  = params["mask"]
+        ys, xs = np.where(mask == 4)
+        if ys.size:
+            # pick one random pixel of class 4
+            i = np.random.randint(ys.shape[0])
+            cy, cx = ys[i], xs[i]
+            y1 = int(np.clip(cy - self.ch//2, 0, image.shape[0] - self.ch))
+            x1 = int(np.clip(cx - self.cw//2, 0, image.shape[1] - self.cw))
+        else:
+            # no class-4 pixels → random crop
+            y1 = np.random.randint(0, image.shape[0] - self.ch + 1)
+            x1 = np.random.randint(0, image.shape[1] - self.cw + 1)
+        return {"y1": y1, "x1": x1}
 
-        # Todas las coords de foreground
-        ys_fg, xs_fg = np.where(mask != 0)
-        if len(ys_fg) == 0:
-            return {"y1": 0, "x1": 0, "skip": True}  # máscara vacía
+    def apply(self, img, y1=0, x1=0, **params):
+        return img[y1 : y1 + self.ch,
+                   x1 : x1 + self.cw]
 
-        # Si hay píxeles de la clase de interés, priorízalos
-        ys_focus, xs_focus = np.where(mask == self.focus_cls)
-        candidate_coords   = list(zip(ys_focus, xs_focus)) if len(ys_focus) else list(zip(ys_fg, xs_fg))
-
-        for _ in range(self.max_tries):
-            cy, cx = candidate_coords[np.random.randint(len(candidate_coords))]
-            y1     = int(np.clip(cy - self.ch//2, 0, h - self.ch))
-            x1     = int(np.clip(cx - self.cw//2, 0, w - self.cw))
-            crop   = mask[y1:y1+self.ch, x1:x1+self.cw]
-            if (crop == 0).any():   # todavía hay fondo → intenta de nuevo
-                continue
-            return {"y1": y1, "x1": x1, "skip": False}
-        # Si no encontró ninguno, mantén la imagen original
-        return {"y1": 0, "x1": 0, "skip": True}
-
-    def apply(self, img, skip=False, y1=0, x1=0, **params):
-        return img if skip else img[y1:y1+self.ch, x1:x1+self.cw]
-
-    def apply_to_mask(self, mask, **kw):
-        return self.apply(mask, **kw)
+    def apply_to_mask(self, mask, y1=0, x1=0, **params):
+        return mask[y1 : y1 + self.ch,
+                    x1 : x1 + self.cw]
 
 # =================================================================================
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN
@@ -202,15 +194,11 @@ def main():
     
     # --- Transformaciones y Aumento de Datos ---
     train_transform = A.Compose([
-        SmartCrop(crop_size=(64, 64), p=0.7),
-        A.Rotate(limit=35, p=0.3, border_mode=0, value=0, mask_value=0),
+        CropAroundClass4(crop_size=(96, 96), p=Config.CROP_P_ALWAYS),
+        A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
-
-        # 🔽🔽 Forzamos dimensión única 🔽🔽
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
-
-        A.Normalize(mean=[0,0,0], std=[1,1,1]),
+        A.Normalize(mean=[0, 0, 0], std=[1, 1, 1], max_pixel_value=255),
         ToTensorV2()
     ])
 
