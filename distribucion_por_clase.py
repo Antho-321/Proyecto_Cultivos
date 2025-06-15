@@ -29,9 +29,27 @@ def imprimir_distribucion_clases_post_augmentation(loader, n_classes=6, title="D
     # Calcula el porcentaje para cada clase
     class_distribution = (class_counts.float() / total_pixels) * 100
 
+    # ------------------------------------------------------------------
+    # ### NUEVO: pesos de importancia inversamente proporcionales
+    # Fórmula clásica:   w_i  =  total_pix / (n_clases * count_i)
+    # ⇒  clases raras  →  peso grande,   clases frecuentes → pequeño.
+    # Normalizamos para que el promedio sea 1 (opcional pero práctico).
+    eps = 1e-8                                         # evita división por 0
+    raw_weights = total_pixels / (n_classes * (class_counts.float() + eps))
+    class_weights = raw_weights / raw_weights.mean()   # media = 1
+    # ------------------------------------------------------------------
+
     # Imprime los resultados
     print(f"Número total de píxeles analizados: {total_pixels}")
     print("Distribución final de píxeles por clase:")
     for i, dist in enumerate(class_distribution):
         print(f"  Clase {i}: {dist:.4f}%  ({class_counts[i]} píxeles)")
+    
+    # ------------------------------------------------------------------
+    # ### NUEVO: muestra los pesos calculados
+    print("\nPesos de importancia por clase (para CrossEntropy/Focal):")
+    for i, w in enumerate(class_weights):
+        print(f"  Clase {i}: {w:.4f}")
+    # ------------------------------------------------------------------
+
     print("-" * (len(title) + 6))
