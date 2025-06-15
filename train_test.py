@@ -289,14 +289,14 @@ def main():
             }
             torch.save(checkpoint, Config.MODEL_SAVE_PATH)
 
-        print("\nEvaluando el modelo con mejor mIoU guardado…")
-        best_mIoU, best_dice = check_metrics(
-            val_loader,
-            model,
-            n_classes=6,
-            device=Config.DEVICE
-        )
-        print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
+    print("\nEvaluando el modelo con mejor mIoU guardado…")
+    best_mIoU, best_dice = check_metrics(
+        val_loader,
+        model,
+        n_classes=6,
+        device=Config.DEVICE
+    )
+    print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
 
 if __name__ == "__main__":
     main()
