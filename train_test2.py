@@ -15,7 +15,8 @@ import numpy as np
 
 # Importa la arquitectura del otro archivo
 from model import CloudDeepLabV3Plus
-from distribucion_por_clase import imprimir_distribucion_clases_post_augmentation 
+from distribucion_por_clase import imprimir_distribucion_clases_post_augmentation
+from loss_function import ComboLoss 
 
 # ---------------------------------------------------------------------------------
 # 1. CONFIGURACIÓN  (añadimos dos hiperparámetros nuevos)
@@ -300,7 +301,14 @@ def main():
     # --- Instanciación del Modelo, Loss y Optimizador ---
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     
-    loss_fn = nn.CrossEntropyLoss()
+    alpha = torch.tensor([0.25, 1, 1, 1, 1, 1], device=Config.DEVICE)
+
+    loss_fn = ComboLoss(
+        lambda_focal = 1.0,        # peso del término Focal
+        lambda_dice  = 1.0,        # peso del término Dice
+        focal_gamma  = 2.0,        # γ típico
+        focal_alpha  = alpha       # o None si no quieres ponderar clases
+    ).to(Config.DEVICE)
     
     # AdamW es una buena elección de optimizador por defecto.
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
