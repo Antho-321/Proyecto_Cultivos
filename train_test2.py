@@ -229,8 +229,12 @@ def main():
     tr_ld = DataLoader(tr_ds, batch_sampler=tr_samp, num_workers=Config.NUM_WORKERS,
                        pin_memory=Config.PIN_MEMORY)
 
-    val_ds = CloudPatchDatasetBalanced(Config.VAL_IMG_DIR,Config.VAL_MASK_DIR,
-                                       patch_size=128,stride=128,transform=val_tf)
+    val_ds = CloudPatchDatasetBalanced(
+        Config.VAL_IMG_DIR, Config.VAL_MASK_DIR,
+        patch_size=128, stride=128,
+        min_fg_ratio=0,         # incluir incluso parches sin FG
+        transform=val_tf
+    )
     val_ld = DataLoader(val_ds,batch_size=Config.BATCH_SIZE,shuffle=False,
                         num_workers=Config.NUM_WORKERS,pin_memory=Config.PIN_MEMORY)
 
