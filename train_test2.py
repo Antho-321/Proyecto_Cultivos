@@ -365,8 +365,12 @@ def main():
     
     # --- Transformaciones y Aumento de Datos ---
     train_transform = A.Compose([
-        A.RandomResizedCrop(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH,
-                            scale=(0.5,1.2), ratio=(0.75,1.33), p=0.6),      # NEW
+        A.RandomResizedCrop(
+            size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),   # ← tuple, no dos ints
+            scale=(0.5, 1.0),     # máximo 1.0
+            ratio=(0.75, 1.33),
+            p=0.6
+        ),
         A.RandomRotate90(p=0.5),                                             # CHANGED (más barato)
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
