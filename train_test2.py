@@ -189,7 +189,7 @@ def main():
     # Modelo + pérdida
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     w = torch.tensor(compute_class_weights(tr_ds), device=Config.DEVICE)
-    loss_fn = AsymFocalTverskyLoss(class_weights=w, eps=Config.EPS_TVERSKY).to(Config.DEVICE)
+    loss_fn = AsymFocalTverskyLoss(class_weights=w).to(Config.DEVICE)
 
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=Config.NUM_EPOCHS)
