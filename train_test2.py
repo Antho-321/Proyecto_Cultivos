@@ -375,7 +375,7 @@ def main():
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
         A.ColorJitter(0.1,0.1,0.1,0.05,p=0.4),                                # NEW
-        A.Normalize(...),
+        A.Normalize(),
         ToTensorV2()
     ])
 
