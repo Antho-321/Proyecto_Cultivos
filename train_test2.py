@@ -367,10 +367,11 @@ def main():
     # --- Transformaciones y Aumento de Datos ---
     train_transform = A.Compose([
         A.RandomResizedCrop(
-            Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH,
-            scale=(0.5, 1.0), ratio=(0.75, 1.33),
-            interpolation=cv2.INTER_LINEAR,          # para la imagen
-            mask_interpolation=cv2.INTER_NEAREST     # ← clave
+            size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),    # ← firma nueva
+            scale=(0.5, 1.0),
+            ratio=(0.75, 1.33),
+            interpolation=cv2.INTER_LINEAR,
+            mask_interpolation=cv2.INTER_NEAREST
         ),
         A.RandomRotate90(p=0.5),
         A.HorizontalFlip(p=0.5),
