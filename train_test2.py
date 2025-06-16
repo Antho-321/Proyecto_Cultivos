@@ -45,118 +45,119 @@ class Config:
     LOAD_MODEL        = False
     MODEL_SAVE_PATH   = "best_model.pth.tar"
 
-# ---------------------------------------------------------------------------------
-# 2. DATASET PERSONALIZADO con flag ‘contains_class4’
-# ---------------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-# Dataset que genera TODOS los patches 128×128 de cada imagen y
-# guarda qué clases contiene cada patch.  Esto permite muestrear después
-# con conocimiento de clase.
+# 1. DATASET  ➜  calcula y guarda la histograma por patch
 # ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# NUEVO DATASET BASADO EN PATCHES PERO CONTROLANDO PORCENTAJE DE FOREGROUND
-# ---------------------------------------------------------------------------
-class CloudPatchDatasetBalanced(torch.utils.data.Dataset):                      # NEW
+class CloudPatchDatasetBalanced(torch.utils.data.Dataset):
     """
-    Igual que CloudPatchDataset pero garantiza que cada patch contenga al menos
-    `min_fg_ratio` (ej. 0.4 = 40 %) de píxeles 1-5.  Así evitamos “mar de fondo”.
+    Patches 128×128 con ≥ `min_fg_ratio` de píxeles 1-5.
+    Para cada patch guardamos:
+        • img_idx  – índice de la imagen en self.images
+        • y, x     – esquina sup-izq del patch
+        • hist     – np.ndarray(6,)  conteo de píxeles por clase
     """
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
-    def __init__(
-        self,
-        image_dir, mask_dir,
-        patch_size=128, stride=128,
-        min_fg_ratio=0.4,               # NEW
-        transform=None,
-    ):
-        self.image_dir  = image_dir
-        self.mask_dir   = mask_dir
-        self.patch_size = patch_size
-        self.stride     = stride
+    def __init__(self, image_dir, mask_dir,
+                 patch_size=128, stride=128,
+                 min_fg_ratio=0.4,
+                 transform=None):
+        self.image_dir   = image_dir
+        self.mask_dir    = mask_dir
+        self.patch_size  = patch_size
+        self.stride      = stride
         self.min_fg_ratio = min_fg_ratio
-        self.transform  = transform
+        self.transform   = transform
 
         self.images = [f for f in os.listdir(image_dir)
                        if f.lower().endswith(self._IMG_EXTENSIONS)]
 
         self.index = []
         for img_idx, img_name in enumerate(self.images):
-            mask = np.array(
+            mask_full = np.array(
                 Image.open(os.path.join(mask_dir,
-                             f"{img_name.rsplit('.',1)[0]}_mask.png"))
+                          f"{img_name.rsplit('.',1)[0]}_mask.png"))
                 .convert("L"), dtype=np.uint8)
 
-            H, W = mask.shape
+            H, W = mask_full.shape
             for y in range(0, H - patch_size + 1, stride):
                 for x in range(0, W - patch_size + 1, stride):
-                    patch = mask[y:y+patch_size, x:x+patch_size]
+                    patch = mask_full[y:y+patch_size, x:x+patch_size]
                     fg_ratio = (patch != 0).sum() / patch.size
-                    if fg_ratio >= min_fg_ratio:                                   # NEW
-                        self.index.append(dict(img_idx=img_idx, y=y, x=x))
+                    if fg_ratio < self.min_fg_ratio:
+                        continue
 
-    def __len__(self):  return len(self.index)
+                    hist = np.bincount(patch.flatten(),
+                                       minlength=6).astype(np.int64)  # (6,)
+                    self.index.append(
+                        dict(img_idx=img_idx, y=y, x=x, hist=hist)
+                    )
+
+    def __len__(self):
+        return len(self.index)
+
+    def _load_rgb(self, img_name):
+        path = os.path.join(self.image_dir, img_name)
+        return np.array(Image.open(path).convert("RGB"))
+
+    def _load_mask(self, img_name):
+        path = os.path.join(self.mask_dir,
+                            f"{img_name.rsplit('.',1)[0]}_mask.png")
+        return np.array(Image.open(path).convert("L"), dtype=np.float32)
 
     def __getitem__(self, idx):
         rec      = self.index[idx]
         img_name = self.images[rec["img_idx"]]
-        img_path = os.path.join(self.image_dir, img_name)
-        mask_path= os.path.join(self.mask_dir,
-                                f"{img_name.rsplit('.',1)[0]}_mask.png")
 
-        img  = np.array(Image.open(img_path).convert("RGB"))
-        mask = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
+        img_full  = self._load_rgb(img_name)
+        mask_full = self._load_mask(img_name)
 
-        y,x = rec["y"], rec["x"]
-        img  = img [y:y+self.patch_size, x:x+self.patch_size]
-        mask = mask[y:y+self.patch_size, x:x+self.patch_size]
+        y, x = rec["y"], rec["x"]
+        img  = img_full [y:y+self.patch_size, x:x+self.patch_size]
+        mask = mask_full[y:y+self.patch_size, x:x+self.patch_size]
 
         if self.transform:
-            aug  = self.transform(image=img, mask=mask)
+            aug   = self.transform(image=img, mask=mask)
             img, mask = aug["image"], aug["mask"]
 
         return img, mask
 
 # ---------------------------------------------------------------------------
-# PIXEL-BALANCED SAMPLER
+# 2. SAMPLER  ➜  usa la histograma precalculada
 # ---------------------------------------------------------------------------
-class PixelBalancedSampler(torch.utils.data.Sampler):                            # NEW
+class PixelBalancedSampler(torch.utils.data.Sampler):
     """
-    Ensambla batches hasta alcanzar `target_pixels_per_class` (array[6]) dentro del lote.
-    Muy parecido a ReMixSampler de Seg. Med., pero simplificado para 6 clases.
+    Forma lotes donde la suma de píxeles por clase ≤ `target_pixels_per_class`.
+    Ya no re-lee las máscaras: usa rec["hist"] calculado por el dataset.
     """
-    def __init__(self, dataset, target_pixels_per_class, batch_size, drop_last=True):
-        self.ds  = dataset
-        self.tpp = np.array(target_pixels_per_class)
-        self.B   = batch_size
+    def __init__(self, dataset, target_pixels_per_class,
+                 batch_size, drop_last=True):
+        self.ds       = dataset
+        self.tpp      = np.asarray(target_pixels_per_class, dtype=np.int64)
+        self.B        = batch_size
         self.drop_last = drop_last
 
-        # Pre-calculamos cuántos píxeles de cada clase tiene cada patch
-        self.patch_class_hist = []
-        for _, mask in dataset:
-            h = np.bincount(mask.flatten().astype(int), minlength=6)
-            self.patch_class_hist.append(h)
+        # Acceso directo a las histogramas precalculadas
+        self.patch_hist = [rec["hist"] for rec in dataset.index]  # list[np.ndarray]
 
     def __iter__(self):
-        indices = np.random.permutation(len(self.ds)).tolist()
-        batch, sum_hist = [], np.zeros(6)
+        order = np.random.permutation(len(self.ds))
+        batch, cum_hist = [], np.zeros(6, dtype=np.int64)
 
-        for idx in indices:
-            h = self.patch_class_hist[idx]
-            if (sum_hist + h <= self.tpp).all() or len(batch) == 0:
+        for idx in order:
+            h = self.patch_hist[idx]
+            if (cum_hist + h <= self.tpp).all() or len(batch) == 0:
                 batch.append(idx)
-                sum_hist += h
+                cum_hist += h
                 if len(batch) == self.B:
                     yield batch
-                    batch, sum_hist = [], np.zeros(6)
+                    batch, cum_hist = [], np.zeros(6, dtype=np.int64)
 
         if batch and not self.drop_last:
             yield batch
 
     def __len__(self):
-        approx = len(self.ds) // self.B
-        return approx
+        return len(self.ds) // self.B
 
 class CropAroundClass4(A.DualTransform):
     def __init__(self, crop_size=(256,256), p=0.5):
@@ -394,9 +395,9 @@ def main():
         transform  = train_transform
     )
 
-    target_px = np.full(6, Config.BATCH_SIZE * 128*128 / 6)   # misma cuota p/clase
+    target_px = np.full(6, Config.BATCH_SIZE * 128*128 / 6, dtype=np.int64)
     train_sampler = PixelBalancedSampler(train_dataset, target_px,
-                                     batch_size=Config.BATCH_SIZE)
+                                        batch_size=Config.BATCH_SIZE)
 
     train_loader = DataLoader(
         train_dataset,
