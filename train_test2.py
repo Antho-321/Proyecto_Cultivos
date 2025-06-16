@@ -2,7 +2,6 @@
 # train.py
 
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -16,7 +15,8 @@ import numpy as np
 # Importa la arquitectura del otro archivo
 from model import CloudDeepLabV3Plus
 from distribucion_por_clase import imprimir_distribucion_clases_post_augmentation
-from loss_function import ComboLoss 
+from loss_function import FocalTverskyLoss
+import math
 
 # ---------------------------------------------------------------------------------
 # 1. CONFIGURACIÓN  (añadimos dos hiperparámetros nuevos)
@@ -48,41 +48,156 @@ class Config:
 # ---------------------------------------------------------------------------------
 # 2. DATASET PERSONALIZADO con flag ‘contains_class4’
 # ---------------------------------------------------------------------------------
-class CloudDataset(torch.utils.data.Dataset):
+# ---------------------------------------------------------------------------
+# Dataset que genera TODOS los patches 128×128 de cada imagen y
+# guarda qué clases contiene cada patch.  Esto permite muestrear después
+# con conocimiento de clase.
+# ---------------------------------------------------------------------------
+
+class CloudPatchDataset(torch.utils.data.Dataset):
+    """
+    Devuelve tuplas (patch_RGB, patch_mask) de tamaño fijo 128×128.
+    Durante la construcción pre-indexa *todos* los patches para saber
+    si contienen la clase 4 (y/o cualquier otra clase que te interese).
+    """
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
-    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
-        self.image_dir  = image_dir
-        self.mask_dir   = mask_dir
-        self.transform  = transform
-        self.images     = [f for f in os.listdir(image_dir)
-                           if f.lower().endswith(self._IMG_EXTENSIONS)]
+    def __init__(
+        self,
+        image_dir: str,
+        mask_dir: str,
+        patch_size: int = 128,
+        stride: int = 128,
+        min_class4_pixels: int = 32,
+        transform: A.Compose | None = None,
+    ):
+        self.image_dir   = image_dir
+        self.mask_dir    = mask_dir
+        self.patch_size  = patch_size
+        self.stride      = stride
+        self.transform   = transform
 
-        # Pre-escaneamos las máscaras UNA sola vez para saber si incluyen clase 4
-        self.contains_class4 = []
-        for img_file in self.images:
-            mask_path = self._mask_path_from_image_name(img_file)
-            mask = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)
-            self.contains_class4.append((mask == 4).any())
+        # Lista de nombres de archivo
+        self.images = [
+            f for f in os.listdir(image_dir)
+            if f.lower().endswith(self._IMG_EXTENSIONS)
+        ]
 
-    def __len__(self):  return len(self.images)
+        # ------------------------------------------------------------------
+        # Construimos un índice: cada entrada es un dict con:
+        #   • img_idx ........ índice en self.images
+        #   • y, x  .......... coordenadas de esquina superior izquierda
+        #   • has_c4 ......... bool  → contiene ≥ min_class4_pixels de clase 4
+        # ------------------------------------------------------------------
+        self.index = []
+        for img_idx, img_name in enumerate(self.images):
+            # Cargamos solo la máscara (más rápido)
+            mask_path = self._mask_path_from_image_name(img_name)
+            mask_full = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)
 
+            H, W = mask_full.shape
+            for y in range(0, H - patch_size + 1, stride):
+                for x in range(0, W - patch_size + 1, stride):
+                    patch_mask = mask_full[y:y + patch_size, x:x + patch_size]
+
+                    # Ignoramos patches 100 % fondo
+                    if (patch_mask != 0).sum() == 0:
+                        continue
+
+                    has_c4 = (patch_mask == 4).sum() >= min_class4_pixels
+                    self.index.append(
+                        dict(img_idx=img_idx, y=y, x=x, has_c4=has_c4)
+                    )
+
+        # Pre-cálculo para el sampler
+        self.idxs_c4     = [i for i, d in enumerate(self.index) if d["has_c4"]]
+        self.idxs_others = [i for i, d in enumerate(self.index) if not d["has_c4"]]
+
+    # -------------------------------- utility ------------------------------
     def _mask_path_from_image_name(self, image_filename: str) -> str:
         name = image_filename.rsplit('.', 1)[0]
         return os.path.join(self.mask_dir, f"{name}_mask.png")
 
-    def __getitem__(self, idx: int):
-        img_path  = os.path.join(self.image_dir, self.images[idx])
-        mask_path = self._mask_path_from_image_name(self.images[idx])
+    def __len__(self) -> int:
+        return len(self.index)
 
-        image = np.array(Image.open(img_path).convert("RGB"))
-        mask  = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
+    # -------------------------------- main ---------------------------------
+    def __getitem__(self, idx: int):
+        rec       = self.index[idx]
+        img_name  = self.images[rec["img_idx"]]
+
+        # Cargamos recorte
+        img_path  = os.path.join(self.image_dir, img_name)
+        mask_path = self._mask_path_from_image_name(img_name)
+
+        image_full = np.array(Image.open(img_path).convert("RGB"))
+        mask_full  = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
+
+        y, x = rec["y"], rec["x"]
+        image = image_full[y:y + self.patch_size, x:x + self.patch_size]
+        mask  = mask_full[y:y + self.patch_size, x:x + self.patch_size]
 
         if self.transform:
-            aug = self.transform(image=image, mask=mask)
-            image, mask = aug["image"], aug["mask"]
+            aug   = self.transform(image=image, mask=mask)
+            image = aug["image"]
+            mask  = aug["mask"]
 
         return image, mask
+
+# ---------------------------------------------------------------------------
+# Sampler que, al formar cada batch, toma exactamente
+#   • n_c4   = batch_size // 2   patches con clase 4
+#   • n_rest = batch_size - n_c4  patches sin clase 4
+# ---------------------------------------------------------------------------
+
+class BalancedPatchSampler(torch.utils.data.Sampler):
+    def __init__(self, dataset: CloudPatchDataset, batch_size: int, drop_last: bool = True):
+        self.dataset     = dataset
+        self.batch_size  = batch_size
+        self.drop_last   = drop_last
+
+        self.n_c4   = batch_size // 2
+        self.n_rest = batch_size - self.n_c4
+
+    def __iter__(self):
+        # Barajamos por separado cada época
+        idxs_c4     = np.random.permutation(self.dataset.idxs_c4).tolist()
+        idxs_others = np.random.permutation(self.dataset.idxs_others).tolist()
+
+        # Cuántos batches se pueden formar
+        n_batches = min(len(idxs_c4) // self.n_c4,
+                        len(idxs_others) // self.n_rest)
+
+        for b in range(n_batches):
+            start_c4   = b * self.n_c4
+            start_rest = b * self.n_rest
+
+            batch = (
+                idxs_c4[start_c4 : start_c4 + self.n_c4] +
+                idxs_others[start_rest : start_rest + self.n_rest]
+            )
+            np.random.shuffle(batch)      # mezcla interna
+            yield batch
+
+        # Si no quieres perder los últimos ejemplos, quita el if
+        if not self.drop_last:
+            remaining = idxs_c4[n_batches * self.n_c4 :] + \
+                        idxs_others[n_batches * self.n_rest :]
+            while len(remaining) >= self.batch_size:
+                batch  = remaining[:self.batch_size]
+                del remaining[:self.batch_size]
+                np.random.shuffle(batch)
+                yield batch
+
+    def __len__(self):
+        if self.drop_last:
+            return min(
+                len(self.dataset.idxs_c4)     // self.n_c4,
+                len(self.dataset.idxs_others) // self.n_rest
+            )
+        else:
+            total = len(self.dataset.idxs_c4) + len(self.dataset.idxs_others)
+            return math.ceil(total / self.batch_size)
 
 class CropAroundClass4(A.DualTransform):
     def __init__(self, crop_size=(256,256), p=0.5):
@@ -232,6 +347,52 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.train()
     return miou_macro, dice_macro
 
+# ------------------------------------------------------------
+# Cálculo de pesos por clase  ❚  inverse-frequency  /  MFB
+# ------------------------------------------------------------
+def compute_class_weights(
+    dataset,
+    n_classes: int = 6,
+    method: str = "median"   # "inverse"  ▸ frecuencia inversa sin normalizar
+):
+    """
+    Recorre el dataset (patches o imágenes) una sola vez y devuelve
+    un array NumPy con el peso de cada clase.
+
+    • method == "inverse"  →  w_c =  total_pixels / pixels_c
+    • method == "median"   →  “Median-Frequency Balancing” (MFB):
+        w_c = median(freq) / freq_c,
+        donde  freq_c = pixels_c / pixels_totales_en_imágenes_que_contienen_c
+    """
+    pixel_counts        = np.zeros(n_classes, dtype=np.int64)
+    image_pixel_totals  = np.zeros(n_classes, dtype=np.int64)
+
+    for _, mask in dataset:                      # mask: Tensor o np.ndarray (H×W)
+        m = np.array(mask)                       # aseguramos NumPy
+        total_px = m.size
+
+        for c in range(n_classes):
+            px_c            = (m == c).sum()
+            pixel_counts[c] += px_c
+            if px_c > 0:                         # la imagen/patch contiene la clase
+                image_pixel_totals[c] += total_px
+
+    if method == "inverse":
+        weights = pixel_counts.sum() / (pixel_counts + 1e-8)
+
+    elif method == "median":
+        freq_per_class = pixel_counts / (image_pixel_totals + 1e-8)
+        median_freq    = np.median(freq_per_class[freq_per_class > 0])
+        weights        = median_freq / (freq_per_class + 1e-8)
+
+    else:
+        raise ValueError('method debe ser "inverse" o "median"')
+
+    # (Opcional) Ignorar por completo el fondo en CE/Focal
+    weights[0] = 0.0
+
+    return weights
+
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN
 # =================================================================================
@@ -259,7 +420,13 @@ def main():
     ])
 
     # --- Creación de Datasets y DataLoaders ---
-    train_dataset = CloudDataset(Config.TRAIN_IMG_DIR, Config.TRAIN_MASK_DIR, transform=train_transform)
+    train_dataset = CloudPatchDataset(
+        Config.TRAIN_IMG_DIR,
+        Config.TRAIN_MASK_DIR,
+        patch_size = 128,
+        stride     = 128,     # 100 % cobertura, sin solaparse
+        transform  = train_transform
+    )
 
     # --- Ponderaciones: alto peso si la imagen tiene clase 4, 1 en caso contrario ---
     weights = [
@@ -267,29 +434,34 @@ def main():
         for has_c4 in train_dataset.contains_class4
     ]
 
-    # Mantenemos ‘replacement=True’ para que una misma imagen pueda salir varias veces en una época
-    sampler = WeightedRandomSampler(
-        weights=weights,
-        num_samples=len(weights) * Config.CLASS4_WEIGHT,  # p. ej. 210 × 6 = 1260
-        replacement=True
+    # Sampler que garantiza 50 % de clase 4 por batch
+    train_sampler = BalancedPatchSampler(
+        dataset     = train_dataset,
+        batch_size  = Config.BATCH_SIZE,
+        drop_last   = True
     )
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=Config.BATCH_SIZE,
-        sampler=sampler,          # << NO usar shuffle cuando hay sampler
-        num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY
+        batch_sampler = train_sampler,   # ¡ojo! → reemplaza batch_size & shuffle
+        num_workers   = Config.NUM_WORKERS,
+        pin_memory    = Config.PIN_MEMORY
     )
 
-    val_dataset   = CloudDataset(Config.VAL_IMG_DIR,   Config.VAL_MASK_DIR,   transform=val_transform)
+    val_dataset = CloudPatchDataset(
+        Config.VAL_IMG_DIR,
+        Config.VAL_MASK_DIR,
+        patch_size = 128,
+        stride     = 128,
+        transform  = val_transform
+    )
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=Config.BATCH_SIZE,
-        shuffle=False,
-        num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY
+        batch_size   = Config.BATCH_SIZE,
+        shuffle      = False,
+        num_workers  = Config.NUM_WORKERS,
+        pin_memory   = Config.PIN_MEMORY
     )
 
     imprimir_distribucion_clases_post_augmentation(
@@ -301,17 +473,21 @@ def main():
     # --- Instanciación del Modelo, Loss y Optimizador ---
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     
-    alpha = torch.tensor(
-        [0.0353, 0.6920, 1.6204, 1.1658, 2.0863, 0.4002],
-        dtype=torch.float32,
-        device=Config.DEVICE
+    alpha_np = compute_class_weights(
+        dataset = train_dataset,      # puede ser el de patches
+        n_classes = 6,
+        method = "median"             # o "inverse"
     )
+    print("Pesos alpha =", alpha_np)  # para que veas el resultado
 
-    loss_fn = ComboLoss(
-        lambda_focal = 1.0,        # peso del término Focal
-        lambda_dice  = 1.0,        # peso del término Dice
-        focal_gamma  = 2.0,        # γ típico
-        focal_alpha  = alpha       # o None si no quieres ponderar clases
+    alpha = torch.tensor(alpha_np, dtype=torch.float32, device=Config.DEVICE)
+
+    loss_fn = FocalTverskyLoss(
+        n_classes      = 6,
+        alpha          = 0.3,        # pondera FP
+        beta           = 0.7,        # pondera FN  → ↑ sensibilidad
+        gamma          = 2.0,        # componente “focal”
+        class_weights  = alpha       # tensor de 6 pesos que ya calculaste
     ).to(Config.DEVICE)
     
     # AdamW es una buena elección de optimizador por defecto.
