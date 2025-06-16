@@ -20,7 +20,7 @@ class Config:
 
     LEARNING_RATE = 1e-4
     BATCH_SIZE    = 8
-    NUM_EPOCHS    = 10
+    NUM_EPOCHS    = 200
     NUM_WORKERS   = 2
 
     IMAGE_HEIGHT  = 256
