@@ -262,7 +262,7 @@ def main():
 
     # --- MODELO, LOSS, OPTIMIZADOR, SCALER ---
     model     = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
-    loss_fn   = nn.CrossEntropyLoss()
+    loss_fn   = nn.CrossEntropyLoss(ignore_index=0)
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
     scaler    = GradScaler()
 
