@@ -16,7 +16,7 @@ import numpy as np
 from model import CloudDeepLabV3Plus
 from distribucion_por_clase import imprimir_distribucion_clases_post_augmentation
 from loss_function import AsymFocalTverskyLoss
-import math
+import cv2
 
 # ---------------------------------------------------------------------------------
 # 1. CONFIGURACIÓN  (añadimos dos hiperparámetros nuevos)
@@ -103,7 +103,7 @@ class CloudPatchDatasetBalanced(torch.utils.data.Dataset):
     def _load_mask(self, img_name):
         path = os.path.join(self.mask_dir,
                             f"{img_name.rsplit('.',1)[0]}_mask.png")
-        return np.array(Image.open(path).convert("L"), dtype=np.float32)
+        return np.array(Image.open(path).convert("L"), dtype=np.uint8)
 
     def __getitem__(self, idx):
         rec      = self.index[idx]
@@ -367,15 +367,15 @@ def main():
     # --- Transformaciones y Aumento de Datos ---
     train_transform = A.Compose([
         A.RandomResizedCrop(
-            size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),   # ← tuple, no dos ints
-            scale=(0.5, 1.0),     # máximo 1.0
-            ratio=(0.75, 1.33),
-            p=0.6
+            Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH,
+            scale=(0.5, 1.0), ratio=(0.75, 1.33),
+            interpolation=cv2.INTER_LINEAR,          # para la imagen
+            mask_interpolation=cv2.INTER_NEAREST     # ← clave
         ),
-        A.RandomRotate90(p=0.5),                                             # CHANGED (más barato)
+        A.RandomRotate90(p=0.5),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
-        A.ColorJitter(0.1,0.1,0.1,0.05,p=0.4),                                # NEW
+        A.ColorJitter(0.1,0.1,0.1,0.05,p=0.4),
         A.Normalize(),
         ToTensorV2()
     ])
