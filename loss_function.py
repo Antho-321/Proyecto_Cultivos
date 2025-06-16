@@ -1,44 +1,52 @@
 import torch
-class AsymFocalTverskyLoss(torch.nn.Module):                                      # NEW
-    def __init__(self, class_weights=None, alpha=0.5, beta=0.5,
-                 gamma=0.75, eps=1e-4):          # ← añadido eps
-        super().__init__()
-        self.alpha, self.beta, self.gamma = alpha, beta, gamma
-        self.register_buffer("class_weights",
-                             class_weights if class_weights is not None
-                             else torch.ones(6))
-        self.eps = eps 
+import torch.nn as nn
+import torch.nn.functional as F
 
+class AsymFocalTverskyLoss(nn.Module):
+    """
+    Implementación con:
+      • α, β           — ponderación FP/FN del Tversky
+      • g_pos, g_neg   — γ asimétrico (clase presente / ausente)
+      • w              — pesos por clase (Tensor[C]) opcional
+      • eps            — término de estabilidad numérica
+    """
+    def __init__(self,
+                 class_weights=None,        # → w
+                 alpha: float = 0.5,
+                 beta : float = 0.5,
+                 g_pos: float = 0.75,
+                 g_neg: float = 1.50,
+                 eps  : float = 1e-4):
+        super().__init__()
+        self.alpha, self.beta = alpha, beta
+        self.gpos,  self.gneg = g_pos, g_neg     # ← NUEVO
+        # Registramos los pesos como buffer para que sigan al dispositivo
+        w = torch.ones(6) if class_weights is None else class_weights
+        self.register_buffer("w", w.float())     # ← NUEVO (se llamará self.w)
+        self.eps = eps                           # ← ya lo tenías
+
+    # ------------------------------------------------------------------
     def forward(self, logits, gt):
         """
-        logits : Tensor (N, C, H, W)  — salida sin activar del modelo
-        gt     : Tensor (N, H, W)     — máscara con enteros [0‥C-1]
+        logits : (N, C, H, W)  — scores sin activar
+        gt     : (N, H, W)     — etiquetas enteras [0..C-1]
         """
-        num_cls     = logits.shape[1]
+        C          = logits.size(1)
+        gt_1hot    = F.one_hot(gt, C).permute(0, 3, 1, 2).float()
+        prob       = F.softmax(logits, dim=1)
 
-        # 1) One-hot de la GT  →  (N, C, H, W)
-        gt_onehot   = torch.nn.functional.one_hot(gt, num_cls).permute(0, 3, 1, 2)
+        TP = (prob * gt_1hot).sum((0, 2, 3))
+        FP = (prob * (1 - gt_1hot)).sum((0, 2, 3))
+        FN = ((1 - prob) * gt_1hot).sum((0, 2, 3))
 
-        # 2) Probabilidades predichas
-        prob        = torch.softmax(logits, dim=1)
-
-        # 3) Estadísticos por clase
-        TP = (prob * gt_onehot).sum((0, 2, 3))
-        FP = (prob * (1 - gt_onehot)).sum((0, 2, 3))
-        FN = ((1 - prob) * gt_onehot).sum((0, 2, 3))
-
-        # 4) Índice de Tversky con ε configurable
         tversky = (TP + self.eps) / (TP + self.alpha * FP + self.beta * FN + self.eps)
 
-        # 5) Focal-Tversky asimétrico
+        # Focal-Tversky asimétrico
         focal = torch.where(
-            gt_onehot.sum((0, 2, 3)) == 0,          # clase ausente en el batch
-            (1 - tversky) ** self.gneg,             # γ_neg
-            (1 - tversky) ** self.gpos              # γ_pos
+            gt_1hot.sum((0, 2, 3)) == 0,   # clase ausente
+            (1 - tversky) ** self.gneg,
+            (1 - tversky) ** self.gpos
         )
 
-        # 6) Ponderación opcional por clase
-        if self.w is not None:
-            focal = focal * self.w.to(focal.device)
-
-        return focal.mean()
+        loss = (self.w.to(focal.device) * focal).mean()
+        return loss
