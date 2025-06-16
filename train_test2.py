@@ -179,7 +179,10 @@ def main():
     # Datasets & loaders
     tr_ds = CloudPatchDatasetBalanced(Config.TRAIN_IMG_DIR,Config.TRAIN_MASK_DIR,
                                       patch_size=128,stride=128,min_fg_ratio=0.1,transform=train_tf)
-    tr_samp = PixelBalancedSampler(tr_ds, np.full(6,1e12), Config.BATCH_SIZE, drop_last=False)
+    tpp = np.full(6, 1e12)   # target_pixels_per_class
+    tpp[4] *= 5              # ← clase 4: 5× más presupuesto
+    tr_samp = PixelBalancedSampler(tr_ds, tpp,
+                                Config.BATCH_SIZE, drop_last=False)
     tr_ld = DataLoader(tr_ds, batch_sampler=tr_samp, num_workers=Config.NUM_WORKERS,
                        pin_memory=Config.PIN_MEMORY)
 
@@ -194,7 +197,11 @@ def main():
     # Modelo + pérdida
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     w = torch.tensor(compute_class_weights(tr_ds), device=Config.DEVICE)
-    loss_fn = AsymFocalTverskyLoss(class_weights=w, eps=Config.EPS_TVERSKY).to(Config.DEVICE)
+    BOOST = 3.0                     # prueba con 2-4; 0 = sin cambio
+    w[4] = min(w[4] * BOOST, Config.MAX_W_CLS)
+
+    loss_fn = AsymFocalTverskyLoss(class_weights=w,
+                                eps=Config.EPS_TVERSKY).to(Config.DEVICE)
 
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=Config.NUM_EPOCHS)
