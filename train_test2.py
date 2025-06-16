@@ -4,7 +4,7 @@
 import torch
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -427,12 +427,6 @@ def main():
         stride     = 128,     # 100 % cobertura, sin solaparse
         transform  = train_transform
     )
-
-    # --- Ponderaciones: alto peso si la imagen tiene clase 4, 1 en caso contrario ---
-    weights = [
-        Config.CLASS4_WEIGHT if has_c4 else 1
-        for has_c4 in train_dataset.contains_class4
-    ]
 
     # Sampler que garantiza 50 % de clase 4 por batch
     train_sampler = BalancedPatchSampler(
