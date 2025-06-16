@@ -6,7 +6,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
 import torch.optim as optim
-
+from albumentations.pytorch import ToTensorV2
 from model                    import CloudDeepLabV3Plus
 from loss_function            import AsymFocalTverskyLoss
 from distribucion_por_clase   import imprimir_distribucion_clases_post_augmentation
