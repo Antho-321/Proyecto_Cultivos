@@ -391,21 +391,36 @@ def main():
     train_dataset = CloudPatchDatasetBalanced(
         Config.TRAIN_IMG_DIR,
         Config.TRAIN_MASK_DIR,
-        patch_size = 128,
-        stride     = 128,     # 100 % cobertura, sin solaparse
-        transform  = train_transform
+        patch_size=128,
+        stride=128,
+        min_fg_ratio=0.1,            # ▸ (d)  <<<<<<<<<<<<<<<<<<<<<<
+        transform=train_transform
     )
 
-    target_px = np.full(6, Config.BATCH_SIZE * 128*128 / 6)   # misma cuota p/clase
-    train_sampler = PixelBalancedSampler(train_dataset, target_px,
-                                     batch_size=Config.BATCH_SIZE)
+    target_px = np.full(6, 1_000_000_000, dtype=np.int64)
+    train_sampler = PixelBalancedSampler(
+        train_dataset,
+        target_pixels_per_class=target_px,
+        batch_size=Config.BATCH_SIZE,
+        drop_last=False            # ▸ (a)  <<<<<<<<<<<<<<<<<<<<<<
+    )
 
     train_loader = DataLoader(
         train_dataset,
-        batch_sampler = train_sampler,   # ¡ojo! → reemplaza batch_size & shuffle
-        num_workers   = Config.NUM_WORKERS,
-        pin_memory    = Config.PIN_MEMORY
+        batch_sampler=train_sampler,
+        num_workers=Config.NUM_WORKERS,
+        pin_memory=Config.PIN_MEMORY
     )
+
+    if len(train_loader) == 0:
+        print("⚠️  PixelBalancedSampler devolvió 0 lotes → uso DataLoader estándar.")
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=Config.BATCH_SIZE,
+            shuffle=True,          # barajado clásico
+            num_workers=Config.NUM_WORKERS,
+            pin_memory=Config.PIN_MEMORY
+        )
 
     val_dataset = CloudPatchDatasetBalanced(
         Config.VAL_IMG_DIR,
@@ -470,6 +485,7 @@ def main():
         # 2) Evaluación en el conjunto de validación
         current_mIoU, current_dice = check_metrics(val_loader, model, ignore_background=True)
 
+        optimizer.step()
         scheduler.step()
 
         # 3) Guardar checkpoint si hubo mejora en mIoU
