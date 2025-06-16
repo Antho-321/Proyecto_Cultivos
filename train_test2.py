@@ -532,6 +532,18 @@ def main():
             }
             torch.save(checkpoint, Config.MODEL_SAVE_PATH)
 
+    # ---------------------------------------------------------------
+    # Cargar el modelo con mejor mIoU ANTES de evaluarlo definitivamente
+    # ---------------------------------------------------------------
+    if os.path.exists(Config.MODEL_SAVE_PATH):
+        checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
+        model.load_state_dict(checkpoint["state_dict"])          # ←  ❗️
+        print(f"\nModelo recargado del epoch {checkpoint['epoch']} "
+            f"con mIoU guardado = {checkpoint['best_mIoU']:.4f}")
+    else:
+        print("\n⚠️  No se encontró el checkpoint; "
+            "se evaluará el modelo tal cual está en memoria.")
+
     print("\nEvaluando el modelo con mejor mIoU guardado…")
     best_mIoU, best_dice = check_metrics(
         val_loader,
