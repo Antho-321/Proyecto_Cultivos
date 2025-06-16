@@ -220,7 +220,7 @@ def main():
     # Datasets & loaders
     tr_ds = CloudPatchDatasetBalanced(Config.TRAIN_IMG_DIR,Config.TRAIN_MASK_DIR,
                                       patch_size=128,stride=128,min_fg_ratio=0.1,transform=train_tf)
-    boost_cfg = {2: 5, 4: 5}   # ← 5× más píxeles para las clases 2 y 4
+    boost_cfg = {2: 8, 4: 10}   # ← 5× más píxeles para las clases 2 y 4
     tr_samp = build_boosted_sampler(tr_ds,
                                     batch_size=Config.BATCH_SIZE,
                                     boosts=boost_cfg,
