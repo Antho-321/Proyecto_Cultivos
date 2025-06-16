@@ -161,8 +161,8 @@ if __name__ == "__main__":
             out_img_dir="Balanced_augmented/train/images", # Es mejor escribir en una nueva carpeta
             out_mask_dir="Balanced_augmented/train/masks",
             target_class=1,
-            extra_pixels=50000,
-            crop_size=(256, 256),
+            extra_pixels=22029888,
+            crop_size=(96, 96),
             min_pixels_in_crop=100
         )
     except FileNotFoundError:
