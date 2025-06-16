@@ -164,5 +164,5 @@ if __name__ == "__main__":
         crop_size=(96, 96),
         min_pixels_in_crop=100,
         preload=True,            # cambia a False si no cabe en la GPU
-        max_other_frac=0.05      # ← permite hasta un 5 % de píxeles “otros”
+        max_other_frac=0.10      # ← permite hasta un 5 % de píxeles “otros”
     )
