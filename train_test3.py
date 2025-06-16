@@ -78,6 +78,47 @@ class CloudPatchDatasetBalanced(torch.utils.data.Dataset):
         if self.transform:
             aug = self.transform(image=img, mask=msk); img, msk = aug["image"], aug["mask"]
         return img, msk
+
+def build_boosted_sampler(
+    dataset,
+    batch_size: int,
+    boosts: dict[int, float] | None = None,
+    base_budget: float = 1e12,
+    n_classes: int = 6,
+    drop_last: bool = False,
+):
+    """
+    Crea un PixelBalancedSampler con 'boosts' de píxeles por clase.
+
+    Parámetros
+    ----------
+    dataset       : CloudPatchDatasetBalanced
+        El dataset de parches ya inicializado.
+    batch_size    : int
+        Tamaño del lote.
+    boosts        : dict[int, float]
+        Diccionario {clase: factor}.  Por ejemplo, {2: 5, 4: 3}.
+    base_budget   : float
+        Presupuesto base de píxeles por clase antes de multiplicar.
+    n_classes     : int
+        Número total de clases (incluyendo fondo).
+    drop_last     : bool
+        Igual que en DataLoader / Sampler.  False ▶ conserva lote incompleto.
+
+    Devuelve
+    --------
+    PixelBalancedSampler
+        Lista de índices que respeta el presupuesto ajustado.
+    """
+    boosts = boosts or {}
+    tpp = np.full(n_classes, base_budget, dtype=np.float64)
+    for cls, factor in boosts.items():
+        if 0 <= cls < n_classes:
+            tpp[cls] *= factor
+        else:
+            raise ValueError(f"Clase {cls} fuera de rango (0-{n_classes-1}).")
+
+    return PixelBalancedSampler(dataset, tpp, batch_size, drop_last=drop_last)
 # ──────────────────────────────────────────────────────────────────────────────
 # 3 ▸ SAMPLER  (igual que antes)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -113,8 +154,21 @@ def compute_class_weights(ds, n_classes=6, method="median"):
         freq = pix/(tot+1e-8); med = np.median(freq[freq>0]); w = med/(freq+1e-8)
     w[0]=0.0                             # fondo
     return np.clip(w, 0.0, Config.MAX_W_CLS)  # ← ❷  limitamos
+
+def weights_from_dice(dice_per_class: torch.Tensor,
+                      max_w: float = Config.MAX_W_CLS,
+                      ignore_bg: bool = True):
+    """
+    Asigna w_c = clip( (1 - dice_c), 0, max_w ), y fuerza w_0=0 si ignore_bg.
+    """
+    errs = 1.0 - dice_per_class
+    w = torch.clamp(errs, 0.0, max_w)
+    if ignore_bg:
+        w[0] = 0.0
+    return w
+
 # ──────────────────────────────────────────────────────────────────────────────
-def check_metrics(loader, model, n_classes=6, device="cuda", ignore_background=True):
+def check_metrics(loader, model, n_classes=6, device="cuda", ignore_background=True, return_per_class=False):
     eps = 1e-8
     inter, union, d_num, d_den = (torch.zeros(n_classes, dtype=torch.float64, device=device)
                                   for _ in range(4))
@@ -139,7 +193,10 @@ def check_metrics(loader, model, n_classes=6, device="cuda", ignore_background=T
     # 1) Con comprensión de listas + f-string
     print("IoU :", [f"{v:.4f}" for v in vals_iou])
     print("Dice:", [f"{v:.4f}" for v in vals_dice])
-    return iou[valid].mean(), dice[valid].mean()
+    if return_per_class:
+        return iou.cpu(), dice.cpu()
+    else:
+        return iou[valid].mean(), dice[valid].mean()
 # ──────────────────────────────────────────────────────────────────────────────
 def train_one_epoch(loader, model, loss_fn, optimizer, scaler):
     model.train()
@@ -179,12 +236,21 @@ def main():
     # Datasets & loaders
     tr_ds = CloudPatchDatasetBalanced(Config.TRAIN_IMG_DIR,Config.TRAIN_MASK_DIR,
                                       patch_size=128,stride=128,min_fg_ratio=0.1,transform=train_tf)
-    tr_samp = PixelBalancedSampler(tr_ds, np.full(6,1e12), Config.BATCH_SIZE, drop_last=False)
+    boost_cfg = {2: 8, 4: 10}   # ← 5× más píxeles para las clases 2 y 4
+    tr_samp = build_boosted_sampler(tr_ds,
+                                    batch_size=Config.BATCH_SIZE,
+                                    boosts=boost_cfg,
+                                    n_classes=6,
+                                    drop_last=False)
     tr_ld = DataLoader(tr_ds, batch_sampler=tr_samp, num_workers=Config.NUM_WORKERS,
                        pin_memory=Config.PIN_MEMORY)
 
-    val_ds = CloudPatchDatasetBalanced(Config.VAL_IMG_DIR,Config.VAL_MASK_DIR,
-                                       patch_size=128,stride=128,transform=val_tf)
+    val_ds = CloudPatchDatasetBalanced(
+        Config.VAL_IMG_DIR, Config.VAL_MASK_DIR,
+        patch_size=128, stride=128,
+        min_fg_ratio=0,         # incluir incluso parches sin FG
+        transform=val_tf
+    )
     val_ld = DataLoader(val_ds,batch_size=Config.BATCH_SIZE,shuffle=False,
                         num_workers=Config.NUM_WORKERS,pin_memory=Config.PIN_MEMORY)
 
@@ -194,7 +260,11 @@ def main():
     # Modelo + pérdida
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     w = torch.tensor(compute_class_weights(tr_ds), device=Config.DEVICE)
-    loss_fn = AsymFocalTverskyLoss(class_weights=w, eps=Config.EPS_TVERSKY).to(Config.DEVICE)
+    BOOST = 3.0                     # prueba con 2-4; 0 = sin cambio
+    w[4] = min(w[4] * BOOST, Config.MAX_W_CLS)
+
+    loss_fn = AsymFocalTverskyLoss(class_weights=w,
+                                eps=Config.EPS_TVERSKY).to(Config.DEVICE)
 
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=Config.NUM_EPOCHS)
@@ -204,7 +274,17 @@ def main():
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n╭─ Epoch {epoch+1}/{Config.NUM_EPOCHS} ──────────────────────────")
         train_one_epoch(tr_ld, model, loss_fn, optimizer, scaler)
-        miou, dice = check_metrics(val_ld, model, device=Config.DEVICE)
+        # obtenemos Dice por clase
+        iou_c, dice_c = check_metrics(val_ld, model,
+                                      device=Config.DEVICE,
+                                      return_per_class=True)
+        # calculamos nuevos pesos
+        new_w = weights_from_dice(dice_c, max_w=Config.MAX_W_CLS)
+        # actualizamos la función de pérdida
+        loss_fn = AsymFocalTverskyLoss(class_weights=new_w.to(Config.DEVICE),
+                                      eps=Config.EPS_TVERSKY).to(Config.DEVICE)
+        # ahora sí medimos el promedio para el criterio de early-saving
+        miou, dice = (iou_c[1:].mean(), dice_c[1:].mean())
         scheduler.step()
         if miou>best_miou:
             best_miou=miou
