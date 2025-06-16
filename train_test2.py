@@ -133,7 +133,7 @@ def check_metrics(loader, model, n_classes=6, device="cuda", ignore_background=T
                 d_num[c]+=2*i; d_den[c]+=pc.sum()+tc.sum()
     valid = slice(1,None) if ignore_background else slice(0,None)
     iou   = (inter+eps)/(union+eps);  dice = (d_num+eps)/(d_den+eps)
-    print("IoU:",iou.cpu().numpy()); print("Dice:",dice.cpu().numpy())
+    print("IoU:", np.round(iou.cpu().numpy(), 4)); print("Dice:", np.round(dice.cpu().numpy(), 4))
     return iou[valid].mean(), dice[valid].mean()
 # ──────────────────────────────────────────────────────────────────────────────
 def train_one_epoch(loader, model, loss_fn, optimizer, scaler):
