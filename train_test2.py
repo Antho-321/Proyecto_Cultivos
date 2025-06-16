@@ -31,7 +31,7 @@ class Config:
 
     LEARNING_RATE     = 1e-4
     BATCH_SIZE        = 8
-    NUM_EPOCHS        = 200
+    NUM_EPOCHS        = 10
     NUM_WORKERS       = 2
 
     IMAGE_HEIGHT      = 256
@@ -395,9 +395,9 @@ def main():
         transform  = train_transform
     )
 
-    target_px = np.full(6, Config.BATCH_SIZE * 128*128 / 6, dtype=np.int64)
+    target_px = np.full(6, Config.BATCH_SIZE * 128*128 / 6)   # misma cuota p/clase
     train_sampler = PixelBalancedSampler(train_dataset, target_px,
-                                        batch_size=Config.BATCH_SIZE)
+                                     batch_size=Config.BATCH_SIZE)
 
     train_loader = DataLoader(
         train_dataset,
