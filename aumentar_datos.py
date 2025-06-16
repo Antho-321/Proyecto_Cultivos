@@ -11,13 +11,12 @@ from PIL import Image
 # --------------------------------------------------------------------- #
 # Utilidades totalmente en GPU
 # --------------------------------------------------------------------- #
-def _safe_crop_coords_gpu(cy: int, cx: int,
-                          h: int, w: int,
-                          ch: int, cw: int) -> Tuple[int, int]:
-    """Coordenada (y1, x1) de un recorte centrado en (cy, cx) —100 % GPU."""
+def _safe_crop_coords_gpu(cy, cx, h, w, ch, cw):
+    # cy/cx son cupy.ndarray escalares (shape=())
     y1 = cp.clip(cy - ch // 2, 0, h - ch)
     x1 = cp.clip(cx - cw // 2, 0, w - cw)
-    return int(y1), int(x1)   # .item() ≈ transferir 8 bytes, despreciable
+    # devolvemos ints de Python (transferencia de 8 bytes cada uno)
+    return int(y1.get()), int(x1.get())
 
 
 def _save_patch_gpu(img_patch_gpu: cp.ndarray,
@@ -112,7 +111,7 @@ def pixel_level_augment_gpu(image_dir: str,
         while trials < max_trials_per_image and not success:
             trials += 1
             j = int(cp.random.randint(0, ys.size))
-            cy, cx = ys[j].item(), xs[j].item()
+            cy, cx = ys[j], xs[j]           # 0-dim cupy arrays
 
             y1, x1 = _safe_crop_coords_gpu(cy, cx, h, w, h_crop, w_crop)
             img_patch = img_gpu[y1:y1 + h_crop, x1:x1 + w_crop]
