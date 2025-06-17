@@ -330,9 +330,13 @@ def main():
     )
 
     print("\nEvaluando el modelo con mejor mIoU guardado…")
-    # Cargar el mejor checkpoint antes de la evaluación final sería ideal
-    # best_model_checkpoint = torch.load(Config.MODEL_SAVE_PATH)
-    # model.load_state_dict(best_model_checkpoint['state_dict'])
+
+    # --- Cargar el checkpoint del mejor modelo ---
+    # Añadir map_location para asegurar compatibilidad entre CPU/GPU
+    best_model_checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
+    model.load_state_dict(best_model_checkpoint['state_dict'])
+
+    # Ahora que el mejor modelo está cargado, se ejecuta la evaluación
     best_mIoU, best_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
     print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
 if __name__ == "__main__":
