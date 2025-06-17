@@ -85,26 +85,27 @@ class CloudPatchDatasetBalanced(torch.utils.data.Dataset):
 
         # 2) Decido si reemplazo por parche focalizado en clase 4
         if random.random() < 0.5:
-            foc = generate_class_focused_patches(
-                image=img, mask=msk, class_id=4,
-                num_patches=1, output_size=self.patch_size,
-                zoom_range=(1.5,2.5), augment=False  # sólo recorte+zoom
+            return img, msk
+        else:
+            foc_patches = generate_class_focused_patches(
+                image=img,
+                mask=msk,
+                class_id=4,
+                num_patches=10,
+                output_size=self.patch_size,
+                zoom_range=(1.5,2.5),
+                augment=True
             )
-            if foc:
-                img, msk = foc[0]
-
-        # 3) Aplico tu pipeline habitual de Albumentations
-        if self.transform:
-            aug = self.transform(image=img, mask=msk)
-            img, msk = aug["image"], aug["mask"]
-
-        return img, msk
+            if random.random() < 0.5:
+                return foc_patches[0] 
+            else:
+                return img, msk    
 
 def generate_class_focused_patches(
     image: np.ndarray,
     mask: np.ndarray,
     class_id: int = 4,
-    num_patches: int = 5,
+    num_patches: int = 10,
     output_size: int = 128,
     zoom_range: tuple[float, float] = (1.2, 2.0),
     augment: bool = True
