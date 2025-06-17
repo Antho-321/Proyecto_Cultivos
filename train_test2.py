@@ -43,10 +43,26 @@ class Config:
 # 2 ▸ DATASET  (sin cambios relevantes)
 # ──────────────────────────────────────────────────────────────────────────────
 class CloudPatchDatasetBalanced(torch.utils.data.Dataset):
+    """
+    Dataset que extrae parches de imágenes y máscaras, con una lógica de filtrado
+    para balancear las clases y asegurar un mínimo de área de interés.
+    """
     _IMG_EXT = ('.jpg', '.png')
 
     def __init__(self, image_dir, mask_dir, patch_size=128, stride=128,
                  min_fg_ratio=0.4, transform=None):
+        """
+        Inicializa el dataset.
+
+        Args:
+            image_dir (str): Directorio de las imágenes.
+            mask_dir (str): Directorio de las máscaras.
+            patch_size (int): Tamaño de los parches a extraer.
+            stride (int): Paso entre parches.
+            min_fg_ratio (float): Proporción mínima de píxeles que no son fondo (clase 0)
+                                 para que un parche sea considerado válido.
+            transform (callable, optional): Transformaciones a aplicar a los parches.
+        """
         self.image_dir, self.mask_dir = image_dir, mask_dir
         self.patch_size, self.stride  = patch_size, stride
         self.min_fg_ratio, self.transform = min_fg_ratio, transform
@@ -54,62 +70,74 @@ class CloudPatchDatasetBalanced(torch.utils.data.Dataset):
         self.images = [f for f in os.listdir(image_dir)
                        if f.lower().endswith(self._IMG_EXT)]
         self.index  = []
+        print(f"Construyendo índice de parches para {len(self.images)} imágenes...")
+
         for img_idx, img_name in enumerate(self.images):
-            mask_np = np.array(
-                Image.open(os.path.join(mask_dir,
-                          f"{img_name.rsplit('.',1)[0]}_mask.png"))
-                .convert("L"), dtype=np.uint8)
+            mask_path = os.path.join(mask_dir, f"{img_name.rsplit('.',1)[0]}_mask.png")
+            if not os.path.exists(mask_path):
+                continue
 
+            mask_np = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)
             H, W = mask_np.shape
-            for y in range(0, H-patch_size+1, stride):
-                for x in range(0, W-patch_size+1, stride):
-                    patch = mask_np[y:y+patch_size, x:x+patch_size]
-                    if (patch != 0).mean() < self.min_fg_ratio: 
+
+            for y in range(0, H - patch_size + 1, stride):
+                for x in range(0, W - patch_size + 1, stride):
+                    patch = mask_np[y:y + patch_size, x:x + patch_size]
+
+                    # --- INICIO DE LA LÓGICA DE FILTRADO APLICADA ---
+                    
+                    # Calcula la proporción de la clase 4 (nubes de azúcar)
+                    ratio4 = (patch == 4).mean()
+
+                    # Condición 1: Si el parche tiene una pequeña cantidad de la clase 4,
+                    # se acepta sin importar el `min_fg_ratio`.
+                    if 0 < ratio4 < 0.1:
+                        # Este parche se incluye. El `pass` es implícito.
+                        pass
+                    # Condición 2: Para todos los demás parches, se aplica el filtro normal.
+                    elif (patch != 0).mean() < self.min_fg_ratio:
+                        # Descarta el parche si tiene muy pocos píxeles de interés.
                         continue
+                    
+                    # --- FIN DE LA LÓGICA DE FILTRADO ---
+
+                    # Si el parche es válido, se añade al índice.
                     hist = np.bincount(patch.flatten(), minlength=6)
-                    self.index.append(dict(img_idx=img_idx,y=y,x=x,hist=hist))
+                    self.index.append(dict(img_idx=img_idx, y=y, x=x, hist=hist))
 
-    def __len__(self):               return len(self.index)
-    def _load(self, folder, name):   return np.array(Image.open(
-                                    os.path.join(folder, name)).convert("RGB"))
+        print(f"Índice construido. Se encontraron {len(self.index)} parches válidos.")
+
+    def __len__(self):
+        """Retorna el número total de parches válidos."""
+        return len(self.index)
+
+    def _load(self, folder, name):
+        """Carga una imagen desde un archivo."""
+        return np.array(Image.open(os.path.join(folder, name)).convert("RGB"))
+
     def __getitem__(self, i):
-        # 1) Cargo el parche completo
-        r    = self.index[i]
+        """
+        Obtiene un parche de imagen y su máscara correspondiente.
+        """
+        # Obtiene la información del parche del índice pre-calculado.
+        r = self.index[i]
         name = self.images[r['img_idx']]
-        img  = self._load(self.image_dir, name)[r['y']:r['y']+self.patch_size,
-                                                r['x']:r['x']+self.patch_size]
-        msk  = np.array(Image.open(os.path.join(
-                   self.mask_dir,f"{name.rsplit('.',1)[0]}_mask.png"))
-                   .convert("L"),dtype=np.uint8)[r['y']:r['y']+self.patch_size,
-                                                 r['x']:r['x']+self.patch_size]
 
-        # 2) Decido si reemplazo por parche focalizado en clase 4
-        if random.random() < 0.5:
-            img_patch, msk_patch = img, msk
-        else:
-            foc = generate_class_focused_patches(
-                image=img, mask=msk,
-                class_id=4, num_patches=10,
-                output_size=self.patch_size,
-                zoom_range=(1.5,2.5),
-                augment=False      # <- desactivar ToTensorV2 aquí
-            )
-            if foc and random.random() < 0.5:
-                img_patch, msk_patch = foc[0]
-            else:
-                img_patch, msk_patch = img, msk
+        # Carga la región (parche) de la imagen.
+        img = self._load(self.image_dir, name)[r['y']:r['y'] + self.patch_size,
+                                               r['x']:r['x'] + self.patch_size]
 
-        # 3) APLICAR AQUÍ la transformación final
+        # Carga la región (parche) de la máscara.
+        mask_path = os.path.join(self.mask_dir, f"{name.rsplit('.',1)[0]}_mask.png")
+        msk = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)[r['y']:r['y'] + self.patch_size,
+                                                                          r['x']:r['x'] + self.patch_size]
+
+        # Aplica transformaciones si existen.
         if self.transform:
-            augmented = self.transform(image=img_patch, mask=msk_patch)
-            img_tensor = augmented["image"]  # será siempre Tensor CHW
-            msk_tensor = augmented["mask"]   # será siempre Tensor HW
-            return img_tensor, msk_tensor
+            aug = self.transform(image=img, mask=msk)
+            img, msk = aug["image"], aug["mask"]
 
-        # 4) Si no hay transform, convertir manualmente a Tensor CHW
-        img_tensor = torch.from_numpy(img_patch).permute(2,0,1).float()
-        msk_tensor = torch.from_numpy(msk_patch).long()
-        return img_tensor, msk_tensor 
+        return img, msk
 
 def generate_class_focused_patches(
     image: np.ndarray,
@@ -326,7 +354,7 @@ def main():
     # Datasets & loaders
     tr_ds = CloudPatchDatasetBalanced(Config.TRAIN_IMG_DIR,Config.TRAIN_MASK_DIR,
                                       patch_size=128,stride=128,min_fg_ratio=0.1,transform=train_tf)
-    boost_cfg = {2: 8, 4: 10}   # ← 5× más píxeles para las clases 2 y 4
+    boost_cfg = {2: 8, 4: 20}   # ← 5× más píxeles para las clases 2 y 4
     tr_samp = build_boosted_sampler(tr_ds,
                                     batch_size=Config.BATCH_SIZE,
                                     boosts=boost_cfg,
