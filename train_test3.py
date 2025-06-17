@@ -384,10 +384,12 @@ def main():
     imprimir_distribucion_clases_post_augmentation(train_loader, 6,
         "Distribución de clases en ENTRENAMIENTO (post-aug)")
 
-    val_dataset = CloudDataset(
-        image_dir=Config.VAL_IMG_DIR,
-        mask_dir=Config.VAL_MASK_DIR,
-        transform=val_transform
+    val_dataset = Class4PatchDataset(
+      image_dir=Config.VAL_IMG_DIR,
+      mask_dir=Config.VAL_MASK_DIR,
+      transform=val_transform, # ¡OJO! Usa el val_transform (sin aumentos aleatorios)
+      margin=8,
+      patch_size=Config.IMAGE_HEIGHT
     )
     val_loader = DataLoader(
         val_dataset,
