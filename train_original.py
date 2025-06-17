@@ -11,7 +11,7 @@ from albumentations.pytorch import ToTensorV2
 import os
 from PIL import Image
 import numpy as np
-
+from distribucion_por_clase   import imprimir_distribucion_clases_post_augmentation
 # Importa la arquitectura del otro archivo
 from model import CloudDeepLabV3Plus
 
@@ -249,6 +249,9 @@ def main():
         pin_memory=Config.PIN_MEMORY,
         shuffle=False
     )
+
+    imprimir_distribucion_clases_post_augmentation(train_loader, 6,
+        "Distribución de clases en ENTRENAMIENTO (post-aug)")
     
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     loss_fn = nn.CrossEntropyLoss()
