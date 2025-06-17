@@ -96,10 +96,11 @@ class CloudPatchDatasetBalanced(torch.utils.data.Dataset):
                 zoom_range=(1.5,2.5),
                 augment=True
             )
-            if random.random() < 0.5:
-                return foc_patches[0] 
-            else:
-                return img, msk    
+            # Compruebo que haya parches disponibles
+            if foc_patches and random.random() < 0.5:
+                return foc_patches[0]
+            # fallback al parche original
+            return img, msk  
 
 def generate_class_focused_patches(
     image: np.ndarray,
