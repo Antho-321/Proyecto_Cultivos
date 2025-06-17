@@ -126,10 +126,17 @@ class CloudPatchDatasetBalanced(torch.utils.data.Dataset):
         ).convert("L"), dtype=np.uint8)[r['y']:r['y'] + self.patch_size,
                                        r['x']:r['x'] + self.patch_size]
 
-        # 2) AÑADE AQUÍ crop_around_class para los parches que contienen clase 4:
+        # 2) AUMENTACIÓN “crop around” PARA CLASES 4 Y 2
+        # — Primero nubes de azúcar (4)
         if (msk == 4).any():
             img, msk = crop_around_class(img, msk, class_id=4, margin=8)
-            # Y luego redimensionas de nuevo a patch_size:
+            img = cv2.resize(img, (self.patch_size, self.patch_size),
+                             interpolation=cv2.INTER_LINEAR)
+            msk = cv2.resize(msk, (self.patch_size, self.patch_size),
+                             interpolation=cv2.INTER_NEAREST)
+        # Mira si hay clase 2
+        if (msk == 2).any():
+            img, msk = crop_around_class(img, msk, class_id=2, margin=8)
             img = cv2.resize(img, (self.patch_size, self.patch_size),
                              interpolation=cv2.INTER_LINEAR)
             msk = cv2.resize(msk, (self.patch_size, self.patch_size),
