@@ -192,6 +192,33 @@ def crop_around_class(
 
     return cropped_image, cropped_mask
 
+class Class4PatchDataset(CloudPatchDatasetBalanced):
+    def __init__(self, *args, margin=8, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 1) Construir lista de índices donde hist[4] > 0
+        self.class4_idxs = [
+            i for i, rec in enumerate(self.index)
+            if rec['hist'][4] > 0
+        ]
+        self.margin = margin
+
+    def __len__(self):
+        return len(self.class4_idxs)
+
+    def __getitem__(self, idx):
+        # 2) Traducimos el idx “reducido” al idx original
+        orig_i = self.class4_idxs[idx]
+        # 3) Obtenemos parche “estándar” (imagen y máscara) con la misma lógica base
+        img, msk = super().__getitem__(orig_i)
+        # 4) Siempre recortamos alrededor de la clase 4
+        img, msk = crop_around_class(img, msk, class_id=4, margin=self.margin)
+        # 5) Volvemos a resize a patch_size
+        img = cv2.resize(img, (self.patch_size, self.patch_size),
+                         interpolation=cv2.INTER_LINEAR)
+        msk = cv2.resize(msk, (self.patch_size, self.patch_size),
+                         interpolation=cv2.INTER_NEAREST)
+        return img, msk
+
 def generate_class_focused_patches(
     image: np.ndarray,
     mask: np.ndarray,
@@ -265,47 +292,6 @@ def generate_class_focused_patches(
         patches.append((zoomed_img, zoomed_msk))
 
     return patches
-
-def build_boosted_sampler(
-    dataset,
-    batch_size: int,
-    boosts: dict[int, float] | None = None,
-    base_budget: float = 1e12,
-    n_classes: int = 6,
-    drop_last: bool = False,
-):
-    """
-    Crea un PixelBalancedSampler con 'boosts' de píxeles por clase.
-
-    Parámetros
-    ----------
-    dataset       : CloudPatchDatasetBalanced
-        El dataset de parches ya inicializado.
-    batch_size    : int
-        Tamaño del lote.
-    boosts        : dict[int, float]
-        Diccionario {clase: factor}.  Por ejemplo, {2: 5, 4: 3}.
-    base_budget   : float
-        Presupuesto base de píxeles por clase antes de multiplicar.
-    n_classes     : int
-        Número total de clases (incluyendo fondo).
-    drop_last     : bool
-        Igual que en DataLoader / Sampler.  False ▶ conserva lote incompleto.
-
-    Devuelve
-    --------
-    PixelBalancedSampler
-        Lista de índices que respeta el presupuesto ajustado.
-    """
-    boosts = boosts or {}
-    tpp = np.full(n_classes, base_budget, dtype=np.float64)
-    for cls, factor in boosts.items():
-        if 0 <= cls < n_classes:
-            tpp[cls] *= factor
-        else:
-            raise ValueError(f"Clase {cls} fuera de rango (0-{n_classes-1}).")
-
-    return PixelBalancedSampler(dataset, tpp, batch_size, drop_last=drop_last)
 # ──────────────────────────────────────────────────────────────────────────────
 # 3 ▸ SAMPLER  (igual que antes)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -396,42 +382,48 @@ def main():
     print(f"🖥  Device → {Config.DEVICE}")
     # Aumentos
     train_tf = A.Compose([
-        A.RandomResizedCrop((Config.IMAGE_HEIGHT,Config.IMAGE_WIDTH),scale=(0.5,1),ratio=(0.75,1.33),
-                            interpolation=cv2.INTER_LINEAR,mask_interpolation=cv2.INTER_NEAREST),
-        A.RandomRotate90(),A.HorizontalFlip(),A.VerticalFlip(0.3),
-        A.ColorJitter(0.1,0.1,0.1,0.05,0.4),A.Normalize(),ToTensorV2()
+        A.RandomResizedCrop((Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), scale=(0.5, 1), ratio=(0.75, 1.33),
+                            interpolation=cv2.INTER_LINEAR, mask_interpolation=cv2.INTER_NEAREST),
+        A.RandomRotate90(), A.HorizontalFlip(), A.VerticalFlip(0.3),
+        A.ColorJitter(0.1, 0.1, 0.1, 0.05, 0.4), A.Normalize(), ToTensorV2()
     ])
-    val_tf   = A.Compose([A.Resize(Config.IMAGE_HEIGHT,Config.IMAGE_WIDTH),
-                          A.Normalize(),ToTensorV2()])
+    val_tf = A.Compose([A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
+                        A.Normalize(), ToTensorV2()])
 
     # Datasets & loaders
-    tr_ds = CloudPatchDatasetBalanced(Config.TRAIN_IMG_DIR,Config.TRAIN_MASK_DIR,
-                                      patch_size=128,stride=128,min_fg_ratio=0.1,transform=train_tf)
-    boost_cfg = {2: 8, 4: 20}   # ← 5× más píxeles para las clases 2 y 4
-    tr_samp = build_boosted_sampler(tr_ds,
-                                    batch_size=Config.BATCH_SIZE,
-                                    boosts=boost_cfg,
-                                    n_classes=6,
-                                    drop_last=False)
-    tr_ld = DataLoader(tr_ds, batch_sampler=tr_samp, num_workers=Config.NUM_WORKERS,
-                       pin_memory=Config.PIN_MEMORY)
+    # --- INICIO DE LA MODIFICACIÓN ---
+    # Se reemplaza CloudPatchDatasetBalanced y el sampler por Class4PatchDataset
+    class4_ds = Class4PatchDataset(
+        Config.TRAIN_IMG_DIR, Config.TRAIN_MASK_DIR,
+        patch_size=128, stride=128, min_fg_ratio=0.1,
+        transform=train_tf,
+        margin=8
+    )
+    class4_ld = DataLoader(
+        class4_ds,
+        batch_size=Config.BATCH_SIZE,
+        shuffle=True,
+        num_workers=Config.NUM_WORKERS,
+        pin_memory=Config.PIN_MEMORY
+    )
+    # --- FIN DE LA MODIFICACIÓN ---
 
     val_ds = CloudPatchDatasetBalanced(
         Config.VAL_IMG_DIR, Config.VAL_MASK_DIR,
         patch_size=128, stride=128,
-        min_fg_ratio=0,         # incluir incluso parches sin FG
+        min_fg_ratio=0,      # incluir incluso parches sin FG
         transform=val_tf
     )
-    val_ld = DataLoader(val_ds,batch_size=Config.BATCH_SIZE,shuffle=False,
-                        num_workers=Config.NUM_WORKERS,pin_memory=Config.PIN_MEMORY)
+    val_ld = DataLoader(val_ds, batch_size=Config.BATCH_SIZE, shuffle=False,
+                        num_workers=Config.NUM_WORKERS, pin_memory=Config.PIN_MEMORY)
 
-    imprimir_distribucion_clases_post_augmentation(tr_ld,6,
+    imprimir_distribucion_clases_post_augmentation(class4_ld, 6,
         "Distribución de clases en ENTRENAMIENTO (post-aug)")
 
     # Modelo + pérdida
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
-    w = torch.tensor(compute_class_weights(tr_ds), device=Config.DEVICE)
-    BOOST = 3.0                     # prueba con 2-4; 0 = sin cambio
+    w = torch.tensor(compute_class_weights(class4_ds), device=Config.DEVICE)
+    BOOST = 3.0          # prueba con 2-4; 0 = sin cambio
     w[4] = min(w[4] * BOOST, Config.MAX_W_CLS)
 
     loss_fn = AsymFocalTverskyLoss(class_weights=w,
@@ -439,12 +431,12 @@ def main():
 
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=Config.NUM_EPOCHS)
-    scaler    = GradScaler(enabled=Config.USE_AMP)
+    scaler = GradScaler(enabled=Config.USE_AMP)
 
     best_miou = -1
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n╭─ Epoch {epoch+1}/{Config.NUM_EPOCHS} ──────────────────────────")
-        train_one_epoch(tr_ld, model, loss_fn, optimizer, scaler)
+        train_one_epoch(class4_ld, model, loss_fn, optimizer, scaler)
         miou, dice = check_metrics(val_ld, model, device=Config.DEVICE)
         scheduler.step()
         if miou>best_miou:
