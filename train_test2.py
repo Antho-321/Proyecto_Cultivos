@@ -1,4 +1,5 @@
 # train.py  ── versión revisada 2025-06-15
+import random
 import os, cv2, torch, albumentations as A
 import numpy as np
 from PIL import Image
@@ -6,6 +7,10 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
 import torch.optim as optim
+from albumentations import (
+    Compose, RandomRotate90, HorizontalFlip, VerticalFlip,
+    ColorJitter, Normalize
+)
 from albumentations.pytorch import ToTensorV2
 from model                    import CloudDeepLabV3Plus
 from loss_function            import AsymFocalTverskyLoss
@@ -68,16 +73,106 @@ class CloudPatchDatasetBalanced(torch.utils.data.Dataset):
     def _load(self, folder, name):   return np.array(Image.open(
                                     os.path.join(folder, name)).convert("RGB"))
     def __getitem__(self, i):
-        r   = self.index[i]; name = self.images[r['img_idx']]
-        img = self._load(self.image_dir, name)[r['y']:r['y']+self.patch_size,
-                                               r['x']:r['x']+self.patch_size]
-        msk = np.array(Image.open(os.path.join(
-                     self.mask_dir,f"{name.rsplit('.',1)[0]}_mask.png"))
-                     .convert("L"),dtype=np.uint8)[r['y']:r['y']+self.patch_size,
-                                                   r['x']:r['x']+self.patch_size]
+        # 1) Cargo el parche completo
+        r    = self.index[i]
+        name = self.images[r['img_idx']]
+        img  = self._load(self.image_dir, name)[r['y']:r['y']+self.patch_size,
+                                                r['x']:r['x']+self.patch_size]
+        msk  = np.array(Image.open(os.path.join(
+                   self.mask_dir,f"{name.rsplit('.',1)[0]}_mask.png"))
+                   .convert("L"),dtype=np.uint8)[r['y']:r['y']+self.patch_size,
+                                                 r['x']:r['x']+self.patch_size]
+
+        # 2) Decido si reemplazo por parche focalizado en clase 4
+        if random.random() < 0.5:
+            foc = generate_class_focused_patches(
+                image=img, mask=msk, class_id=4,
+                num_patches=1, output_size=self.patch_size,
+                zoom_range=(1.5,2.5), augment=False  # sólo recorte+zoom
+            )
+            if foc:
+                img, msk = foc[0]
+
+        # 3) Aplico tu pipeline habitual de Albumentations
         if self.transform:
-            aug = self.transform(image=img, mask=msk); img, msk = aug["image"], aug["mask"]
+            aug = self.transform(image=img, mask=msk)
+            img, msk = aug["image"], aug["mask"]
+
         return img, msk
+
+def generate_class_focused_patches(
+    image: np.ndarray,
+    mask: np.ndarray,
+    class_id: int = 4,
+    num_patches: int = 5,
+    output_size: int = 128,
+    zoom_range: tuple[float, float] = (1.2, 2.0),
+    augment: bool = True
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """
+    Extrae múltiples parches centrados en píxeles de la clase `class_id`,
+    aplicando un zoom aleatorio y (opcionalmente) otras transformaciones.
+
+    Parámetros
+    ----------
+    image        : H×W×3, imagen original en RGB (dtype uint8 o float).
+    mask         : H×W, máscara con valores de clase 0–5.
+    class_id     : clase objetivo (aquí 4).
+    num_patches  : cuántos parches generar.
+    output_size  : tamaño (alto=ancho) del parche final.
+    zoom_range   : (min_zoom, max_zoom). >1 → recorta más pequeño y resize up.
+    augment      : si True, añade rotaciones y flips sencillos.
+
+    Devuelve
+    -------
+    Listado de (parche_img, parche_mask), ambos de tamaño output_size×output_size.
+    """
+    H, W = mask.shape
+    # Índices de todos los píxeles de la clase objetivo
+    ys, xs = np.where(mask == class_id)
+    if len(ys) == 0:
+        return []  # no hay ejemplos de la clase en esta imagen/máscara
+
+    # Pipeline de augmentations post-zoom
+    aug_pipeline = Compose([
+        RandomRotate90(),                            # rotación 90° múltiple
+        HorizontalFlip(p=0.5),                       # volteo horizontal
+        VerticalFlip(p=0.3),                         # volteo vertical
+        ColorJitter(0.1, 0.1, 0.1, 0.05, p=0.4),      # jitter de color
+        Normalize(),                                 # normalizar
+        ToTensorV2()
+    ]) if augment else None
+
+    patches = []
+    for _ in range(num_patches):
+        # 1) Elegir un píxel al azar de la clase
+        idx = random.randrange(len(ys))
+        cy, cx = int(ys[idx]), int(xs[idx])
+
+        # 2) Determinar zoom y recorte previo
+        z = random.uniform(*zoom_range)
+        crop_sz = int(output_size / z)
+        # fijar límites para que el recorte quede dentro de la imagen
+        y1 = max(0, min(H - crop_sz, cy - crop_sz // 2))
+        x1 = max(0, min(W - crop_sz, cx - crop_sz // 2))
+
+        crop_img = image[y1:y1 + crop_sz, x1:x1 + crop_sz]
+        crop_msk = mask[y1:y1 + crop_sz, x1:x1 + crop_sz]
+
+        # 3) Zoom: redimensionar de nuevo a output_size
+        zoomed_img = cv2.resize(crop_img, (output_size, output_size),
+                                interpolation=cv2.INTER_LINEAR)
+        zoomed_msk = cv2.resize(crop_msk, (output_size, output_size),
+                                interpolation=cv2.INTER_NEAREST)
+
+        # 4) Augmentations opcionales
+        if augment and aug_pipeline is not None:
+            augmented = aug_pipeline(image=zoomed_img, mask=zoomed_msk)
+            zoomed_img, zoomed_msk = augmented["image"], augmented["mask"]
+
+        patches.append((zoomed_img, zoomed_msk))
+
+    return patches
 
 def build_boosted_sampler(
     dataset,
