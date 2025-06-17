@@ -85,22 +85,31 @@ class CloudPatchDatasetBalanced(torch.utils.data.Dataset):
 
         # 2) Decido si reemplazo por parche focalizado en clase 4
         if random.random() < 0.5:
-            return img, msk
+            img_patch, msk_patch = img, msk
         else:
-            foc_patches = generate_class_focused_patches(
-                image=img,
-                mask=msk,
-                class_id=4,
-                num_patches=10,
+            foc = generate_class_focused_patches(
+                image=img, mask=msk,
+                class_id=4, num_patches=10,
                 output_size=self.patch_size,
                 zoom_range=(1.5,2.5),
-                augment=True
+                augment=False      # <- desactivar ToTensorV2 aquí
             )
-            # Compruebo que haya parches disponibles
-            if foc_patches and random.random() < 0.5:
-                return foc_patches[0]
-            # fallback al parche original
-            return img, msk  
+            if foc and random.random() < 0.5:
+                img_patch, msk_patch = foc[0]
+            else:
+                img_patch, msk_patch = img, msk
+
+        # 3) APLICAR AQUÍ la transformación final
+        if self.transform:
+            augmented = self.transform(image=img_patch, mask=msk_patch)
+            img_tensor = augmented["image"]  # será siempre Tensor CHW
+            msk_tensor = augmented["mask"]   # será siempre Tensor HW
+            return img_tensor, msk_tensor
+
+        # 4) Si no hay transform, convertir manualmente a Tensor CHW
+        img_tensor = torch.from_numpy(img_patch).permute(2,0,1).float()
+        msk_tensor = torch.from_numpy(msk_patch).long()
+        return img_tensor, msk_tensor 
 
 def generate_class_focused_patches(
     image: np.ndarray,
