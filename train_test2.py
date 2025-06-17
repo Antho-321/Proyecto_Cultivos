@@ -206,17 +206,27 @@ class Class4PatchDataset(CloudPatchDatasetBalanced):
         return len(self.class4_idxs)
 
     def __getitem__(self, idx):
-        # 2) Traducimos el idx “reducido” al idx original
         orig_i = self.class4_idxs[idx]
-        # 3) Obtenemos parche “estándar” (imagen y máscara) con la misma lógica base
-        img, msk = super().__getitem__(orig_i)
-        # 4) Siempre recortamos alrededor de la clase 4
+
+        # 1) Desactivo la transform del padre
+        parent_tf = self.transform
+        self.transform = None
+        img, msk = super().__getitem__(orig_i)  # aquí NO transforma a tensor
+        # 2) Restauro la transform
+        self.transform = parent_tf
+
+        # 3) Ahora img y msk son numpy arrays: recorto y redimensiono
         img, msk = crop_around_class(img, msk, class_id=4, margin=self.margin)
-        # 5) Volvemos a resize a patch_size
         img = cv2.resize(img, (self.patch_size, self.patch_size),
                          interpolation=cv2.INTER_LINEAR)
         msk = cv2.resize(msk, (self.patch_size, self.patch_size),
                          interpolation=cv2.INTER_NEAREST)
+
+        # 4) Finalmente aplico la transform original (que incluye ToTensorV2)
+        if parent_tf:
+            aug = parent_tf(image=img, mask=msk)
+            img, msk = aug["image"], aug["mask"]
+
         return img, msk
 
 def generate_class_focused_patches(
