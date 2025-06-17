@@ -116,28 +116,74 @@ class CloudPatchDatasetBalanced(torch.utils.data.Dataset):
         return np.array(Image.open(os.path.join(folder, name)).convert("RGB"))
 
     def __getitem__(self, i):
-        """
-        Obtiene un parche de imagen y su máscara correspondiente.
-        """
-        # Obtiene la información del parche del índice pre-calculado.
+        # 1) Obtienes el parche “estándar”:
         r = self.index[i]
         name = self.images[r['img_idx']]
-
-        # Carga la región (parche) de la imagen.
         img = self._load(self.image_dir, name)[r['y']:r['y'] + self.patch_size,
                                                r['x']:r['x'] + self.patch_size]
+        msk = np.array(Image.open(
+            os.path.join(self.mask_dir, f"{name.rsplit('.',1)[0]}_mask.png")
+        ).convert("L"), dtype=np.uint8)[r['y']:r['y'] + self.patch_size,
+                                       r['x']:r['x'] + self.patch_size]
 
-        # Carga la región (parche) de la máscara.
-        mask_path = os.path.join(self.mask_dir, f"{name.rsplit('.',1)[0]}_mask.png")
-        msk = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)[r['y']:r['y'] + self.patch_size,
-                                                                          r['x']:r['x'] + self.patch_size]
+        # 2) AÑADE AQUÍ crop_around_class para los parches que contienen clase 4:
+        if (msk == 4).any():
+            img, msk = crop_around_class(img, msk, class_id=4, margin=8)
+            # Y luego redimensionas de nuevo a patch_size:
+            img = cv2.resize(img, (self.patch_size, self.patch_size),
+                             interpolation=cv2.INTER_LINEAR)
+            msk = cv2.resize(msk, (self.patch_size, self.patch_size),
+                             interpolation=cv2.INTER_NEAREST)
 
-        # Aplica transformaciones si existen.
+        # 3) Aplicas tus augmentations habituales:
         if self.transform:
             aug = self.transform(image=img, mask=msk)
             img, msk = aug["image"], aug["mask"]
 
         return img, msk
+
+def crop_around_class(
+    image: np.ndarray,
+    mask: np.ndarray,
+    class_id: int = 4,
+    margin: int = 0
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Recorta un rectángulo alrededor de todos los píxeles == class_id en la máscara.
+
+    Args:
+        image (H×W×C np.ndarray): Imagen original en RGB o BGR.
+        mask  (H×W    np.ndarray): Máscara con valores de clase.
+        class_id (int): Valor de la clase a recortar (p.ej. 4).
+        margin   (int): Número de píxeles de margen extra alrededor del bounding box.
+
+    Returns:
+        cropped_image (h×w×C np.ndarray)
+        cropped_mask  (h×w    np.ndarray)
+
+    Si no se encuentra ningún píxel == class_id, devuelve la imagen y máscara originales.
+    """
+    # Encuentra coordenadas de los píxeles de la clase
+    ys, xs = np.where(mask == class_id)
+    if ys.size == 0:
+        # No hay píxeles de esa clase: devolvemos original
+        return image, mask
+
+    # Calcula límites del bounding box
+    y_min, y_max = ys.min(), ys.max()
+    x_min, x_max = xs.min(), xs.max()
+
+    # Aplica margen sin salirse de los límites
+    y0 = max(0, y_min - margin)
+    y1 = min(mask.shape[0], y_max + margin + 1)
+    x0 = max(0, x_min - margin)
+    x1 = min(mask.shape[1], x_max + margin + 1)
+
+    # Recorta
+    cropped_image = image[y0:y1, x0:x1]
+    cropped_mask  = mask[y0:y1, x0:x1]
+
+    return cropped_image, cropped_mask
 
 def generate_class_focused_patches(
     image: np.ndarray,
