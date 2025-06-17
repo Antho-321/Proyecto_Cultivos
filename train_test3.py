@@ -14,6 +14,7 @@ import numpy as np
 import cv2
 # Importa la arquitectura del otro archivo
 from model import CloudDeepLabV3Plus 
+import matplotlib.pyplot as plt
 from distribucion_por_clase   import imprimir_distribucion_clases_post_augmentation
 from loss_function            import AsymFocalTverskyLoss
 # =================================================================================
@@ -268,6 +269,40 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.train()
     return miou_macro, dice_macro
 
+def save_performance_plot(train_history, val_history, save_path):
+    """
+    Guarda un gráfico comparando el mIoU de entrenamiento y validación por época.
+
+    Args:
+        train_history (list): Lista con los valores de mIoU de entrenamiento por época.
+        val_history (list): Lista con los valores de mIoU de validación por época.
+        save_path (str): Ruta donde se guardará el gráfico en formato PNG.
+    """
+    epochs = range(1, len(train_history) + 1)
+    
+    plt.style.use('seaborn-v0_8-darkgrid') # Estilo visual atractivo
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    # Graficar ambas curvas
+    ax.plot(epochs, train_history, 'o-', color="xkcd:sky blue", label='Entrenamiento (mIoU)', markersize=4)
+    ax.plot(epochs, val_history, 'o-', color="xkcd:amber", label='Validación (mIoU)', markersize=4)
+
+    # Títulos y etiquetas
+    ax.set_title('Rendimiento del Modelo: mIoU por Época', fontsize=16, weight='bold')
+    ax.set_xlabel('Época', fontsize=12)
+    ax.set_ylabel('mIoU (Mean Intersection over Union)', fontsize=12)
+    
+    # Leyenda, cuadrícula y límites
+    ax.legend(fontsize=11, frameon=True, shadow=True)
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax.set_ylim(0, max(1.0, max(val_history)*1.1)) # Límite Y hasta 1.0 o un poco más del máximo
+    ax.set_xticks(epochs) # Asegura que se muestren todas las épocas si no son demasiadas
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150) # Guardar con buena resolución
+    plt.close(fig) # Liberar memoria
+    print(f"📈 Gráfico de rendimiento guardado en '{save_path}'")
+
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN
 # =================================================================================
@@ -343,6 +378,9 @@ def main():
 
     best_mIoU = -1.0
 
+    train_miou_history = []
+    val_miou_history = []
+
     # --- Bucle Principal de Entrenamiento ---
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
@@ -363,6 +401,18 @@ def main():
             n_classes=6,
             device=Config.DEVICE
         )
+
+        # Evaluar en ambos datasets (entrenamiento y validación)
+
+        print("\n--- Métricas de Entrenamiento ---")
+        train_miou, _ = check_metrics(train_loader, model, device=Config.DEVICE)
+        print("\n--- Métricas de Validación ---")
+        val_miou, _ = check_metrics(val_loader, model, device=Config.DEVICE)
+
+        # Registrar historial
+        
+        train_miou_history.append(train_miou.cpu().item())
+        val_miou_history.append(val_miou.cpu().item())
 
         # 3) Guardar checkpoint si hubo mejora en mIoU
         if current_mIoU > best_mIoU:
@@ -385,6 +435,7 @@ def main():
         device=Config.DEVICE
     )
     print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
+    save_performance_plot(train_miou_history, val_miou_history, "/content/drive/MyDrive/colab/rendimiento_miou.png")
 
 if __name__ == "__main__":
     main()
