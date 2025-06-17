@@ -36,7 +36,7 @@ class Config:
     
     PIN_MEMORY = True
     LOAD_MODEL = False
-    MODEL_SAVE_PATH = "best_model.pth.tar"
+    MODEL_SAVE_PATH = "/content/drive/MyDrive/colab/best_model.pth.tar"
 
 # =================================================================================
 # FUNCIÓN DE RECORTE (AÑADIDA)
