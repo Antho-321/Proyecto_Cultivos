@@ -146,10 +146,12 @@ def crop_around_class(
     return cropped_image, cropped_mask
 
 class Class4PatchDataset(CloudDataset):
-    def __init__(self, *args, margin=8, **kwargs):
+    def __init__(self, *args, patch_size, margin=8, **kwargs):
         super().__init__(*args, **kwargs)
-        
-        self.patch_size = patch_size # <-- Guardar el valor aquí
+    
+        # 2. AHORA, utiliza los argumentos que son exclusivos de ESTA clase.
+        #    Estos ya no se pasan al padre.
+        self.patch_size = patch_size
         self.margin = margin
         # que contienen la clase 4 en su máscara.
         self.index = []
