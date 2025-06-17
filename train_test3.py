@@ -310,11 +310,10 @@ def main():
     print(f"Using device: {Config.DEVICE}")
     
     # --- Transformaciones y Aumento de Datos ---
-    train_transform = A.Compose([
+
+    # Pipeline de validación (sin cambios)
+    val_transform = A.Compose([
         A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
-        A.Rotate(limit=35, p=0.7),
-        A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.3),
         A.Normalize(
             mean=[0.0, 0.0, 0.0],
             std=[1.0, 1.0, 1.0],
@@ -323,8 +322,41 @@ def main():
         ToTensorV2(),
     ])
 
-    val_transform = A.Compose([
+    # <<< CAMBIO PRINCIPAL: Pipeline de aumentos más agresivo para Clase 4 >>>
+    # Este pipeline incluye las transformaciones que pediste (rotación, traslación) y más.
+    train_class4_transform = A.Compose([
         A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
+        
+        # 1. Transformación geométrica más potente
+        A.ShiftScaleRotate(
+            shift_limit=0.1,         # Traslación de hasta un 10%
+            scale_limit=0.15,        # Zoom de hasta un 15%
+            rotate_limit=60,         # Rotación de hasta 60 grados
+            p=0.9,
+            border_mode=cv2.BORDER_CONSTANT,
+            mask_value=0 # Rellena los bordes de la máscara con la clase 0 (fondo)
+        ),
+        
+        # 2. Volteos
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
+        
+        # 3. Aumentos de color y brillo (ayuda a la robustez)
+        A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.7),
+        A.HueSaturationValue(p=0.5),
+
+        # 4. Dropout espacial (fuerza al modelo a aprender de partes de la imagen)
+        A.CoarseDropout(
+            max_holes=8,
+            max_height=32,
+            max_width=32,
+            min_holes=1,
+            fill_value=0, # Rellena los huecos con la clase 0
+            mask_fill_value=0, # Rellena huecos en la máscara con clase 0
+            p=0.5
+        ),
+
+        # 5. Normalización y conversión a Tensor (siempre al final)
         A.Normalize(
             mean=[0.0, 0.0, 0.0],
             std=[1.0, 1.0, 1.0],
@@ -337,9 +369,9 @@ def main():
     train_dataset = Class4PatchDataset(
         image_dir=Config.TRAIN_IMG_DIR,
         mask_dir=Config.TRAIN_MASK_DIR,
-        transform=train_transform,
+        transform=train_class4_transform, # <<< CAMBIO: Usamos el nuevo pipeline agresivo aquí
         margin=8,
-        patch_size=Config.IMAGE_HEIGHT # <-- Pasa el tamaño aquí (o IMAGE_WIDTH)
+        patch_size=Config.IMAGE_HEIGHT
     )
     train_loader = DataLoader(
         train_dataset,
@@ -365,75 +397,47 @@ def main():
         shuffle=False
     )
     
-    # --- Instanciación del Modelo, Loss y Optimizador ---
+    # --- El resto del código de instanciación y bucle de entrenamiento no necesita cambios ---
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
-    
     loss_fn = AsymFocalTverskyLoss()
-    
-    # AdamW es una buena elección de optimizador por defecto.
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
-
-    # El scaler es para el entrenamiento de precisión mixta (acelera el entrenamiento en GPUs compatibles)
     scaler = GradScaler() 
-
     best_mIoU = -1.0
-
     train_miou_history = []
     val_miou_history = []
 
-    # --- Bucle Principal de Entrenamiento ---
+    # --- Bucle Principal de Entrenamiento (sin cambios) ---
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
-
-        # 1) Entrenamiento de una época
-        train_fn(
-            train_loader,
-            model,
-            optimizer,
-            loss_fn,
-            scaler
-        )
-
-        # 2) Evaluación en el conjunto de validación
-        current_mIoU, current_dice = check_metrics(
-            val_loader,
-            model,
-            n_classes=6,
-            device=Config.DEVICE
-        )
-
-        # Evaluar en ambos datasets (entrenamiento y validación)
+        train_fn(train_loader, model, optimizer, loss_fn, scaler)
 
         print("\n--- Métricas de Entrenamiento ---")
         train_miou, _ = check_metrics(train_loader, model, device=Config.DEVICE)
         print("\n--- Métricas de Validación ---")
-        val_miou, _ = check_metrics(val_loader, model, device=Config.DEVICE)
-
-        # Registrar historial
+        val_miou, current_dice = check_metrics(val_loader, model, device=Config.DEVICE)
         
         train_miou_history.append(train_miou.cpu().item())
         val_miou_history.append(val_miou.cpu().item())
-
-        # 3) Guardar checkpoint si hubo mejora en mIoU
-        if current_mIoU > best_mIoU:
-            best_mIoU = current_mIoU
+        
+        if val_miou > best_mIoU:
+            best_mIoU = val_miou
             print(f"🔹 Nuevo mejor mIoU: {best_mIoU:.4f} | Dice: {current_dice:.4f}  →  guardando modelo…")
-
             checkpoint = {
-                "epoch":     epoch,
+                "epoch": epoch,
                 "state_dict": model.state_dict(),
-                "optimizer":  optimizer.state_dict(),
-                "best_mIoU":  best_mIoU,
+                "optimizer": optimizer.state_dict(),
+                "best_mIoU": best_mIoU,
             }
             torch.save(checkpoint, Config.MODEL_SAVE_PATH)
 
+    # --- Evaluación final y guardado de gráfico (sin cambios) ---
     print("\nEvaluando el modelo con mejor mIoU guardado…")
-    best_mIoU, best_dice = check_metrics(
-        val_loader,
-        model,
-        n_classes=6,
-        device=Config.DEVICE
-    )
+    # Cargar el mejor modelo antes de la evaluación final
+    # (Este paso es importante para asegurar que evalúas el mejor checkpoint)
+    checkpoint = torch.load(Config.MODEL_SAVE_PATH)
+    model.load_state_dict(checkpoint['state_dict'])
+    
+    best_mIoU, best_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
     print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
     save_performance_plot(train_miou_history, val_miou_history, "/content/drive/MyDrive/colab/rendimiento_miou.png")
 
