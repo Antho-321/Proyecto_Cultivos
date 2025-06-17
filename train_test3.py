@@ -1,305 +1,375 @@
-# train.py  ── versión revisada 2025-06-15
-import os, cv2, torch, albumentations as A
-import numpy as np
-from PIL import Image
-from tqdm import tqdm
-from torch.utils.data import DataLoader
-from torch.amp import GradScaler, autocast
+# train.py
+
+import torch
+import torch.nn as nn
 import torch.optim as optim
+from torch.amp import GradScaler
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from model                    import CloudDeepLabV3Plus
-from loss_function            import AsymFocalTverskyLoss
-from distribucion_por_clase   import imprimir_distribucion_clases_post_augmentation
-# ──────────────────────────────────────────────────────────────────────────────
-# 1 ▸ CONFIGURACIÓN
-# ──────────────────────────────────────────────────────────────────────────────
+import os
+from PIL import Image
+import numpy as np
+import cv2
+# Importa la arquitectura del otro archivo
+from model import CloudDeepLabV3Plus 
+
+# =================================================================================
+# 1. CONFIGURACIÓN
+# Centraliza todos los hiperparámetros y rutas aquí.
+# =================================================================================
 class Config:
-    DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
-    TRAIN_IMG_DIR, TRAIN_MASK_DIR = "Balanced/train/images", "Balanced/train/masks"
-    VAL_IMG_DIR,   VAL_MASK_DIR   = "Balanced/val/images",   "Balanced/val/masks"
-
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # --- MUY IMPORTANTE: Modifica estas rutas a tus directorios de datos ---
+    TRAIN_IMG_DIR = "Balanced/train/images"
+    TRAIN_MASK_DIR = "Balanced/train/masks"
+    VAL_IMG_DIR = "Balanced/val/images"
+    VAL_MASK_DIR = "Balanced/val/masks"
+    
+    # --- Hiperparámetros de entrenamiento ---
     LEARNING_RATE = 1e-4
-    BATCH_SIZE    = 8
-    NUM_EPOCHS    = 200
-    NUM_WORKERS   = 2
-
-    IMAGE_HEIGHT  = 256
-    IMAGE_WIDTH   = 256
-
-    # ajustes críticos
-    USE_AMP       = False              # ← ❶  FP16 desactivado hasta estabilizar
-    MAX_W_CLS     = 3.0                # ← ❷  cota para pesos de clase
-    EPS_TVERSKY   = 1e-4               # ← ❸  ε más grande dentro del loss
-    CLIP_NORM     = 1.0                # ← ❹  grad-clipping
-
-    PIN_MEMORY    = True
+    BATCH_SIZE = 8
+    NUM_EPOCHS = 50
+    NUM_WORKERS = 2
+    
+    # --- Dimensiones de la imagen ---
+    IMAGE_HEIGHT = 256
+    IMAGE_WIDTH = 256
+    
+    # --- Configuraciones adicionales ---
+    PIN_MEMORY = True
+    LOAD_MODEL = False # Poner a True si quieres continuar un entrenamiento
     MODEL_SAVE_PATH = "best_model.pth.tar"
-# ──────────────────────────────────────────────────────────────────────────────
-# 2 ▸ DATASET  (sin cambios relevantes)
-# ──────────────────────────────────────────────────────────────────────────────
-class CloudPatchDatasetBalanced(torch.utils.data.Dataset):
-    _IMG_EXT = ('.jpg', '.png')
 
-    def __init__(self, image_dir, mask_dir, patch_size=128, stride=128,
-                 min_fg_ratio=0.4, transform=None):
-        self.image_dir, self.mask_dir = image_dir, mask_dir
-        self.patch_size, self.stride  = patch_size, stride
-        self.min_fg_ratio, self.transform = min_fg_ratio, transform
+# =================================================================================
+# 2. DATASET PERSONALIZADO
+# Clase para cargar las imágenes y sus máscaras de segmentación.
+# =================================================================================
+# =================================================================================
+# 2. DATASET PERSONALIZADO (versión alineada con load_dataset)
+# =================================================================================
+class CloudDataset(torch.utils.data.Dataset):
+    """
+    Dataset para segmentación de nubes que asume:
+      • Las imágenes están en image_dir y se llaman *.jpg* o *.png*.
+      • Las máscaras correspondientes están en mask_dir y se llaman
+        '{nombre_imagen_sin_extensión}_mask.png'.
+      • Las máscaras son imágenes en escala de grises con 0-255
+        (0 = fondo, 255 = nube). Se normalizan a 0-1.
+    """
+    _IMG_EXTENSIONS = ('.jpg', '.png')
 
-        self.images = [f for f in os.listdir(image_dir)
-                       if f.lower().endswith(self._IMG_EXT)]
-        self.index  = []
-        for img_idx, img_name in enumerate(self.images):
-            mask_np = np.array(
-                Image.open(os.path.join(mask_dir,
-                          f"{img_name.rsplit('.',1)[0]}_mask.png"))
-                .convert("L"), dtype=np.uint8)
+    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
+        self.image_dir = image_dir
+        self.mask_dir = mask_dir
+        self.transform = transform
 
-            H, W = mask_np.shape
-            for y in range(0, H-patch_size+1, stride):
-                for x in range(0, W-patch_size+1, stride):
-                    patch = mask_np[y:y+patch_size, x:x+patch_size]
-                    if (patch != 0).mean() < self.min_fg_ratio: 
-                        continue
-                    hist = np.bincount(patch.flatten(), minlength=6)
-                    self.index.append(dict(img_idx=img_idx,y=y,x=x,hist=hist))
+        # Lista de archivos que cumplen con las extensiones permitidas
+        self.images = [
+            f for f in os.listdir(image_dir)
+            if f.lower().endswith(self._IMG_EXTENSIONS)
+        ]
 
-    def __len__(self):               return len(self.index)
-    def _load(self, folder, name):   return np.array(Image.open(
-                                    os.path.join(folder, name)).convert("RGB"))
-    def __getitem__(self, i):
-        r   = self.index[i]; name = self.images[r['img_idx']]
-        img = self._load(self.image_dir, name)[r['y']:r['y']+self.patch_size,
-                                               r['x']:r['x']+self.patch_size]
-        msk = np.array(Image.open(os.path.join(
-                     self.mask_dir,f"{name.rsplit('.',1)[0]}_mask.png"))
-                     .convert("L"),dtype=np.uint8)[r['y']:r['y']+self.patch_size,
-                                                   r['x']:r['x']+self.patch_size]
+    def __len__(self) -> int:
+        return len(self.images)
+
+    def _mask_path_from_image_name(self, image_filename: str) -> str:
+        """
+        Convierte 'foto123.jpg' -> 'foto123_mask.png'
+        """
+        name_without_ext = image_filename.rsplit('.', 1)[0]
+        mask_filename = f"{name_without_ext}_mask.png"
+        return os.path.join(self.mask_dir, mask_filename)
+
+    def __getitem__(self, idx: int):
+        img_filename = self.images[idx]
+        img_path = os.path.join(self.image_dir, img_filename)
+
+        mask_path = self._mask_path_from_image_name(img_filename)
+        if not os.path.exists(mask_path):
+            raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
+
+        # Carga la imagen RGB y la máscara en escala de grises
+        image = np.array(Image.open(img_path).convert("RGB"))
+        mask = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
+
         if self.transform:
-            aug = self.transform(image=img, mask=msk); img, msk = aug["image"], aug["mask"]
+            augmented = self.transform(image=image, mask=mask)
+            image = augmented["image"]           # Tensor C×H×W, float32
+            mask  = augmented["mask"]            # Tensor H×W, int64
+
+        return image, mask
+
+def crop_around_class(
+    image: np.ndarray,
+    mask: np.ndarray,
+    class_id: int = 4,
+    margin: int = 0
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Recorta un rectángulo alrededor de todos los píxeles == class_id en la máscara.
+
+    Args:
+        image (H×W×C np.ndarray): Imagen original en RGB o BGR.
+        mask  (H×W    np.ndarray): Máscara con valores de clase.
+        class_id (int): Valor de la clase a recortar (p.ej. 4).
+        margin   (int): Número de píxeles de margen extra alrededor del bounding box.
+
+    Returns:
+        cropped_image (h×w×C np.ndarray)
+        cropped_mask  (h×w    np.ndarray)
+
+    Si no se encuentra ningún píxel == class_id, devuelve la imagen y máscara originales.
+    """
+    # Encuentra coordenadas de los píxeles de la clase
+    ys, xs = np.where(mask == class_id)
+    if ys.size == 0:
+        # No hay píxeles de esa clase: devolvemos original
+        return image, mask
+
+    # Calcula límites del bounding box
+    y_min, y_max = ys.min(), ys.max()
+    x_min, x_max = xs.min(), xs.max()
+
+    # Aplica margen sin salirse de los límites
+    y0 = max(0, y_min - margin)
+    y1 = min(mask.shape[0], y_max + margin + 1)
+    x0 = max(0, x_min - margin)
+    x1 = min(mask.shape[1], x_max + margin + 1)
+
+    # Recorta
+    cropped_image = image[y0:y1, x0:x1]
+    cropped_mask  = mask[y0:y1, x0:x1]
+
+    return cropped_image, cropped_mask
+
+class Class4PatchDataset(CloudDataset):
+    def __init__(self, *args, margin=8, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 1) Construir lista de índices donde hist[4] > 0
+        self.class4_idxs = [
+            i for i, rec in enumerate(self.index)
+            if rec['hist'][4] > 0
+        ]
+        self.margin = margin
+
+    def __len__(self):
+        return len(self.class4_idxs)
+
+    def __getitem__(self, idx):
+        orig_i = self.class4_idxs[idx]
+
+        # 1) Desactivo la transform del padre
+        parent_tf = self.transform
+        self.transform = None
+        img, msk = super().__getitem__(orig_i)  # aquí NO transforma a tensor
+        # 2) Restauro la transform
+        self.transform = parent_tf
+
+        # 3) Ahora img y msk son numpy arrays: recorto y redimensiono
+        img, msk = crop_around_class(img, msk, class_id=4, margin=self.margin)
+        img = cv2.resize(img, (self.patch_size, self.patch_size),
+                         interpolation=cv2.INTER_LINEAR)
+        msk = cv2.resize(msk, (self.patch_size, self.patch_size),
+                         interpolation=cv2.INTER_NEAREST)
+
+        # 4) Finalmente aplico la transform original (que incluye ToTensorV2)
+        if parent_tf:
+            aug = parent_tf(image=img, mask=msk)
+            img, msk = aug["image"], aug["mask"]
+
         return img, msk
 
-def build_boosted_sampler(
-    dataset,
-    batch_size: int,
-    boosts: dict[int, float] | None = None,
-    base_budget: float = 1e12,
-    n_classes: int = 6,
-    drop_last: bool = False,
-):
-    """
-    Crea un PixelBalancedSampler con 'boosts' de píxeles por clase.
-
-    Parámetros
-    ----------
-    dataset       : CloudPatchDatasetBalanced
-        El dataset de parches ya inicializado.
-    batch_size    : int
-        Tamaño del lote.
-    boosts        : dict[int, float]
-        Diccionario {clase: factor}.  Por ejemplo, {2: 5, 4: 3}.
-    base_budget   : float
-        Presupuesto base de píxeles por clase antes de multiplicar.
-    n_classes     : int
-        Número total de clases (incluyendo fondo).
-    drop_last     : bool
-        Igual que en DataLoader / Sampler.  False ▶ conserva lote incompleto.
-
-    Devuelve
-    --------
-    PixelBalancedSampler
-        Lista de índices que respeta el presupuesto ajustado.
-    """
-    boosts = boosts or {}
-    tpp = np.full(n_classes, base_budget, dtype=np.float64)
-    for cls, factor in boosts.items():
-        if 0 <= cls < n_classes:
-            tpp[cls] *= factor
-        else:
-            raise ValueError(f"Clase {cls} fuera de rango (0-{n_classes-1}).")
-
-    return PixelBalancedSampler(dataset, tpp, batch_size, drop_last=drop_last)
-# ──────────────────────────────────────────────────────────────────────────────
-# 3 ▸ SAMPLER  (igual que antes)
-# ──────────────────────────────────────────────────────────────────────────────
-class PixelBalancedSampler(torch.utils.data.Sampler):
-    def __init__(self, ds, target_pixels_per_class, batch_size, drop_last=True):
-        self.ds, self.tpp = ds, np.asarray(target_pixels_per_class)
-        self.B, self.drop_last = batch_size, drop_last
-        self.patch_hist = [rec["hist"] for rec in ds.index]
-
-    def __iter__(self):
-        order = np.random.permutation(len(self.ds))
-        batch, cum = [], np.zeros(6, np.int64)
-        for idx in order:
-            h = self.patch_hist[idx]
-            if (cum + h <= self.tpp).all() or not batch:
-                batch.append(idx); cum += h
-                if len(batch) == self.B: yield batch; batch, cum = [], np.zeros(6, np.int64)
-        if batch and not self.drop_last: yield batch
-    def __len__(self): return len(self.ds)//self.B
-# ──────────────────────────────────────────────────────────────────────────────
-# 4 ▸ UTILIDADES
-# ──────────────────────────────────────────────────────────────────────────────
-def compute_class_weights(ds, n_classes=6, method="median"):
-    pix, tot = np.zeros(n_classes), np.zeros_like(np.zeros(n_classes))
-    for _, m in ds:
-        m = np.array(m); t = m.size
-        for c in range(n_classes):
-            pc = (m==c).sum(); pix[c]+=pc; 
-            if pc>0: tot[c]+=t
-    if method=="inverse":
-        w = pix.sum()/(pix+1e-8)
-    else:                      # MFB
-        freq = pix/(tot+1e-8); med = np.median(freq[freq>0]); w = med/(freq+1e-8)
-    w[0]=0.0                             # fondo
-    return np.clip(w, 0.0, Config.MAX_W_CLS)  # ← ❷  limitamos
-
-def weights_from_dice(dice_per_class: torch.Tensor,
-                      max_w: float = Config.MAX_W_CLS,
-                      ignore_bg: bool = True):
-    """
-    Asigna w_c = clip( (1 - dice_c), 0, max_w ), y fuerza w_0=0 si ignore_bg.
-    """
-    errs = 1.0 - dice_per_class
-    w = torch.clamp(errs, 0.0, max_w)
-    if ignore_bg:
-        w[0] = 0.0
-    return w
-
-# ──────────────────────────────────────────────────────────────────────────────
-def check_metrics(loader, model, n_classes=6, device="cuda", ignore_background=True, return_per_class=False):
-    eps = 1e-8
-    inter, union, d_num, d_den = (torch.zeros(n_classes, dtype=torch.float64, device=device)
-                                  for _ in range(4))
-    model.eval()
-    with torch.no_grad():
-        for x,y in loader:
-            x,y = x.to(device), y.to(device).long()
-            p   = torch.argmax(model(x),1)
-            for c in range(n_classes):
-                pc, tc = p==c, y==c
-                i      = (pc&tc).sum().double()
-                u      = pc.sum().double()+tc.sum().double()-i
-                if u==0:                 # ← ❺  clase ausente → ignoramos
-                    continue
-                inter[c]+=i; union[c]+=u
-                d_num[c]+=2*i; d_den[c]+=pc.sum()+tc.sum()
-    valid = slice(1,None) if ignore_background else slice(0,None)
-    iou   = (inter+eps)/(union+eps);  dice = (d_num+eps)/(d_den+eps)
-    vals_iou  = iou.cpu().numpy()
-    vals_dice = dice.cpu().numpy()
-
-    # 1) Con comprensión de listas + f-string
-    print("IoU :", [f"{v:.4f}" for v in vals_iou])
-    print("Dice:", [f"{v:.4f}" for v in vals_dice])
-    if return_per_class:
-        return iou.cpu(), dice.cpu()
-    else:
-        return iou[valid].mean(), dice[valid].mean()
-# ──────────────────────────────────────────────────────────────────────────────
-def train_one_epoch(loader, model, loss_fn, optimizer, scaler):
-    model.train()
+# =================================================================================
+# 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN
+# =================================================================================
+def train_fn(loader, model, optimizer, loss_fn, scaler):
+    """Procesa una época de entrenamiento."""
     loop = tqdm(loader, leave=True)
-    for x,y in loop:
-        x = x.to(Config.DEVICE); y = y.to(Config.DEVICE).long()
-        with autocast(enabled=Config.USE_AMP, device_type="cuda", dtype=torch.float16):
-            pred = model(x); loss = loss_fn(pred, y)
-        if not torch.isfinite(loss):             # ← ❻  early-stop batch
-            print("⚠️  pérdida no finita, se descarta el lote"); optimizer.zero_grad(); continue
+    model.train()
+
+    for batch_idx, (data, targets) in enumerate(loop):
+        data     = data.to(Config.DEVICE, non_blocking=True)
+        targets  = targets.to(Config.DEVICE, non_blocking=True).long()  # <- importante
+
+        # Forward
+        with torch.cuda.amp.autocast(): # Para entrenamiento de precisión mixta
+            predictions = model(data)
+            loss = loss_fn(predictions, targets)
+
+        # Backward
         optimizer.zero_grad()
-        if Config.USE_AMP:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), Config.CLIP_NORM)  # ← ❹
-            scaler.step(optimizer); scaler.update()
-        else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), Config.CLIP_NORM)
-            optimizer.step()
-        loop.set_postfix(loss=float(loss))
-# ──────────────────────────────────────────────────────────────────────────────
-# 5 ▸ FUNCIÓN PRINCIPAL
-# ──────────────────────────────────────────────────────────────────────────────
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        # Actualizar la barra de progreso
+        loop.set_postfix(loss=loss.item())
+
+def check_metrics(loader, model, n_classes=6, device="cuda"):
+    """
+    Devuelve mIoU macro y Dice macro.
+    Imprime IoU y Dice por clase.
+    """
+    eps = 1e-8                          # para evitar divisiones por 0
+    intersection_sum = torch.zeros(n_classes, dtype=torch.float64, device=device)
+    union_sum        = torch.zeros_like(intersection_sum)
+    dice_num_sum     = torch.zeros_like(intersection_sum)   # 2*intersección
+    dice_den_sum     = torch.zeros_like(intersection_sum)   # pred + gt
+
+    model.eval()
+
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True).long()      # (N, H, W)
+
+            logits = model(x)                               # (N, 6, H, W)
+            preds  = torch.argmax(logits, dim=1)            # (N, H, W)
+
+            for cls in range(n_classes):
+                pred_c   = (preds == cls)
+                true_c   = (y == cls)
+                inter    = (pred_c & true_c).sum().double()
+                pred_sum = pred_c.sum().double()
+                true_sum = true_c.sum().double()
+                union    = pred_sum + true_sum - inter
+
+                intersection_sum[cls] += inter
+                union_sum[cls]        += union
+                dice_num_sum[cls]     += 2 * inter
+                dice_den_sum[cls]     += pred_sum + true_sum
+
+    # IoU y Dice por clase
+    iou_per_class   = (intersection_sum + eps) / (union_sum + eps)
+    dice_per_class  = (dice_num_sum   + eps) / (dice_den_sum + eps)
+
+    # Promedios macro
+    miou_macro  = iou_per_class.mean()
+    dice_macro  = dice_per_class.mean()
+
+    print("IoU por clase :", iou_per_class.cpu().numpy())
+    print("Dice por clase:", dice_per_class.cpu().numpy())
+    print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
+
+    model.train()
+    return miou_macro, dice_macro
+
+# =================================================================================
+# 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN
+# =================================================================================
 def main():
-    print(f"🖥  Device → {Config.DEVICE}")
-    # Aumentos
-    train_tf = A.Compose([
-        A.RandomResizedCrop((Config.IMAGE_HEIGHT,Config.IMAGE_WIDTH),scale=(0.5,1),ratio=(0.75,1.33),
-                            interpolation=cv2.INTER_LINEAR,mask_interpolation=cv2.INTER_NEAREST),
-        A.RandomRotate90(),A.HorizontalFlip(),A.VerticalFlip(0.3),
-        A.ColorJitter(0.1,0.1,0.1,0.05,0.4),A.Normalize(),ToTensorV2()
+    print(f"Using device: {Config.DEVICE}")
+    
+    # --- Transformaciones y Aumento de Datos ---
+    train_transform = A.Compose([
+        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
+        A.Rotate(limit=35, p=0.7),
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.3),
+        A.Normalize(
+            mean=[0.0, 0.0, 0.0],
+            std=[1.0, 1.0, 1.0],
+            max_pixel_value=255.0,
+        ),
+        ToTensorV2(),
     ])
-    val_tf   = A.Compose([A.Resize(Config.IMAGE_HEIGHT,Config.IMAGE_WIDTH),
-                          A.Normalize(),ToTensorV2()])
 
-    # Datasets & loaders
-    tr_ds = CloudPatchDatasetBalanced(Config.TRAIN_IMG_DIR,Config.TRAIN_MASK_DIR,
-                                      patch_size=128,stride=128,min_fg_ratio=0.1,transform=train_tf)
-    boost_cfg = {2: 8, 4: 10}   # ← 5× más píxeles para las clases 2 y 4
-    tr_samp = build_boosted_sampler(tr_ds,
-                                    batch_size=Config.BATCH_SIZE,
-                                    boosts=boost_cfg,
-                                    n_classes=6,
-                                    drop_last=False)
-    tr_ld = DataLoader(tr_ds, batch_sampler=tr_samp, num_workers=Config.NUM_WORKERS,
-                       pin_memory=Config.PIN_MEMORY)
+    val_transform = A.Compose([
+        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
+        A.Normalize(
+            mean=[0.0, 0.0, 0.0],
+            std=[1.0, 1.0, 1.0],
+            max_pixel_value=255.0,
+        ),
+        ToTensorV2(),
+    ])
 
-    val_ds = CloudPatchDatasetBalanced(
-        Config.VAL_IMG_DIR, Config.VAL_MASK_DIR,
-        patch_size=128, stride=128,
-        min_fg_ratio=0,         # incluir incluso parches sin FG
-        transform=val_tf
+    # --- Creación de Datasets y DataLoaders ---
+    train_dataset = Class4PatchDataset(
+        image_dir=Config.TRAIN_IMG_DIR,
+        mask_dir=Config.TRAIN_MASK_DIR,
+        transform=train_transform,
+        margin=8,
     )
-    val_ld = DataLoader(val_ds,batch_size=Config.BATCH_SIZE,shuffle=False,
-                        num_workers=Config.NUM_WORKERS,pin_memory=Config.PIN_MEMORY)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=Config.BATCH_SIZE,
+        num_workers=Config.NUM_WORKERS,
+        pin_memory=Config.PIN_MEMORY,
+        shuffle=True,
+    )
 
-    imprimir_distribucion_clases_post_augmentation(tr_ld,6,
-        "Distribución de clases en ENTRENAMIENTO (post-aug)")
-
-    # Modelo + pérdida
+    val_dataset = CloudDataset(
+        image_dir=Config.VAL_IMG_DIR,
+        mask_dir=Config.VAL_MASK_DIR,
+        transform=val_transform
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=Config.BATCH_SIZE,
+        num_workers=Config.NUM_WORKERS,
+        pin_memory=Config.PIN_MEMORY,
+        shuffle=False
+    )
+    
+    # --- Instanciación del Modelo, Loss y Optimizador ---
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
-    w = torch.tensor(compute_class_weights(tr_ds), device=Config.DEVICE)
-    BOOST = 3.0                     # prueba con 2-4; 0 = sin cambio
-    w[4] = min(w[4] * BOOST, Config.MAX_W_CLS)
+    
+    loss_fn = nn.CrossEntropyLoss()
+    
+    # AdamW es una buena elección de optimizador por defecto.
+    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
 
-    loss_fn = AsymFocalTverskyLoss(class_weights=w,
-                                eps=Config.EPS_TVERSKY).to(Config.DEVICE)
+    # El scaler es para el entrenamiento de precisión mixta (acelera el entrenamiento en GPUs compatibles)
+    scaler = GradScaler() 
 
-    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=Config.NUM_EPOCHS)
-    scaler    = GradScaler(enabled=Config.USE_AMP)
+    best_mIoU = -1.0
 
-    best_miou = -1
+    # --- Bucle Principal de Entrenamiento ---
     for epoch in range(Config.NUM_EPOCHS):
-        print(f"\n╭─ Epoch {epoch+1}/{Config.NUM_EPOCHS} ──────────────────────────")
-        train_one_epoch(tr_ld, model, loss_fn, optimizer, scaler)
-        # obtenemos Dice por clase
-        iou_c, dice_c = check_metrics(val_ld, model,
-                                      device=Config.DEVICE,
-                                      return_per_class=True)
-        # calculamos nuevos pesos
-        new_w = weights_from_dice(dice_c, max_w=Config.MAX_W_CLS)
-        # actualizamos la función de pérdida
-        loss_fn = AsymFocalTverskyLoss(class_weights=new_w.to(Config.DEVICE),
-                                      eps=Config.EPS_TVERSKY).to(Config.DEVICE)
-        # ahora sí medimos el promedio para el criterio de early-saving
-        miou, dice = (iou_c[1:].mean(), dice_c[1:].mean())
-        scheduler.step()
-        if miou>best_miou:
-            best_miou=miou
-            torch.save({"epoch":epoch,"state_dict":model.state_dict(),
-                        "best_mIoU":best_miou}, Config.MODEL_SAVE_PATH)
-            print(f"💾  Nuevo mejor mIoU: {miou:.4f}  (modelo guardado)")
+        print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
 
-    # ─ Fin de entrenamiento → cargar mejor modelo y evaluar ─
-    if os.path.exists(Config.MODEL_SAVE_PATH):
-        ckpt=torch.load(Config.MODEL_SAVE_PATH,map_location=Config.DEVICE)
-        model.load_state_dict(ckpt["state_dict"])
-        print(f"\n🔄  Modelo recargado del epoch {ckpt['epoch']}  (mIoU={ckpt['best_mIoU']:.4f})")
-    print("\n📊  Evaluación final sobre VALIDACIÓN")
-    miou,dice = check_metrics(val_ld, model, device=Config.DEVICE)
-    print(f"Resultado final  →  mIoU={miou:.4f} | Dice={dice:.4f}")
+        # 1) Entrenamiento de una época
+        train_fn(
+            train_loader,
+            model,
+            optimizer,
+            loss_fn,
+            scaler
+        )
+
+        # 2) Evaluación en el conjunto de validación
+        current_mIoU, current_dice = check_metrics(
+            val_loader,
+            model,
+            n_classes=6,
+            device=Config.DEVICE
+        )
+
+        # 3) Guardar checkpoint si hubo mejora en mIoU
+        if current_mIoU > best_mIoU:
+            best_mIoU = current_mIoU
+            print(f"🔹 Nuevo mejor mIoU: {best_mIoU:.4f} | Dice: {current_dice:.4f}  →  guardando modelo…")
+
+            checkpoint = {
+                "epoch":     epoch,
+                "state_dict": model.state_dict(),
+                "optimizer":  optimizer.state_dict(),
+                "best_mIoU":  best_mIoU,
+            }
+            torch.save(checkpoint, Config.MODEL_SAVE_PATH)
+
+    print("\nEvaluando el modelo con mejor mIoU guardado…")
+    best_mIoU, best_dice = check_metrics(
+        val_loader,
+        model,
+        n_classes=6,
+        device=Config.DEVICE
+    )
+    print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
 
 if __name__ == "__main__":
     main()
