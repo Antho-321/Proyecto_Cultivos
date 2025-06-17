@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
 import torch.optim as optim
 from albumentations.pytorch import ToTensorV2
+import matplotlib.pyplot as plt
 from model                    import CloudDeepLabV3Plus
 from loss_function            import AsymFocalTverskyLoss
 from distribucion_por_clase   import imprimir_distribucion_clases_post_augmentation
@@ -100,6 +101,41 @@ class PixelBalancedSampler(torch.utils.data.Sampler):
 # ──────────────────────────────────────────────────────────────────────────────
 # 4 ▸ UTILIDADES
 # ──────────────────────────────────────────────────────────────────────────────
+
+def save_performance_plot(train_history, val_history, save_path):
+    """
+    Guarda un gráfico comparando el mIoU de entrenamiento y validación por época.
+
+    Args:
+        train_history (list): Lista con los valores de mIoU de entrenamiento por época.
+        val_history (list): Lista con los valores de mIoU de validación por época.
+        save_path (str): Ruta donde se guardará el gráfico en formato PNG.
+    """
+    epochs = range(1, len(train_history) + 1)
+    
+    plt.style.use('seaborn-v0_8-darkgrid') # Estilo visual atractivo
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    # Graficar ambas curvas
+    ax.plot(epochs, train_history, 'o-', color="xkcd:sky blue", label='Entrenamiento (mIoU)', markersize=4)
+    ax.plot(epochs, val_history, 'o-', color="xkcd:amber", label='Validación (mIoU)', markersize=4)
+
+    # Títulos y etiquetas
+    ax.set_title('Rendimiento del Modelo: mIoU por Época', fontsize=16, weight='bold')
+    ax.set_xlabel('Época', fontsize=12)
+    ax.set_ylabel('mIoU (Mean Intersection over Union)', fontsize=12)
+    
+    # Leyenda, cuadrícula y límites
+    ax.legend(fontsize=11, frameon=True, shadow=True)
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax.set_ylim(0, max(1.0, max(val_history)*1.1)) # Límite Y hasta 1.0 o un poco más del máximo
+    ax.set_xticks(epochs) # Asegura que se muestren todas las épocas si no son demasiadas
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150) # Guardar con buena resolución
+    plt.close(fig) # Liberar memoria
+    print(f"📈 Gráfico de rendimiento guardado en '{save_path}'")
+
 def compute_class_weights(ds, n_classes=6, method="median"):
     pix, tot = np.zeros(n_classes), np.zeros_like(np.zeros(n_classes))
     for _, m in ds:
@@ -196,36 +232,54 @@ def main():
 
     # Modelo + pérdida
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
-    w = torch.tensor(compute_class_weights(tr_ds), device=Config.DEVICE)
-    BOOST = 3.0                     # prueba con 2-4; 0 = sin cambio
+    w = torch.tensor(compute_class_weights(tr_ds), device=Config.DEVICE, dtype=torch.float32)
+    BOOST = 3.0
     w[4] = min(w[4] * BOOST, Config.MAX_W_CLS)
-
-    loss_fn = AsymFocalTverskyLoss(class_weights=w,
-                                eps=Config.EPS_TVERSKY).to(Config.DEVICE)
-
+    loss_fn = AsymFocalTverskyLoss(class_weights=w, eps=Config.EPS_TVERSKY).to(Config.DEVICE)
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=Config.NUM_EPOCHS)
-    scaler    = GradScaler(enabled=Config.USE_AMP)
+    scaler = GradScaler(enabled=Config.USE_AMP)
 
+    # <<< INICIO DE CAMBIOS >>>
     best_miou = -1
+    train_miou_history = []
+    val_miou_history = []
+
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n╭─ Epoch {epoch+1}/{Config.NUM_EPOCHS} ──────────────────────────")
         train_one_epoch(tr_ld, model, loss_fn, optimizer, scaler)
-        miou, dice = check_metrics(val_ld, model, device=Config.DEVICE)
+        
+        # Evaluar en ambos datasets (entrenamiento y validación)
+        print("\n--- Métricas de Entrenamiento ---")
+        train_miou, _ = check_metrics(tr_ld, model, device=Config.DEVICE)
+        
+        print("\n--- Métricas de Validación ---")
+        val_miou, dice = check_metrics(val_ld, model, device=Config.DEVICE)
+        
+        # Registrar historial
+        train_miou_history.append(train_miou.cpu().item())
+        val_miou_history.append(val_miou.cpu().item())
+
         scheduler.step()
-        if miou>best_miou:
-            best_miou=miou
-            torch.save({"epoch":epoch,"state_dict":model.state_dict(),
-                        "best_mIoU":best_miou}, Config.MODEL_SAVE_PATH)
-            print(f"💾  Nuevo mejor mIoU: {miou:.4f}  (modelo guardado)")
+        if val_miou > best_miou:
+            best_miou = val_miou
+            torch.save({"epoch": epoch, "state_dict": model.state_dict(),
+                        "best_mIoU": best_miou}, Config.MODEL_SAVE_PATH)
+            print(f"💾 Nuevo mejor mIoU: {val_miou:.4f} (modelo guardado)")
+    
+    # Generar y guardar el gráfico al final del entrenamiento
+    save_performance_plot(train_miou_history, val_miou_history, "rendimiento_miou.png")
+
+    # <<< FIN DE CAMBIOS >>>
 
     # ─ Fin de entrenamiento → cargar mejor modelo y evaluar ─
     if os.path.exists(Config.MODEL_SAVE_PATH):
-        ckpt=torch.load(Config.MODEL_SAVE_PATH,map_location=Config.DEVICE)
+        ckpt = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
         model.load_state_dict(ckpt["state_dict"])
-        print(f"\n🔄  Modelo recargado del epoch {ckpt['epoch']}  (mIoU={ckpt['best_mIoU']:.4f})")
-    print("\n📊  Evaluación final sobre VALIDACIÓN")
-    miou,dice = check_metrics(val_ld, model, device=Config.DEVICE)
+        print(f"\n🔄 Modelo recargado del epoch {ckpt['epoch']} (mIoU={ckpt['best_mIoU']:.4f})")
+    
+    print("\n📊 Evaluación final sobre VALIDACIÓN")
+    miou, dice = check_metrics(val_ld, model, device=Config.DEVICE)
     print(f"Resultado final  →  mIoU={miou:.4f} | Dice={dice:.4f}")
 
 if __name__ == "__main__":
