@@ -106,21 +106,30 @@ class ASPP(nn.Module):
         return self.project(res)
 
 # =================================================================================
-# 3. ### NUEVO ### BLOQUE DE DECODIFICADOR FPN
+# 3. ### RECOMENDADO ### BLOQUE DE DECODIFICADOR FPN
 # =================================================================================
 class DecoderBlock(nn.Module):
     """Bloque para decodificar y fusionar características de forma progresiva."""
     def __init__(self, in_channels_skip, in_channels_up, out_channels, use_attention=True):
         super(DecoderBlock, self).__init__()
-        # Canales de entrada = Canales del skip connection + Canales del upsampling
+        
+        total_in_channels = in_channels_skip + in_channels_up
+        
+        # --- NUEVO: Normalización post-concatenación ---
+        # Normaliza las características fusionadas antes de procesarlas.
+        # Es una buena práctica cuando se combinan skip connections de diferentes profundidades.
+        self.bn_fuse = nn.BatchNorm2d(total_in_channels)
+        
+        # Bloque convolucional para refinar las características
         self.conv_fuse = nn.Sequential(
-            nn.Conv2d(in_channels_skip + in_channels_up, out_channels, 3, padding=1, bias=False),
+            nn.Conv2d(total_in_channels, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(),
             nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU()
         )
+        
         self.use_attention = use_attention
         if use_attention:
             self.attention = AttentionModule(in_channels=in_channels_skip)
@@ -132,8 +141,12 @@ class DecoderBlock(nn.Module):
         if self.use_attention:
             x_skip = self.attention(x_skip)
         
-        x = torch.cat([x_up, x_skip], dim=1)
-        return self.conv_fuse(x)
+        x_concat = torch.cat([x_up, x_skip], dim=1)
+        
+        # --- APLICACIÓN DE LA NUEVA CAPA ---
+        x_normalized = self.bn_fuse(x_concat) 
+        
+        return self.conv_fuse(x_normalized)
 
 # =================================================================================
 # 4. ARQUITECTURA PRINCIPAL: CloudDeepLabV3+ (### MODIFICADO ###)
