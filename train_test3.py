@@ -148,23 +148,30 @@ def crop_around_class(
 class Class4PatchDataset(CloudDataset):
     def __init__(self, *args, margin=8, **kwargs):
         super().__init__(*args, **kwargs)
-        # 1) Construir lista de índices donde hist[4] > 0
-        self.class4_idxs = [
-            i for i, rec in enumerate(self.index)
-            if rec['hist'][4] > 0
-        ]
+        
+        # Inicializa self.index, aquí asumo que quieres los índices de las imágenes
+        # que contienen la clase 4 en su máscara.
+        self.index = []
+        for i, rec in enumerate(self.images):  # Suponiendo que 'images' es tu lista de imágenes
+            # Asumo que tienes alguna forma de obtener el histograma de clases o de verificar la clase
+            mask_path = self._mask_path_from_image_name(rec)
+            mask = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
+            hist = np.histogram(mask, bins=np.arange(0, 256))[0]  # Histograma de la máscara
+            if hist[4] > 0:  # Verifica si la clase 4 está presente
+                self.index.append(i)
+                
         self.margin = margin
 
     def __len__(self):
-        return len(self.class4_idxs)
+        return len(self.index)
 
     def __getitem__(self, idx):
-        orig_i = self.class4_idxs[idx]
+        orig_i = self.index[idx]  # Usamos el índice que hemos filtrado
 
         # 1) Desactivo la transform del padre
         parent_tf = self.transform
         self.transform = None
-        img, msk = super().__getitem__(orig_i)  # aquí NO transforma a tensor
+        img, msk = super().__getitem__(orig_i)  # Aquí NO transforma a tensor
         # 2) Restauro la transform
         self.transform = parent_tf
 
