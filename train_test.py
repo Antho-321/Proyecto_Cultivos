@@ -268,7 +268,7 @@ def main():
             print(f"💾 Nuevo mejor mIoU: {val_miou:.4f} (modelo guardado)")
     
     # Generar y guardar el gráfico al final del entrenamiento
-    save_performance_plot(train_miou_history, val_miou_history, "rendimiento_miou.png")
+    save_performance_plot(train_miou_history, val_miou_history, "/content/drive/MyDrive/colab/rendimiento_miou.png")
 
     # <<< FIN DE CAMBIOS >>>
 
