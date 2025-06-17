@@ -149,7 +149,8 @@ class Class4PatchDataset(CloudDataset):
     def __init__(self, *args, margin=8, **kwargs):
         super().__init__(*args, **kwargs)
         
-        # Inicializa self.index, aquí asumo que quieres los índices de las imágenes
+        self.patch_size = patch_size # <-- Guardar el valor aquí
+        self.margin = margin
         # que contienen la clase 4 en su máscara.
         self.index = []
         for i, rec in enumerate(self.images):  # Suponiendo que 'images' es tu lista de imágenes
@@ -300,6 +301,7 @@ def main():
         mask_dir=Config.TRAIN_MASK_DIR,
         transform=train_transform,
         margin=8,
+        patch_size=Config.IMAGE_HEIGHT # <-- Pasa el tamaño aquí (o IMAGE_WIDTH)
     )
     train_loader = DataLoader(
         train_dataset,
