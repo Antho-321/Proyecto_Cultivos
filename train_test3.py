@@ -14,7 +14,7 @@ import numpy as np
 import cv2
 # Importa la arquitectura del otro archivo
 from model import CloudDeepLabV3Plus 
-
+from distribucion_por_clase   import imprimir_distribucion_clases_post_augmentation
 # =================================================================================
 # 1. CONFIGURACIÓN
 # Centraliza todos los hiperparámetros y rutas aquí.
@@ -301,6 +301,9 @@ def main():
         pin_memory=Config.PIN_MEMORY,
         shuffle=True,
     )
+
+    imprimir_distribucion_clases_post_augmentation(train_loader, 6,
+        "Distribución de clases en ENTRENAMIENTO (post-aug)")
 
     val_dataset = CloudDataset(
         image_dir=Config.VAL_IMG_DIR,
