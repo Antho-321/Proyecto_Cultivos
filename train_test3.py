@@ -15,6 +15,7 @@ import cv2
 # Importa la arquitectura del otro archivo
 from model import CloudDeepLabV3Plus 
 from distribucion_por_clase   import imprimir_distribucion_clases_post_augmentation
+from loss_function            import AsymFocalTverskyLoss
 # =================================================================================
 # 1. CONFIGURACIÓN
 # Centraliza todos los hiperparámetros y rutas aquí.
@@ -332,7 +333,7 @@ def main():
     # --- Instanciación del Modelo, Loss y Optimizador ---
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = AsymFocalTverskyLoss()
     
     # AdamW es una buena elección de optimizador por defecto.
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
