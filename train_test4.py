@@ -7,6 +7,7 @@ from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
+from albumentations.augmentations.coarse import Cutout
 from albumentations.pytorch import ToTensorV2
 import os
 from PIL import Image
@@ -243,14 +244,14 @@ def main():
         A.RandomRotate90(p=0.5),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
-        A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.2, rotate_limit=15, p=0.5),
+        A.Affine(shift_limit=0.1, scale_limit=0.2, rotate_limit=15, p=0.5),
         A.RandomCrop(height=512, width=512, p=1.0),
         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
         A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=25, val_shift_limit=15, p=0.5),
         A.RandomShadow(shadow_roi=(0.0,0.5,1.0,1.0), num_shadows=2, p=0.3),
         A.GaussNoise(var_limit=(10.0,50.0), p=0.3),
         A.GaussianBlur(blur_limit=3, p=0.2),
-        A.Cutout(num_holes=8, max_h_size=32, max_w_size=32, p=0.3),
+        Cutout(num_holes=8, max_h_size=32, max_w_size=32, p=0.3),
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
 
     val_transform = A.Compose([
