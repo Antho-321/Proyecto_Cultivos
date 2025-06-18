@@ -250,7 +250,16 @@ def main():
         A.RandomShadow(shadow_roi=(0.0,0.5,1.0,1.0), num_shadows=2, p=0.3),
         A.GaussNoise(var_limit=(10.0,50.0), p=0.3),
         A.GaussianBlur(blur_limit=3, p=0.2),
-        A.Cutout(num_holes=8, max_h_size=32, max_w_size=32, p=0.3),
+        A.CoarseDropout(
+            max_holes=8, 
+            max_height=32, 
+            max_width=32, 
+            min_holes=8, # Explicitly set min to match max for old behavior
+            min_height=32,
+            min_width=32,
+            fill_value=0, # It's good practice to specify fill_value
+            p=0.3
+        ),
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
 
     val_transform = A.Compose([
