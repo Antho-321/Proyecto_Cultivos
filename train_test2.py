@@ -140,7 +140,8 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
         targets  = targets.to(Config.DEVICE, non_blocking=True).long()
 
         with torch.cuda.amp.autocast():
-            predictions = model(data)
+            # Desempaquetamos o seleccionamos la salida principal
+            predictions = model(data)[0] # <--- SOLUCIÓN: Selecciona el primer tensor
             loss = loss_fn(predictions, targets)
 
         optimizer.zero_grad()
@@ -165,7 +166,7 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()
 
-            logits = model(x)
+            logits = model(x)[0] # <--- MISMA SOLUCIÓN
             preds  = torch.argmax(logits, dim=1)
 
             for cls in range(n_classes):
