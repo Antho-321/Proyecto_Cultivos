@@ -240,10 +240,21 @@ def main():
     print(f"Using device: {Config.DEVICE}")
     
     train_transform = A.Compose([
+        # Your custom cropping already happened in the Dataset's __getitem__
+        
+        # 1. Apply geometric augmentations on the cropped, variable-sized image
         A.RandomRotate90(p=0.5),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.Affine(shift_limit=0.1, scale_limit=0.2, rotate_limit=15, p=0.5),
+        
+        # =========================================================================
+        # 2. ADD THIS LINE: Resize all augmented images to a fixed size
+        # This is the fix. It ensures every image in the batch is the same size.
+        # =========================================================================
+        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
+
+        # 3. Apply color/noise augmentations on the resized image
         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
         A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=25, val_shift_limit=15, p=0.5),
         A.RandomShadow(shadow_roi=(0.0,0.5,1.0,1.0), num_shadows=2, p=0.3),
@@ -259,15 +270,15 @@ def main():
             fill_value=0,
             p=0.3
         ),
-        # You are missing normalization and conversion to tensor for the training set.
-        # It's highly recommended to add them here.
+        
+        # 4. Normalize and convert to a tensor
         A.Normalize(
             mean=[0.0, 0.0, 0.0],
             std=[1.0, 1.0, 1.0],
             max_pixel_value=255.0,
         ),
         ToTensorV2(),
-    ]) # <--- NO bbox_params ARGUMENT
+    ])
 
     val_transform = A.Compose([
         A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH), # <-- MUY IMPORTANTE
