@@ -254,13 +254,21 @@ def main():
             max_holes=8, 
             max_height=32, 
             max_width=32, 
-            min_holes=8, # Explicitly set min to match max for old behavior
+            min_holes=8,
             min_height=32,
             min_width=32,
-            fill_value=0, # It's good practice to specify fill_value
+            fill_value=0,
             p=0.3
         ),
-    ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
+        # You are missing normalization and conversion to tensor for the training set.
+        # It's highly recommended to add them here.
+        A.Normalize(
+            mean=[0.0, 0.0, 0.0],
+            std=[1.0, 1.0, 1.0],
+            max_pixel_value=255.0,
+        ),
+        ToTensorV2(),
+    ]) # <--- NO bbox_params ARGUMENT
 
     val_transform = A.Compose([
         A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH), # <-- MUY IMPORTANTE
