@@ -244,7 +244,7 @@ def main():
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.Affine(shift_limit=0.1, scale_limit=0.2, rotate_limit=15, p=0.5),
-        A.RandomCrop(height=128, width=128, p=1.0),
+        A.RandomCrop(height=96, width=96, p=1.0),
         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
         A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=25, val_shift_limit=15, p=0.5),
         A.RandomShadow(shadow_roi=(0.0,0.5,1.0,1.0), num_shadows=2, p=0.3),
