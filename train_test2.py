@@ -141,7 +141,9 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
 
         with torch.cuda.amp.autocast():
             # Desempaquetamos o seleccionamos la salida principal
-            predictions = model(data)[0] # <--- SOLUCIÓN: Selecciona el primer tensor
+            output = model(data)
+            predictions = output[0] if isinstance(output, tuple) else output
+            loss = loss_fn(predictions, targets)
             loss = loss_fn(predictions, targets)
 
         optimizer.zero_grad()
@@ -166,7 +168,9 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()
 
-            logits = model(x)[0] # <--- MISMA SOLUCIÓN
+            output = model(x)
+            logits = output[0] if isinstance(output, tuple) else output # <-- ¡ESTA ES LA CORRECCIÓN CLAVE!
+            preds  = torch.argmax(logits, dim=1)
             preds  = torch.argmax(logits, dim=1)
 
             for cls in range(n_classes):
