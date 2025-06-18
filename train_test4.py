@@ -7,7 +7,6 @@ from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
-from albumentations.augmentations.transforms import Cutout
 from albumentations.pytorch import ToTensorV2
 import os
 from PIL import Image
@@ -251,7 +250,7 @@ def main():
         A.RandomShadow(shadow_roi=(0.0,0.5,1.0,1.0), num_shadows=2, p=0.3),
         A.GaussNoise(var_limit=(10.0,50.0), p=0.3),
         A.GaussianBlur(blur_limit=3, p=0.2),
-        Cutout(num_holes=8, max_h_size=32, max_w_size=32, p=0.3),
+        A.Cutout(num_holes=8, max_h_size=32, max_w_size=32, p=0.3),
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
 
     val_transform = A.Compose([
