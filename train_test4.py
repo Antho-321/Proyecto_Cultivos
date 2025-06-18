@@ -7,7 +7,7 @@ from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
-from albumentations.augmentations.coarse import Cutout
+from albumentations.augmentations.transforms import Cutout
 from albumentations.pytorch import ToTensorV2
 import os
 from PIL import Image
