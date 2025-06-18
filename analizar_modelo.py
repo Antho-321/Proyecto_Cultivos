@@ -115,3 +115,4 @@ if __name__ == '__main__':
         input_size=tamaño_entrada,
         num_classes=num_clases
     )
+    
