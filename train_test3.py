@@ -31,8 +31,8 @@ class Config:
     NUM_EPOCHS = 100
     NUM_WORKERS = 2
     
-    IMAGE_HEIGHT = 256
-    IMAGE_WIDTH = 256
+    IMAGE_HEIGHT = 128
+    IMAGE_WIDTH = 128
     
     PIN_MEMORY = True
     LOAD_MODEL = False
@@ -106,6 +106,8 @@ class CloudDataset(torch.utils.data.Dataset):
 
         image = np.array(Image.open(img_path).convert("RGB"))
         mask = np.array(Image.open(mask_path).convert("L"))
+
+        mask[mask >= 6] = 0
 
         # --- MODIFICACIÓN CLAVE: Aplicar recorte ANTES de las transformaciones ---
         # 1. Añadir una dimensión de canal a la máscara para que sea (H, W, 1)
