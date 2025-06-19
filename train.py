@@ -109,69 +109,65 @@ class CloudDataset(torch.utils.data.Dataset):
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
 # ... (El resto de tu código: train_fn, check_metrics)
 # =================================================================================
-def train_fn(loader, model, optimizer, loss_fn, scaler):
+def train_fn(loader, model, optimizer, loss_fn):
     """Procesa una época de entrenamiento."""
     loop = tqdm(loader, leave=True)
     model.train()
 
     for batch_idx, (data, targets) in enumerate(loop):
-        data     = data.to(Config.DEVICE, non_blocking=True)
-        targets  = targets.to(Config.DEVICE, non_blocking=True).long()
+        data = data.to(Config.DEVICE)  # Asegúrate de que la data esté en el dispositivo correcto
+        targets = targets.to(Config.DEVICE)
 
-        with torch.cuda.amp.autocast():
-            # Desempaquetamos o seleccionamos la salida principal
-            output = model(data)
-            predictions = output[0] if isinstance(output, tuple) else output
-            loss = loss_fn(predictions, targets)
+        with tf.GradientTape() as tape:
+            output = model(data, training=True)
+            predictions = output  # Asumiendo que `output` es directamente las predicciones
+            loss = loss_fn(targets, predictions)
 
-        optimizer.zero_grad()
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        gradients = tape.gradient(loss, model.trainable_variables)
+        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
-        loop.set_postfix(loss=loss.item())
+        loop.set_postfix(loss=loss.numpy())
 
 def check_metrics(loader, model, n_classes=6, device="cuda"):
     """Devuelve mIoU macro y Dice macro."""
     eps = 1e-8
-    intersection_sum = torch.zeros(n_classes, dtype=torch.float64, device=device)
-    union_sum        = torch.zeros_like(intersection_sum)
-    dice_num_sum     = torch.zeros_like(intersection_sum)
-    dice_den_sum     = torch.zeros_like(intersection_sum)
+    intersection_sum = tf.zeros(n_classes, dtype=tf.float64)
+    union_sum = tf.zeros_like(intersection_sum)
+    dice_num_sum = tf.zeros_like(intersection_sum)
+    dice_den_sum = tf.zeros_like(intersection_sum)
 
     model.eval()
 
-    with torch.no_grad():
-        for x, y in loader:
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True).long()
+    for x, y in loader:
+        x = x.to(device)
+        y = y.to(device)
 
-            output = model(x)
-            logits = output[0] if isinstance(output, tuple) else output # <-- ¡ESTA ES LA CORRECCIÓN CLAVE!
-            preds  = torch.argmax(logits, dim=1)
+        output = model(x)
+        logits = output
+        preds = tf.argmax(logits, axis=1)
 
-            for cls in range(n_classes):
-                pred_c   = (preds == cls)
-                true_c   = (y == cls)
-                inter    = (pred_c & true_c).sum().double()
-                pred_sum = pred_c.sum().double()
-                true_sum = true_c.sum().double()
-                union    = pred_sum + true_sum - inter
+        for cls in range(n_classes):
+            pred_c = tf.equal(preds, cls)
+            true_c = tf.equal(y, cls)
+            inter = tf.reduce_sum(tf.cast(pred_c & true_c, tf.float64))
+            pred_sum = tf.reduce_sum(tf.cast(pred_c, tf.float64))
+            true_sum = tf.reduce_sum(tf.cast(true_c, tf.float64))
+            union = pred_sum + true_sum - inter
 
-                intersection_sum[cls] += inter
-                union_sum[cls]        += union
-                dice_num_sum[cls]     += 2 * inter
-                dice_den_sum[cls]     += pred_sum + true_sum
+            intersection_sum[cls] += inter
+            union_sum[cls] += union
+            dice_num_sum[cls] += 2 * inter
+            dice_den_sum[cls] += pred_sum + true_sum
 
-    iou_per_class  = (intersection_sum + eps) / (union_sum + eps)
-    dice_per_class = (dice_num_sum   + eps) / (dice_den_sum + eps)
+    iou_per_class = (intersection_sum + eps) / (union_sum + eps)
+    dice_per_class = (dice_num_sum + eps) / (dice_den_sum + eps)
 
-    miou_macro = iou_per_class.mean()
-    dice_macro = dice_per_class.mean()
+    miou_macro = tf.reduce_mean(iou_per_class)
+    dice_macro = tf.reduce_mean(dice_per_class)
 
-    print("IoU por clase :", iou_per_class.cpu().numpy())
-    print("Dice por clase:", dice_per_class.cpu().numpy())
-    print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
+    print("IoU por clase :", iou_per_class.numpy())
+    print("Dice por clase:", dice_per_class.numpy())
+    print(f"mIoU macro = {miou_macro.numpy():.4f} | Dice macro = {dice_macro.numpy():.4f}")
 
     model.train()
     return miou_macro, dice_macro
