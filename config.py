@@ -14,8 +14,8 @@ class Config:
     NUM_EPOCHS = 200
     NUM_WORKERS = 2
     
-    IMAGE_HEIGHT = 256
-    IMAGE_WIDTH = 256
+    IMAGE_HEIGHT = 224
+    IMAGE_WIDTH = 224
     INPUT_SHAPE = (IMAGE_HEIGHT, IMAGE_WIDTH, 3)
     
     PIN_MEMORY = True

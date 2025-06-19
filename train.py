@@ -266,7 +266,7 @@ def main():
 
     model = create_functional_pdf_replica(input_shape=Config.INPUT_SHAPE)
     loss_fn = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
+    optimizer = tf.keras.optimizers.AdamW(learning_rate=Config.LEARNING_RATE)
     scaler = GradScaler() 
     best_mIoU = -1.0
 
