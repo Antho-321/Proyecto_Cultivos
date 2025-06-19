@@ -1,59 +1,61 @@
 import tensorflow as tf
 import tensorflow_hub as hub
-from tensorflow.keras.layers import Input, Lambda
+from tensorflow.keras.layers import Input
 from tensorflow.keras.models import Model
 import traceback
 
 def create_unet_with_efficientnetv2_encoder(input_shape=(224, 224, 3)):
     """
     Crea un modelo de codificador multi-salida utilizando EfficientNetV2-B0
-    pre-entrenado con ImageNet-21k desde TensorFlow Hub.
-
-    Esta versión utiliza hub.load() y carga el grafo 'serve' por defecto.
+    cargado como una capa de Keras para permitir el acceso a las capas intermedias.
     """
-    # 1. DEFINE LA URL DEL MODELO Y CÁRGALO USANDO hub.load()
-    TFHUB_URL = "https://tfhub.dev/google/imagenet/efficientnet_v2_imagenet21k_b0/classification/2"
-    
-    # --- ESTA ES LA LÍNEA CORREGIDA ---
-    # Omitimos el argumento 'tags' para cargar el único grafo disponible ('serve').
-    loaded_model = hub.load(TFHUB_URL)
+    TFHUB_URL = "https://tfhub.dev/google/efficientnetv2-b0/feature-vector/2" # Usamos el feature-vector para más flexibilidad
 
-    # 2. CONSTRUYE UN MODELO KERAS ALREDEDOR DEL MODELO CARGADO
+    # 1. DEFINE LA ENTRADA
     encoder_input = Input(shape=input_shape, name='encoder_input')
+
+    # --- ESTA ES LA PARTE CORREGIDA ---
+    # 2. CARGA EL MODELO USANDO hub.KerasLayer
+    # Esto integra el modelo del Hub como una capa nativa de Keras,
+    # permitiendo el acceso a su estructura interna.
+    # Lo ponemos como entrenable para permitir el fine-tuning.
+    hub_layer = hub.KerasLayer(TFHUB_URL, trainable=True, name='efficientnetv2_basemodel')
     
-    # Envolvemos el modelo cargado en una capa Lambda.
-    # El grafo 'serve' ya espera estar en modo inferencia, así que no es necesario pasar training=False
-    model_output = Lambda(lambda x: loaded_model(x), name='efficientnetv2_lambda')(encoder_input)
+    # El modelo del Hub se llama directamente sobre la entrada
+    model_output = hub_layer(encoder_input)
 
-    # Creamos un modelo Keras temporal para poder inspeccionar las capas.
+    # 3. CONSTRUYE EL MODELO BASE PARA PODER INSPECCIONAR LAS CAPAS
+    # Ahora 'base_model' contiene todas las capas internas de EfficientNetV2
     base_model = Model(inputs=encoder_input, outputs=model_output)
+    
+    # DESCOMENTA LA SIGUIENTE LÍNEA SI QUIERES VER TODAS LAS CAPAS DISPONIBLES
+    # print([layer.name for layer in base_model.layers[-1].layers])
 
-    # 3. IDENTIFICA Y OBTÉN LAS SALIDAS PARA LAS SKIP CONNECTIONS
+    # 4. IDENTIFICA Y OBTÉN LAS SALIDAS PARA LAS SKIP CONNECTIONS
+    # Los nombres de las capas están anidados dentro de la KerasLayer
     skip_connection_names = [
-        'block1b_add',
-        'block2d_add',
-        'block4e_add',
-        'block6h_add',
+        'block1b_add', # -> Después del bloque 1
+        'block2d_add', # -> Después del bloque 2
+        'block4e_add', # -> Después del bloque 4
+        'block6h_add', # -> Después del bloque 6
     ]
+    # La salida final del encoder antes de la cabeza de clasificación original
     encoder_output_layer_name = 'block7b_add'
 
-    skip_outputs = [base_model.get_layer(name).output for name in skip_connection_names]
-    encoder_output = base_model.get_layer(encoder_output_layer_name).output
+    # Obtenemos las capas desde el objeto 'hub_layer' anidado
+    skip_outputs = [base_model.get_layer('efficientnetv2_basemodel').get_layer(name).output for name in skip_connection_names]
+    encoder_output = base_model.get_layer('efficientnetv2_basemodel').get_layer(encoder_output_layer_name).output
     
-    # 4. CREA EL MODELO CODIFICADOR FINAL
+    # 5. CREA EL MODELO CODIFICADOR FINAL
     encoder = Model(inputs=encoder_input,
-                      outputs=[encoder_output] + skip_outputs,
-                      name='efficientnetv2_unet_encoder')
-
-    # El modelo EfficientNetV2 original tiene trainable=True por defecto. 
-    # Para hacer fine-tuning, lo mantenemos así. Si quisieras congelar el encoder, harías:
-    # encoder.trainable = False
+                    outputs=[encoder_output] + skip_outputs,
+                    name='efficientnetv2_unet_encoder')
     
     return encoder
 
 # El resto de tu script para probar el modelo...
 if __name__ == '__main__':
-    print("Creando el modelo U-Net con EfficientNetV2-B0 (pesos 'imagenet21k') como codificador...")
+    print("Creando el modelo U-Net con EfficientNetV2-B0 como codificador...")
     try:
         model = create_unet_with_efficientnetv2_encoder()
         print("\n¡Modelo creado exitosamente!")
