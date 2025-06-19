@@ -110,24 +110,28 @@ class CloudDataset(torch.utils.data.Dataset):
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
 # ... (El resto de tu código: train_fn, check_metrics)
 # =================================================================================
-def train_fn(loader, model, optimizer, loss_fn):
+def train_fn(loader, model, optimizer, loss_fn, scaler):
     """Procesa una época de entrenamiento."""
     loop = tqdm(loader, leave=True)
     model.train()
 
     for batch_idx, (data, targets) in enumerate(loop):
-        data = data.to(Config.DEVICE)  # Asegúrate de que la data esté en el dispositivo correcto
-        targets = targets.to(Config.DEVICE)
+        data     = data.to(Config.DEVICE, non_blocking=True)
+        targets  = targets.to(Config.DEVICE, non_blocking=True).long()
 
-        with tf.GradientTape() as tape:
-            output = model(data, training=True)
-            predictions = output  # Asumiendo que `output` es directamente las predicciones
-            loss = loss_fn(targets, predictions)
+        with torch.cuda.amp.autocast():
+            # Desempaquetamos o seleccionamos la salida principal
+            output = model(data)
+            predictions = output[0] if isinstance(output, tuple) else output
+            loss = loss_fn(predictions, targets)
+            loss = loss_fn(predictions, targets)
 
-        gradients = tape.gradient(loss, model.trainable_variables)
-        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+        optimizer.zero_grad()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
-        loop.set_postfix(loss=loss.numpy())
+        loop.set_postfix(loss=loss.item())
 
 def check_metrics(loader, model, n_classes=6, device="cuda"):
     """Devuelve mIoU macro y Dice macro."""
