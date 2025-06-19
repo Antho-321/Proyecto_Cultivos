@@ -2,6 +2,7 @@ import tensorflow as tf
 import tensorflow_hub as hub
 from tensorflow.keras.layers import Input
 from tensorflow.keras.models import Model
+import traceback
 
 def create_unet_with_efficientnetv2_encoder(input_shape=(224, 224, 3)):
     """
