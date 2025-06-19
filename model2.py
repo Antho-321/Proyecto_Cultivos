@@ -1,115 +1,104 @@
 import tensorflow as tf
-import tensorflow_hub as hub
-from tensorflow.keras.layers import Input
+from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Conv2DTranspose
+from tensorflow.keras.layers import BatchNormalization, Activation, Concatenate
 from tensorflow.keras.models import Model
-import traceback
 
-def create_unet_with_efficientnetv2_encoder(input_shape=(224, 224, 3)):
+def create_proposed_model(input_shape=(224, 224, 3)):
     """
-    Crea un modelo de codificador multi-salida utilizando EfficientNetV2-B0
-    cargado como una capa de Keras para permitir el acceso a las capas intermedias.
+    Crea el modelo de arquitectura propuesto (Unet con EfficientNet-B0 como codificador).
+
+    Esta función se basa en la descripción detallada proporcionada en el documento PDF,
+    incluyendo la capa de tallo (Stem), los bloques del codificador, los bloques de muestreo
+    ascendente del decodificador y la capa de salida.
+
+    Args:
+        input_shape (tuple): Las dimensiones de la imagen de entrada.
+
+    Returns:
+        tf.keras.Model: El modelo Keras compilado de la arquitectura propuesta.
     """
-    TFHUB_URL = "https://tfhub.dev/google/efficientnetv2-b0/feature-vector/2" # Usamos el feature-vector para más flexibilidad
+    # Capa de Entrada: Recibe una imagen RGB de 224x224 
+    inputs = Input(shape=input_shape)
 
-    # 1. DEFINE LA ENTRADA
-    encoder_input = Input(shape=input_shape, name='encoder_input')
+    # --- Capa de Tallo (Stem Layer) ---
+    # Aplica una convolución 3x3 con stride de 2, seguida de Batch Norm y activación swish 
+    stem = Conv2D(32, (3, 3), strides=2, padding='same', name='stem_conv')(inputs)
+    stem = BatchNormalization(name='stem_bn')(stem)
+    stem = Activation('swish', name='stem_activation')(stem)
+    # Aplica max pooling de 2x2 para reducir dimensiones espaciales 
+    stem = MaxPooling2D((2, 2), name='stem_pool')(stem)
 
-    # --- ESTA ES LA PARTE CORREGIDA ---
-    # 2. CARGA EL MODELO USANDO hub.KerasLayer
-    # Esto integra el modelo del Hub como una capa nativa de Keras,
-    # permitiendo el acceso a su estructura interna.
-    # Lo ponemos como entrenable para permitir el fine-tuning.
-    hub_layer = hub.KerasLayer(TFHUB_URL, trainable=True, name='efficientnetv2_basemodel')
+    # --- CODIFICADOR (ENCODER) ---
+    # Se utiliza EfficientNet-B0 como el codificador para extraer características 
+    # Se carga sin la capa de clasificación (include_top=False)
+    encoder = tf.keras.applications.EfficientNetB0(
+        include_top=False,
+        weights='imagenet', # Se usan pesos pre-entrenados como punto de partida estándar
+        input_tensor=stem
+    )
+
+    # Se identifican las salidas de los bloques del codificador para las conexiones de salto (skip connections) 
+    # Estos nombres de capa son estándar en la implementación Keras de EfficientNet
+    skip_connection_names = [
+        'block2a_expand_activation',  # Después del Bloque 2
+        'block3a_expand_activation',  # Después del Bloque 3
+        'block4a_expand_activation',  # Después del Bloque 4
+        'block5a_expand_activation',  # Después del Bloque 5 (último antes de la salida del codificador)
+    ]
+    encoder_outputs = [encoder.get_layer(name).output for name in skip_connection_names]
     
-    # El modelo del Hub se llama directamente sobre la entrada
-    # Para acceder a las capas internas, necesitamos construir un modelo temporal
-    # que envuelva la KerasLayer.
-    pre_model = tf.keras.Model(encoder_input, hub_layer(encoder_input, training=False))
+    # La salida final del codificador es la salida del último bloque
+    encoder_output = encoder.output
 
-    # 3. IDENTIFICA Y OBTÉN LAS SALIDAS PARA LAS SKIP CONNECTIONS
-    # Los nombres de las capas están anidados dentro de la KerasLayer
-    try:
-        # Accede al modelo concreto cargado por KerasLayer.
-        # En TensorFlow > 2.5, se puede acceder a través de `_func` o un método similar.
-        # Este es el punto más frágil, ya que depende de la implementación interna de KerasLayer.
-        # Una forma más robusta es construir el modelo y luego buscar las capas.
-        internal_model = hub_layer.resolved_object
+    # --- DECODIFICADOR (DECODER) ---
+    # Utiliza bloques de muestreo ascendente para reconstruir el mapa de segmentación 
     
-        skip_connection_names = [
-            'block1b_add', # -> Después del bloque 1
-            'block2d_add', # -> Después del bloque 2
-            'block4e_add', # -> Después del bloque 4
-            'block6h_add', # -> Después del bloque 6
-        ]
-        encoder_output_layer_name = 'block7b_add'
+    # Bloque de muestreo ascendente 1
+    # Convolución transpuesta 2x2 para upsampling 
+    up1 = Conv2DTranspose(512, (2, 2), strides=2, padding='same')(encoder_output)
+    # Concatenación con la salida del bloque 5 del codificador (skip connection) 
+    up1 = Concatenate()([up1, encoder_outputs[3]])
+    # Convolución 3x3, Batch Norm y activación ReLU 
+    up1 = Conv2D(512, (3, 3), padding='same', activation='relu')(up1)
+    up1 = BatchNormalization()(up1)
 
-        skip_outputs = [internal_model.get_layer(name).output for name in skip_connection_names]
-        encoder_output = internal_model.get_layer(encoder_output_layer_name).output
 
-        # Reconstruimos el modelo final con las salidas correctas
-        outputs = [encoder_output] + skip_outputs
-        
-        # Creamos un nuevo modelo que sí tiene múltiples salidas
-        encoder = Model(inputs=encoder_input, outputs=outputs, name='efficientnetv2_unet_encoder')
+    # Bloque de muestreo ascendente 2
+    up2 = Conv2DTranspose(256, (2, 2), strides=2, padding='same')(up1)
+    # Concatenación con la salida del bloque 4 del codificador 
+    up2 = Concatenate()([up2, encoder_outputs[2]])
+    up2 = Conv2D(256, (3, 3), padding='same', activation='relu')(up2)
+    up2 = BatchNormalization()(up2)
 
-    except AttributeError:
-        # Fallback para cuando `resolved_object` no está disponible o la estructura es diferente.
-        # Este es un enfoque más general: construir el modelo y luego buscar las capas.
-        print("Advertencia: No se pudo acceder directamente a `resolved_object`. Usando un método alternativo para obtener las capas.")
-        
-        # Creamos un modelo completo para poder buscar las capas por su nombre
-        # El truco es que KerasLayer anida el modelo. El nombre de la capa KerasLayer es 'efficientnetv2_basemodel'
-        # Y las capas de adentro tienen ese prefijo.
-        full_model = Model(inputs=encoder_input, outputs=hub_layer(encoder_input))
-        
-        skip_connection_names = [
-            'block1b_add', 'block2d_add', 'block4e_add', 'block6h_add'
-        ]
-        encoder_output_layer_name = 'block7b_add'
-        
-        # Para obtener la capa interna, necesitas referenciar el modelo que contiene la KerasLayer
-        try:
-            skip_outputs = [full_model.get_layer('efficientnetv2_basemodel').get_layer(name).output for name in skip_connection_names]
-            encoder_output = full_model.get_layer('efficientnetv2_basemodel').get_layer(encoder_output_layer_name).output
-        except ValueError as e:
-            print(f"Error al obtener las capas: {e}")
-            print("Nombres de capas disponibles dentro de 'efficientnetv2_basemodel':")
-            # Lista todas las capas para facilitar la depuración
-            for layer in full_model.get_layer('efficientnetv2_basemodel').layers:
-                print(layer.name)
-            raise e # relanza la excepción después de imprimir la ayuda
+    # Bloque de muestreo ascendente 3
+    up3 = Conv2DTranspose(128, (2, 2), strides=2, padding='same')(up2)
+    # Concatenación con la salida del bloque 3 del codificador 
+    up3 = Concatenate()([up3, encoder_outputs[1]])
+    up3 = Conv2D(128, (3, 3), padding='same', activation='relu')(up3)
+    up3 = BatchNormalization()(up3)
 
-        encoder = Model(inputs=encoder_input,
-                        outputs=[encoder_output] + skip_outputs,
-                        name='efficientnetv2_unet_encoder')
+    # Bloque de muestreo ascendente 4
+    up4 = Conv2DTranspose(64, (2, 2), strides=2, padding='same')(up3)
+    # Concatenación con la salida del bloque 2 del codificador 
+    up4 = Concatenate()([up4, encoder_outputs[0]])
+    up4 = Conv2D(64, (3, 3), padding='same', activation='relu')(up4)
+    up4 = BatchNormalization()(up4)
 
-    return encoder
+    # --- CAPA DE SALIDA ---
+    # Aplica una convolución 1x1 para reducir canales al número de clases 
+    # Aplica una activación sigmoide para segmentación binaria 
+    # La salida es una imagen segmentada de 224x224x1 
+    outputs = Conv2D(1, (1, 1), padding='same', activation='sigmoid', name='final_output')(up4)
 
-# El resto de tu script para probar el modelo...
+    # Creación del modelo final
+    model = Model(inputs=inputs, outputs=outputs, name='Unet_EfficientNetB0')
+
+    return model
+
 if __name__ == '__main__':
-    print("Creando el modelo U-Net con EfficientNetV2-B0 como codificador...")
-    try:
-        model = create_unet_with_efficientnetv2_encoder()
-        print("\n¡Modelo creado exitosamente!")
-        print("\nResumen de la Arquitectura del Modelo:")
-        model.summary(line_length=120)
-
-    except Exception as e:
-        # --- BLOQUE DE EXCEPCIÓN MEJORADO ---
-        
-        # 1. Captura el traceback completo como una cadena de texto para un control total
-        traceback_str = traceback.format_exc()
-
-        print(f"\n--- ERROR DETALLADO AL CREAR EL MODELO ---")
-        print(f"Tipo de Excepción: {type(e).__name__}")
-        print(f"Mensaje de Error: {e}")
-        
-        # 2. Imprime los argumentos de la excepción, que pueden contener más detalles
-        print(f"Argumentos de la Excepción: {e.args}")
-        
-        print("\nA continuación se muestra el 'traceback' completo del error para facilitar la depuración:")
-        print("vvv-------------------------------------------------------------------vvv")
-        # 3. Imprime la cadena del traceback que capturamos
-        print(traceback_str)
-        print("^^^-------------------------------------------------------------------^^^")
-        print("\nCONSEJO: Revisa las últimas líneas del traceback para identificar la línea exacta del código que causó el problema.")
+    # Crear una instancia del modelo
+    proposed_model = create_proposed_model()
+    
+    # Imprimir el resumen de la arquitectura para verificar su estructura
+    print("Resumen de la Arquitectura del Modelo Propuesto:")
+    proposed_model.summary()
