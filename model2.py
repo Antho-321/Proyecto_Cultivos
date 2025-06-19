@@ -52,7 +52,8 @@ def create_functional_pdf_replica(input_shape=(224, 224, 3)):
 
     # Bloque de muestreo ascendente 2
     up2 = Conv2DTranspose(256, (2, 2), strides=(2, 2), padding='same')(up1)
-    up2 = Concatenate()([up2, encoder_outputs[3]])
+    up2_resized = Conv2DTranspose(80, (2, 2), strides=(2, 2), padding='same')(encoder_outputs[3])  # Resize here
+    up2 = Concatenate()([up2, up2_resized])  # Concatenate resized encoder output
     up2 = Conv2D(256, (3, 3), padding='same', activation='relu')(up2)
     up2 = BatchNormalization()(up2)
 
