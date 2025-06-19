@@ -27,21 +27,24 @@ class ChannelAttention(nn.Module):
         return self.sigmoid(out)
 
 class SpatialAttention(nn.Module):
-    """
-    Módulo de Atención Espacial para enfocar dónde están las características importantes.
-    (### MODIFICADO ###) Kernel reducido para un enfoque más localizado en áreas pequeñas.
-    """
-    def __init__(self, kernel_size=3): # ### MODIFICADO ### Kernel size de 7 a 3
+    def __init__(self, kernel_size=7):  # Revert to 7 for better context
         super(SpatialAttention, self).__init__()
-        assert kernel_size in (3, 5, 7), 'Kernel size must be 3, 5, or 7'
         padding = kernel_size // 2
         self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
         self.sigmoid = nn.Sigmoid()
+        
+        # Add learnable weighting
+        self.channel_weight = nn.Parameter(torch.ones(2))
 
     def forward(self, x):
         avg_out = torch.mean(x, dim=1, keepdim=True)
         max_out, _ = torch.max(x, dim=1, keepdim=True)
-        x = torch.cat([avg_out, max_out], dim=1)
+        
+        # Weighted combination
+        weighted_avg = avg_out * self.channel_weight[0]
+        weighted_max = max_out * self.channel_weight[1]
+        
+        x = torch.cat([weighted_avg, weighted_max], dim=1)
         x = self.conv1(x)
         return self.sigmoid(x)
 
@@ -114,50 +117,51 @@ class ASPP(nn.Module):
 # 3. BLOQUE DE DECODIFICADOR FPN (### MODIFICADO ###)
 # =================================================================================
 class DecoderBlock(nn.Module):
-    """
-    Bloque decodificador mejorado.
-    (### MODIFICADO ###) Usa ConvTranspose2d para un upsampling aprendible y más nítido.
-    """
     def __init__(self, in_channels_skip, in_channels_up, out_channels, use_attention=True):
         super(DecoderBlock, self).__init__()
-
-        # --- NUEVO: Capa de upsampling aprendible ---
-        # Reemplaza F.interpolate con una convolución transpuesta para aprender
-        # a reconstruir detalles finos de manera más efectiva.
+        
         self.upsample = nn.ConvTranspose2d(
             in_channels_up, in_channels_up, kernel_size=2, stride=2
         )
+        
+        # Channel alignment for residual connection
+        self.align_channels = nn.Conv2d(in_channels_skip, out_channels, 1, bias=False) if in_channels_skip != out_channels else nn.Identity()
         
         total_in_channels = in_channels_skip + in_channels_up
         
         self.use_attention = use_attention
         if use_attention:
-            # ### RECOMENDACIÓN ### kernel_size=3 para enfoque en detalles pequeños
-            self.attention = AttentionModule(in_channels=in_channels_skip, kernel_size=3)
+            self.attention = AttentionModule(in_channels=in_channels_skip, kernel_size=7)
 
-        # Bloque convolucional para refinar las características fusionadas
         self.conv_fuse = nn.Sequential(
             nn.Conv2d(total_in_channels, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(),
             nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU()
         )
+        self.final_relu = nn.ReLU()
 
     def forward(self, x_skip, x_up):
-        # x_up es la característica de la capa anterior, x_skip es del backbone
         x_up = self.upsample(x_up)
         
         if self.use_attention:
-            x_skip = self.attention(x_skip)
+            x_skip_att = self.attention(x_skip)
+        else:
+            x_skip_att = x_skip
         
-        x_concat = torch.cat([x_up, x_skip], dim=1)
-        return self.conv_fuse(x_concat)
-
+        x_concat = torch.cat([x_up, x_skip_att], dim=1)
+        x_fused = self.conv_fuse(x_concat)
+        
+        # Residual connection
+        x_residual = self.align_channels(x_skip)
+        if x_residual.shape[-2:] != x_fused.shape[-2:]:
+            x_residual = F.interpolate(x_residual, size=x_fused.shape[-2:], mode='bilinear', align_corners=False)
+        
+        return self.final_relu(x_fused + x_residual)
 
 # =================================================================================
-# 4. ARQUITECTURA PRINCIPAL: CloudDeepLabV3+ (### MODIFICADO ###)
+# 4. ARQUITECTURA PRINCIPAL: CloudDeepLabV3+ (### IMPLEMENTACIÓN APLICADA ###)
 # =================================================================================
 class CloudDeepLabV3Plus(nn.Module):
     def __init__(self, num_classes=1):
@@ -165,12 +169,15 @@ class CloudDeepLabV3Plus(nn.Module):
         (### MODIFICADO ###) 
         1. Se han ajustado las tasas de dilatación de ASPP para capturar mejor los detalles pequeños.
         2. Se ha añadido un cabezal de segmentación más robusto para refinar la salida final.
+        3. Se han añadido cabezales auxiliares para supervisión profunda (deep supervision).
         """
         # ### MODIFICADO ### Tasas de dilatación más pequeñas para detalles finos.
-        atrous_rates=(6, 12, 18)
+        atrous_rates=(2, 6, 12)  # Better balance
         
         super(CloudDeepLabV3Plus, self).__init__()
         
+        self.training = True # Se establece a True por defecto, se puede cambiar con model.eval()
+
         # --- Backbone: EfficientNetV2-S ---
         self.backbone = timm.create_model(
             'tf_efficientnetv2_s.in21k',
@@ -213,7 +220,11 @@ class CloudDeepLabV3Plus(nn.Module):
             nn.ReLU(),
             nn.Conv2d(32, num_classes, kernel_size=1)
         )
-        
+
+        # --- (### NUEVO ###) Cabezales auxiliares para supervisión profunda ---
+        self.aux_head_3 = nn.Conv2d(decoder_out_channels[0], num_classes, 1)
+        self.aux_head_2 = nn.Conv2d(decoder_out_channels[1], num_classes, 1)
+
         # --- Upsampling Final ---
         self.final_upsample = nn.UpsamplingBilinear2d(scale_factor=2)
 
@@ -230,10 +241,19 @@ class CloudDeepLabV3Plus(nn.Module):
         decoder_out2 = self.decoder_block2(x_skip=features[1], x_up=decoder_out3)
         decoder_out1 = self.decoder_block1(x_skip=features[0], x_up=decoder_out2)
         
-        # 4. (### MODIFICADO ###) Generar el mapa de segmentación con el cabezal mejorado
+        # 4. Generar el mapa de segmentación con el cabezal principal
         logits = self.segmentation_head(decoder_out1)
         
         # 5. Sobredimensionar a tamaño de entrada original
-        final_logits_upsampled = self.final_upsample(logits)
+        final_logits = self.final_upsample(logits)
         
-        return final_logits_upsampled
+        # --- (### NUEVO ###) Lógica para la supervisión profunda ---
+        if self.training:
+            # Salidas auxiliares para supervisión profunda
+            aux3 = F.interpolate(self.aux_head_3(decoder_out3),
+                                 size=x.shape[-2:], mode='bilinear', align_corners=False)
+            aux2 = F.interpolate(self.aux_head_2(decoder_out2),
+                                 size=x.shape[-2:], mode='bilinear', align_corners=False)
+            return final_logits, aux3, aux2
+        
+        return final_logits

@@ -9,7 +9,7 @@ import timm
 # =================================================================================
 # Esta línea asume que la clase CloudDeepLabV3Plus está definida en model.py
 try:
-    from model import CloudDeepLabV3Plus
+    from model2 import CloudDeepLabV3Plus
 except ImportError:
     print("Error: No se pudo importar 'CloudDeepLabV3Plus' desde 'model.py'.")
     print("Asegúrate de que 'model.py' esté en la misma carpeta y no tenga errores de sintaxis.")
@@ -99,7 +99,7 @@ def mostrar_resumen_modelo(weights_path, input_size=(3, 512, 512), num_classes=1
 if __name__ == '__main__':
     # --- PARÁMETROS ---
     # Ruta al archivo que contiene los pesos del modelo
-    ruta_pesos = 'checkpoints/0.8143miou.tar'
+    ruta_pesos = 'checkpoints/0.8354miou.pth.tar'
 
     # Tamaño de la imagen de entrada (canales, altura, ancho)
     # Asegúrate de que coincida con cómo entrenaste el modelo
