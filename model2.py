@@ -71,7 +71,7 @@ def create_unet_with_efficientnetv2_encoder(input_shape=(224, 224, 3)):
 if __name__ == '__main__':
     print("Creando el modelo U-Net con EfficientNetV2-B0 (pesos 'imagenet21k') como codificador...")
     try:
-        model = create_unet_with_imagenet21k()
+        model = create_unet_with_efficientnetv2_encoder()
         print("\n¡Modelo creado exitosamente!")
         print("\nResumen de la Arquitectura del Modelo:")
         # El summary es muy largo, así que lo imprimimos con un límite de líneas
