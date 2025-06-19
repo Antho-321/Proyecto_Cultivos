@@ -12,31 +12,10 @@ import os
 from PIL import Image
 import numpy as np
 # Importa la arquitectura del otro archivo
-from model2 import CloudDeepLabV3Plus
+from model import create_functional_pdf_replica
 import matplotlib.pyplot as plt
 from distribucion_por_clase   import imprimir_distribucion_clases_post_augmentation
-# =================================================================================
-# 1. CONFIGURACIÓN
-# =================================================================================
-class Config:
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    TRAIN_IMG_DIR = "Balanced/train/images"
-    TRAIN_MASK_DIR = "Balanced/train/masks"
-    VAL_IMG_DIR = "Balanced/val/images"
-    VAL_MASK_DIR = "Balanced/val/masks"
-    
-    LEARNING_RATE = 1e-4
-    BATCH_SIZE = 8
-    NUM_EPOCHS = 200
-    NUM_WORKERS = 2
-    
-    IMAGE_HEIGHT = 256
-    IMAGE_WIDTH = 256
-    
-    PIN_MEMORY = True
-    LOAD_MODEL = False
-    MODEL_SAVE_PATH = "/content/drive/MyDrive/colab/best_model.pth.tar"
+from config import Config
 
 # =================================================================================
 # FUNCIÓN DE RECORTE (AÑADIDA)
@@ -144,7 +123,6 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
             output = model(data)
             predictions = output[0] if isinstance(output, tuple) else output
             loss = loss_fn(predictions, targets)
-            loss = loss_fn(predictions, targets)
 
         optimizer.zero_grad()
         scaler.scale(loss).backward()
@@ -170,7 +148,6 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 
             output = model(x)
             logits = output[0] if isinstance(output, tuple) else output # <-- ¡ESTA ES LA CORRECCIÓN CLAVE!
-            preds  = torch.argmax(logits, dim=1)
             preds  = torch.argmax(logits, dim=1)
 
             for cls in range(n_classes):
@@ -240,38 +217,10 @@ def main():
     print(f"Using device: {Config.DEVICE}")
     
     train_transform = A.Compose([
-        # Your custom cropping already happened in the Dataset's __getitem__
-        
-        # 1. Apply geometric augmentations on the cropped, variable-sized image
-        A.RandomRotate90(p=0.5),
+        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH), # <-- MUY IMPORTANTE
+        A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.5),
-        A.Affine(shift_limit=0.1, scale_limit=0.2, rotate_limit=15, p=0.5),
-        
-        # =========================================================================
-        # 2. ADD THIS LINE: Resize all augmented images to a fixed size
-        # This is the fix. It ensures every image in the batch is the same size.
-        # =========================================================================
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
-
-        # 3. Apply color/noise augmentations on the resized image
-        A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-        A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=25, val_shift_limit=15, p=0.5),
-        A.RandomShadow(shadow_roi=(0.0,0.5,1.0,1.0), num_shadows=2, p=0.3),
-        A.GaussNoise(var_limit=(10.0,50.0), p=0.3),
-        A.GaussianBlur(blur_limit=3, p=0.2),
-        A.CoarseDropout(
-            max_holes=8, 
-            max_height=32, 
-            max_width=32, 
-            min_holes=8,
-            min_height=32,
-            min_width=32,
-            fill_value=0,
-            p=0.3
-        ),
-        
-        # 4. Normalize and convert to a tensor
+        A.VerticalFlip(p=0.3),
         A.Normalize(
             mean=[0.0, 0.0, 0.0],
             std=[1.0, 1.0, 1.0],
@@ -319,7 +268,7 @@ def main():
     imprimir_distribucion_clases_post_augmentation(train_loader, 6,
         "Distribución de clases en ENTRENAMIENTO (post-aug)")
 
-    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
+    model = create_functional_pdf_replica(input_shape=Config.INPUT_SHAPE)
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
     scaler = GradScaler() 

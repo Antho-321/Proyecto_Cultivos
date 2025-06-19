@@ -9,7 +9,7 @@ import timm
 # =================================================================================
 # Esta línea asume que la clase CloudDeepLabV3Plus está definida en model.py
 try:
-    from model2 import CloudDeepLabV3Plus
+    from model import CloudDeepLabV3Plus
 except ImportError:
     print("Error: No se pudo importar 'CloudDeepLabV3Plus' desde 'model.py'.")
     print("Asegúrate de que 'model.py' esté en la misma carpeta y no tenga errores de sintaxis.")
