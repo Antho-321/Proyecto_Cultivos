@@ -1,106 +1,92 @@
-# model.py
+# model.py (PyTorch Version)
 
-import tensorflow as tf
-from tensorflow.keras.layers import (
-    Input,
-    Conv2D,
-    MaxPooling2D,
-    Conv2DTranspose,
-    BatchNormalization,
-    Activation,
-    Concatenate
-)
-from tensorflow.keras.models import Model
+import torch
+import torch.nn as nn
+import timm
 
-def create_functional_pdf_replica(input_shape=(224, 224, 3)):
+class ConvBlock(nn.Module):
     """
-    Crea una réplica funcional del modelo del PDF, utilizando los nombres de
-    capa correctos para las conexiones de salto (skip connections) según se
-    requiere en el entorno de ejecución.
+    Standard 3x3 convolution block with ReLU and Batch Norm.
     """
-    
-    # --- ENTRADA Y CODIFICADOR BASE ---
-    # Se carga el modelo EfficientNetB0 pre-entrenado como base.
-    base_encoder = tf.keras.applications.EfficientNetB0(
-        include_top=False,
-        weights='imagenet',
-        input_shape=input_shape
-    )
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
 
-    # --- CONEXIONES DE SALTO (SKIP CONNECTIONS) ---
-    # Nombres de las capas del codificador corregidos según el traceback.
-    # Estos son los nombres que existen en tu versión de Keras/TensorFlow.
-    skip_connection_names = [
-        'stem_activation',           # Salida del Stem (Resolución 112x112)
-        'block2b_add',               # Salida del Bloque 2 (Resolución 56x56)
-        'block3b_add',               # Salida del Bloque 3 (Resolución 28x28)
-        'block4c_add',               # Salida del Bloque 4 (Resolución 14x14)
-        'block6a_expand_activation'  # Salida del Bloque 6 (Resolución 7x7)
-    ]
-    
-    encoder_outputs = [base_encoder.get_layer(name).output for name in skip_connection_names]
-    
-    # Salida final del codificador para el inicio del decodificador.
-    encoder_output = base_encoder.output
+    def forward(self, x):
+        return self.conv(x)
 
-    # --- DECODIFICADOR (DECODER) / BLOQUES DE MUESTREO ASCENDENTE ---
-    # Se construye la ruta del decodificador (U-Net) sobre las salidas del codificador.
-    
-    # Bloque de muestreo ascendente 1
-    up1 = Conv2DTranspose(512, (2, 2), strides=(2, 2), padding='same')(encoder_output)
-    up1 = Concatenate()([up1, encoder_outputs[4]])
-    up1 = Conv2D(512, (3, 3), padding='same', activation='relu')(up1)
-    up1 = BatchNormalization()(up1)
+class UpBlock(nn.Module):
+    """
+    Upsampling block (ConvTranspose2d) followed by a ConvBlock.
+    """
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+        self.conv = ConvBlock(in_channels, out_channels)
 
-    # Bloque de muestreo ascendente 2
-    up2 = Conv2DTranspose(256, (2, 2), strides=(2, 2), padding='same')(up1)
-    up2_resized = Conv2DTranspose(80, (2, 2), strides=(2, 2), padding='same')(encoder_outputs[3])  # Resize here
-    up2 = Concatenate()([up2, up2_resized])  # Concatenate resized encoder output
-    up2 = Conv2D(256, (3, 3), padding='same', activation='relu')(up2)
-    up2 = BatchNormalization()(up2)
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        # x2 is the skip connection from the encoder
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
 
-    # Bloque de muestreo ascendente 3
-    up3 = Conv2DTranspose(128, (2, 2), strides=(2, 2), padding='same')(up2)
-    # Resize encoder_outputs[2] to match the dimensions of up3
-    encoder_output_resized = Conv2DTranspose(40, (2, 2), strides=(2, 2), padding='same')(encoder_outputs[2])  
-    up3 = Concatenate()([up3, encoder_output_resized])  # Concatenate resized encoder output
-    up3 = Conv2D(128, (3, 3), padding='same', activation='relu')(up3)
-    up3 = BatchNormalization()(up3)
 
-    # Bloque de muestreo ascendente 4
-    up4 = Conv2DTranspose(64, (2, 2), strides=(2, 2), padding='same')(up3)
-    # Resize encoder_outputs[1] to match the dimensions of up4
-    encoder_output_resized = Conv2DTranspose(24, (2, 2), strides=(2, 2), padding='same')(encoder_outputs[1])  
-    up4 = Concatenate()([up4, encoder_output_resized])  # Concatenate resized encoder output
-    up4 = Conv2D(64, (3, 3), padding='same', activation='relu')(up4)
-    up4 = BatchNormalization()(up4)
-    
-    # Bloque de muestreo ascendente 5
-    up5 = Conv2DTranspose(32, (2, 2), strides=(2, 2), padding='same')(up4)
-    # Resize encoder_outputs[0] to match the dimensions of up5
-    encoder_output_resized = Conv2DTranspose(32, (2, 2), strides=(2, 2), padding='same')(encoder_outputs[0])  
-    up5 = Concatenate()([up5, encoder_output_resized])  # Concatenate resized encoder output
-    up5 = Conv2D(32, (3, 3), padding='same', activation='relu')(up5)
-    up5 = BatchNormalization()(up5)
+class EfficientNetUnet(nn.Module):
+    def __init__(self, num_classes=6, pretrained=True):
+        super().__init__()
 
-    # --- CAPA DE SALIDA ---
-    outputs = Conv2D(
-        1, 
-        (1, 1), 
-        padding='same', 
-        activation='sigmoid', 
-        name='final_output'
-    )(up5)
+        # --- ENCODER ---
+        # Use timm to get an EfficientNetB0 backbone with feature extraction capabilities
+        self.encoder = timm.create_model(
+            'efficientnet_b0',
+            pretrained=pretrained,
+            features_only=True, # This is key! It returns feature maps from intermediate layers
+        )
 
-    # Creación del modelo final
-    model = Model(inputs=base_encoder.input, outputs=outputs, name='Functional_Unet_EfficientNetB0')
+        # Get the output channel sizes from the encoder, which we'll need for the decoder
+        encoder_channels = self.encoder.feature_info.channels() # e.g., [16, 24, 40, 112, 320]
 
-    return model
+        # --- DECODER ---
+        # The decoder will upsample from the final encoder feature map, concatenating
+        # with skip connections from earlier layers.
+        # `encoder_channels` are ordered from earliest to latest layer.
+        self.up1 = UpBlock(encoder_channels[4], encoder_channels[3]) # From 320 -> 112 channels
+        self.up2 = UpBlock(encoder_channels[3], encoder_channels[2]) # From 112 -> 40 channels
+        self.up3 = UpBlock(encoder_channels[2], encoder_channels[1]) # From 40  -> 24 channels
+        self.up4 = UpBlock(encoder_channels[1], encoder_channels[0]) # From 24  -> 16 channels
 
-# if __name__ == '__main__':
-#     # Crear el modelo funcional
-#     functional_model = create_functional_pdf_replica()
-    
-#     # Imprimir el resumen del modelo para verificar su estructura
-#     print("Resumen de la Réplica Funcional y Corregida de la Arquitectura del PDF:")
-#     functional_model.summary()
+        # A final upsampling block to get to a higher resolution before the output layer
+        self.up5 = nn.Sequential(
+            nn.ConvTranspose2d(encoder_channels[0], 16, kernel_size=2, stride=2),
+            ConvBlock(16, 16)
+        )
+
+        # --- OUTPUT LAYER ---
+        # Final convolution to get the desired number of class logits
+        self.final_conv = nn.Conv2d(16, num_classes, kernel_size=1)
+
+    def forward(self, x):
+        # --- ENCODER FORWARD PASS ---
+        # The `features_only=True` encoder returns a list of tensors
+        skip_connections = self.encoder(x)
+        # The last feature map is the input to the decoder's first block
+        encoder_output = skip_connections[-1]
+
+        # --- DECODER FORWARD PASS ---
+        # We work backwards through the skip connections list
+        d1 = self.up1(encoder_output, skip_connections[3])
+        d2 = self.up2(d1, skip_connections[2])
+        d3 = self.up3(d2, skip_connections[1])
+        d4 = self.up4(d3, skip_connections[0])
+        d5 = self.up5(d4) # No skip connection here
+
+        # --- FINAL OUTPUT ---
+        logits = self.final_conv(d5)
+        return logits
