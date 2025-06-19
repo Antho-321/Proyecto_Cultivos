@@ -16,6 +16,7 @@ from model import create_functional_pdf_replica
 import matplotlib.pyplot as plt
 from distribucion_por_clase   import imprimir_distribucion_clases_post_augmentation
 from config import Config
+import tensorflow as tf
 
 # =================================================================================
 # FUNCIÓN DE RECORTE (AÑADIDA)
