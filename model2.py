@@ -3,6 +3,8 @@ import tensorflow_hub as hub
 from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Conv2DTranspose
 from tensorflow.keras.layers import BatchNormalization, Activation, Concatenate
 from tensorflow.keras.models import Model
+# Se añade la importación de traceback para un mejor manejo de errores.
+import traceback
 
 def create_unet_with_efficientnetv2_encoder(input_shape=(224, 224, 3)):
     """
@@ -36,7 +38,7 @@ def create_unet_with_efficientnetv2_encoder(input_shape=(224, 224, 3)):
     
     # Conectamos la capa de Hub a nuestra entrada. Esto construye el grafo interno del modelo de Hub.
     # El resultado 'outputs' aquí es la salida de clasificación final, que ignoraremos.
-    outputs = hub_layer(encoder_input)
+    _ = hub_layer(encoder_input)
 
     # 3. EXTRAER LAS SALIDAS INTERMEDIAS (SKIP CONNECTIONS)
     # Los nombres de las capas se obtienen inspeccionando `hub_layer.resolved_object.summary()`.
@@ -53,7 +55,7 @@ def create_unet_with_efficientnetv2_encoder(input_shape=(224, 224, 3)):
     encoder_output_layer_name = 'block7b_add' # Tamaño: 7x7
 
     # Obtenemos los tensores de salida de las capas de interés por su nombre.
-    # Accedemos al modelo subyacente a través de `hub_layer`.
+    # Accedemos al modelo subyacente a través de `resolved_object` de la capa de Hub.
     skip_outputs = [hub_layer.resolved_object.get_layer(name).output for name in skip_connection_names]
     encoder_output = hub_layer.resolved_object.get_layer(encoder_output_layer_name).output
     
@@ -155,7 +157,20 @@ if __name__ == '__main__':
         print("\nResumen de la Arquitectura del Modelo:")
         # El summary es muy largo, así que lo imprimimos con un límite de líneas
         model.summary(line_length=120)
+
+    # ----- BLOQUE DE EXCEPCIÓN MODIFICADO -----
     except Exception as e:
-        print(f"\nError al crear el modelo: {e}")
-        print("Esto puede ocurrir si TensorFlow o TensorFlow Hub no están instalados correctamente,")
-        print("o si hay un problema de conexión para descargar el modelo de Hub.")
+        print(f"\n--- ERROR DETALLADO AL CREAR EL MODELO ---")
+        print(f"Tipo de Excepción: {type(e).__name__}")
+        print(f"Mensaje de Error: {e}")
+        print("\nA continuación se muestra el 'traceback' completo del error para facilitar la depuración:")
+        print("vvv-------------------------------------------------------------------vvv")
+        # Imprime la pila de llamadas completa para identificar el origen del error.
+        traceback.print_exc()
+        print("^^^-------------------------------------------------------------------^^^")
+        
+        print("\nPosibles Causas Comunes y Soluciones:")
+        print("- Conexión a Internet: Verifica tu conexión. El modelo necesita ser descargado desde TensorFlow Hub la primera vez.")
+        print("- Nombres de Capas: Asegúrate de que los nombres en 'skip_connection_names' y 'encoder_output_layer_name' son correctos para la versión del modelo de Hub que estás usando.")
+        print("- Dependencias: Confirma que 'tensorflow' y 'tensorflow_hub' están instalados correctamente (`pip install tensorflow tensorflow_hub`).")
+        print("- Incompatibilidad de Versiones: Podría haber un conflicto entre las versiones de TensorFlow, Keras y el modelo cargado desde Hub.")
