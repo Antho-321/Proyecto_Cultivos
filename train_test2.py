@@ -187,6 +187,7 @@ def main():
     # Transformaciones normales para todas las imágenes
     train_transform = A.Compose([
         A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
+        A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
         A.Normalize(
