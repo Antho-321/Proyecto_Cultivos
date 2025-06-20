@@ -1,5 +1,8 @@
 import torch
 from tqdm import tqdm
+import numpy as np
+import matplotlib.pyplot as plt
+
 def imprimir_distribucion_clases_post_augmentation(loader, n_classes=6, title="Distribución de clases post-augmentation"):
     """
     Calcula y muestra la distribución porcentual de píxeles por cada clase

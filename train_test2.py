@@ -13,7 +13,6 @@ from PIL import Image
 import numpy as np
 # Importa la arquitectura del otro archivo
 from model import CloudDeepLabV3Plus
-import matplotlib.pyplot as plt
 from utils import imprimir_distribucion_clases_post_augmentation, save_performance_plot, crop_around_classes
 from config import Config
 import cv2
