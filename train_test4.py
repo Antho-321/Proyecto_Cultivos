@@ -50,26 +50,47 @@ class CloudDataset(torch.utils.data.Dataset):
         img_filename = self.image_files[idx]
         img_path = os.path.join(self.image_dir, img_filename)
         mask_path = self._mask_path_from_image_name(img_filename)
-        
+
         if not os.path.exists(mask_path):
             raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
 
-        # Carga como arrays de NumPy
-        image = np.array(Image.open(img_path).convert("RGB"))
-        mask = np.array(Image.open(mask_path).convert("L"))
+        # --- LOAD THE IMAGES USING PIL ---
+        # Keep them as PIL Images for now to use the resize method easily
+        image_pil = Image.open(img_path).convert("RGB")
+        mask_pil = Image.open(mask_path).convert("L")
+        
+        # Convert to NumPy for your cropping logic
+        image_np = np.array(image_pil)
+        mask_np = np.array(mask_pil)
 
-        # Lógica de recorte
-        mask_3d = np.expand_dims(mask, axis=-1)
-        image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
-        mask_cropped = mask_cropped_3d.squeeze()
-        
-        # --- SUSTITUCIÓN DE TRANSFORMACIONES ---
-        # Convertir a Tensores de PyTorch manualmente
+        # Lógica de recorte (Your existing logic)
+        mask_3d = np.expand_dims(mask_np, axis=-1)
+        image_cropped_np, mask_cropped_3d = crop_around_classes(image_np, mask_3d)
+        mask_cropped_np = mask_cropped_3d.squeeze()
+
+        # --- FIX: RESIZE TO A UNIFORM SIZE ---
+        # 1. Convert the cropped NumPy arrays back to PIL Images
+        image_cropped_pil = Image.fromarray(image_cropped_np)
+        mask_cropped_pil = Image.fromarray(mask_cropped_np)
+
+        # 2. Define your target size
+        TARGET_SIZE = (256, 256) # Or (512, 512), etc.
+
+        # 3. Resize both the image and the mask
+        # Use NEAREST resampling for the mask to avoid creating new class values (e.g., 0.5)
+        image_resized = image_cropped_pil.resize(TARGET_SIZE, Image.Resampling.BILINEAR)
+        mask_resized = mask_cropped_pil.resize(TARGET_SIZE, Image.Resampling.NEAREST)
+
+        # --- Convert to Tensores de PyTorch manually ---
+        # Now convert the FINAL resized images to NumPy arrays and then to Tensors
+        image_final_np = np.array(image_resized)
+        mask_final_np = np.array(mask_resized)
+
         # 1. Imagen: de NumPy (H, W, C) a Tensor (C, H, W) y normalizar a [0, 1]
-        image_tensor = torch.from_numpy(image_cropped).float().permute(2, 0, 1) / 255.0
-        
+        image_tensor = torch.from_numpy(image_final_np).float().permute(2, 0, 1) / 255.0
+
         # 2. Máscara: de NumPy (H, W) a Tensor (H, W) de tipo Long
-        mask_tensor = torch.from_numpy(mask_cropped).long()
+        mask_tensor = torch.from_numpy(mask_final_np).long()
 
         return image_tensor, mask_tensor
 
