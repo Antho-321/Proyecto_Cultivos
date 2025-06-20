@@ -12,16 +12,13 @@ print(list(keras_cv.models.Backbone.presets.keys()))
 INPUT_SHAPE = (128, 128, 3)
 N_CLASSES = 3  # 3 classes: Background, Kidney, and Tumor.
 
-# The backbone you want to use.
-# This name should be present in the list printed above now.
-preset_name = "efficientnet_v2_b0_classifier_imagenet"
-print(f"\nAttempting to load backbone from preset: '{preset_name}'...")
+# Define the preset name
+preset_name = 'efficientnetv2_b0'  # Use a valid preset name
 
-# Use Backbone.from_preset to load the model
+# Load the backbone from the preset
 BACKBONE = keras_cv.models.Backbone.from_preset(
     preset_name,
-    # The `include_rescaling=False` argument might be needed if you normalize
-    # your inputs separately. For now, let's assume KerasCV handles it.
+    include_rescaling=True,  # Set to True if you want KerasCV to handle input rescaling
 )
 
 # Step 2: Create the segmentation model using KerasCV's U-Net.
