@@ -2,6 +2,7 @@
 # These imports should now work correctly after the restart.
 import keras_cv
 import tensorflow as tf
+from keras_cv_attention_models import efficientnet
 
 # --- DIAGNOSTIC STEP: Check for presets again after reinstallation ---
 print("Available KerasCV backbone presets:")
@@ -13,14 +14,10 @@ INPUT_SHAPE = (128, 128, 3)
 N_CLASSES = 3  # 3 classes: Background, Kidney, and Tumor.
 
 # Define the preset name
-preset_name = 'efficientnetv2_b0'  # Use a valid preset name
+preset_name = 'efficientnetv2_b0_imagenet'  # Use a valid preset name
 
 # Load the backbone from the preset
-BACKBONE = keras_cv.models.Backbone.from_preset(
-    preset_name,
-    include_rescaling=True,  # Set to True if you want KerasCV to handle input rescaling
-)
-
+BACKBONE = efficientnet.EfficientNetV2B0(input_shape=(112, 112, 3), num_classes=0)
 # Step 2: Create the segmentation model using KerasCV's U-Net.
 # The UNet will automatically handle the input shape.
 print(f"Constructing the model U-Net with backbone: {BACKBONE.name}...")
