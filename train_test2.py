@@ -16,6 +16,7 @@ from model import CloudDeepLabV3Plus
 import matplotlib.pyplot as plt
 from utils import imprimir_distribucion_clases_post_augmentation, save_performance_plot, crop_around_classes
 from config import Config
+import cv2
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -303,6 +304,4 @@ def main():
     print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
 
 if __name__ == "__main__":
-    # <-- NUEVO: Necesitamos importar cv2 para las constantes de borde en Albumentations
-    import cv2
     main()
