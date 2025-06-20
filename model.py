@@ -9,7 +9,7 @@ N_CLASSES = 3  # 3 classes: Background, Kidney, and Tumor.
 # The backbone you want to use. KerasCV has many pre-built backbones.
 # For EfficientNetB0, the name is 'EfficientNetV1B0'.
 BACKBONE = keras_cv.models.EfficientNetV1B0Backbone.from_preset(
-    "efficientnet_v1_b0_imagenet" # Using pre-trained weights from ImageNet
+    "efficientnetv1_b0_imagenet" # Using pre-trained weights from ImageNet
 )
 
 # Step 2: Create the segmentation model using KerasCV's U-Net.
