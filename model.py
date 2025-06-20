@@ -2,6 +2,8 @@
 import keras_cv
 import tensorflow as tf
 
+print(keras_cv.models.EfficientNetV1B0Backbone.presets.keys())
+
 # Define the parameters for the model.
 INPUT_SHAPE = (128, 128, 3)
 N_CLASSES = 3  # 3 classes: Background, Kidney, and Tumor.
