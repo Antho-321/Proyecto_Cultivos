@@ -12,84 +12,59 @@ import os
 from PIL import Image
 import numpy as np
 # Importa la arquitectura del otro archivo
-from model2 import CloudDeepLabV3Plus
+from model import CloudDeepLabV3Plus
 import matplotlib.pyplot as plt
-from distribucion_por_clase   import imprimir_distribucion_clases_post_augmentation
-# =================================================================================
-# 1. CONFIGURACIÓN
-# =================================================================================
-class Config:
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    TRAIN_IMG_DIR = "Balanced/train/images"
-    TRAIN_MASK_DIR = "Balanced/train/masks"
-    VAL_IMG_DIR = "Balanced/val/images"
-    VAL_MASK_DIR = "Balanced/val/masks"
-    
-    LEARNING_RATE = 1e-4
-    BATCH_SIZE = 8
-    NUM_EPOCHS = 200
-    NUM_WORKERS = 2
-    
-    IMAGE_HEIGHT = 256
-    IMAGE_WIDTH = 256
-    
-    PIN_MEMORY = True
-    LOAD_MODEL = False
-    MODEL_SAVE_PATH = "/content/drive/MyDrive/colab/best_model.pth.tar"
-
-# =================================================================================
-# FUNCIÓN DE RECORTE (AÑADIDA)
-# =================================================================================
-def crop_around_classes(
-    image: np.ndarray,
-    mask: np.ndarray,
-    classes_to_find: list[int] = [1, 2, 3, 4, 5],
-    margin: int = 10  # <--- AÑADIDO: Un pequeño margen puede ser útil
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Recorta un rectángulo alrededor de todos los píxeles que pertenecen a las
-    clases especificadas en la máscara.
-    """
-    # is_class_present será 2D (H,W) ya que la máscara de entrada es (H,W,1)
-    is_class_present = np.isin(mask.squeeze(), classes_to_find)
-
-    ys, xs = np.where(is_class_present)
-
-    if ys.size == 0:
-        return image, mask # Devuelve la máscara original (H,W,1)
-
-    y_min, y_max = ys.min(), ys.max()
-    x_min, x_max = xs.min(), xs.max()
-
-    y0 = max(0, y_min - margin)
-    y1 = min(mask.shape[0], y_max + margin + 1)
-    x0 = max(0, x_min - margin)
-    x1 = min(mask.shape[1], x_max + margin + 1)
-
-    cropped_image = image[y0:y1, x0:x1]
-    # Se recorta la máscara (H,W,1) y mantiene sus 3 dimensiones
-    cropped_mask = mask[y0:y1, x0:x1, :]
-
-    return cropped_image, cropped_mask
+from utils import imprimir_distribucion_clases_post_augmentation, save_performance_plot, crop_around_classes
+from config import Config
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
 # =================================================================================
+def mascara_contiene_solo_0_y_4(mask: np.ndarray) -> bool: # <-- Ponemos la función aquí para que sea accesible
+    """
+    Verifica si una máscara contiene únicamente píxeles con valor 0 y 4.
+    """
+    return set(np.unique(mask)) == {0, 4}
+
 class CloudDataset(torch.utils.data.Dataset):
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
-    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
+    # <-- MODIFICADO: __init__ ahora acepta un pipeline de transformación especial
+    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None, special_transform: A.Compose | None = None):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
         self.transform = transform
-        self.images = [
+        self.special_transform = special_transform  # <-- NUEVO: Guardar el pipeline de aumentación especial
+        
+        self.samples = []  # <-- NUEVO: Esta será nuestra lista principal de muestras
+
+        print("Inicializando dataset y buscando imágenes para aumentación especial...")
+        all_images = [
             f for f in os.listdir(image_dir)
             if f.lower().endswith(self._IMG_EXTENSIONS)
         ]
 
+        # <-- NUEVO: Lógica para construir la lista de muestras expandida
+        for img_filename in tqdm(all_images, desc="Procesando imágenes iniciales"):
+            # Siempre añadimos la muestra original (usará la transformación normal)
+            self.samples.append({"image_filename": img_filename, "apply_special_aug": False})
+
+            # Si se proporciona una transformación especial, verificamos la condición
+            if self.special_transform:
+                mask_path = self._mask_path_from_image_name(img_filename)
+                if os.path.exists(mask_path):
+                    mask = np.array(Image.open(mask_path).convert("L"))
+                    
+                    # Si la máscara cumple la condición, añadimos N copias "virtuales"
+                    if mascara_contiene_solo_0_y_4(mask):
+                        for _ in range(Config.NUM_SPECIAL_AUGMENTATIONS):
+                            self.samples.append({"image_filename": img_filename, "apply_special_aug": True})
+        
+        print(f"Dataset inicializado. Tamaño original: {len(all_images)}, Tamaño con aumentación: {len(self.samples)}")
+
     def __len__(self) -> int:
-        return len(self.images)
+        # <-- MODIFICADO: La longitud ahora es el tamaño de nuestra lista de muestras expandida
+        return len(self.samples)
 
     def _mask_path_from_image_name(self, image_filename: str) -> str:
         name_without_ext = image_filename.rsplit('.', 1)[0]
@@ -97,7 +72,11 @@ class CloudDataset(torch.utils.data.Dataset):
         return os.path.join(self.mask_dir, mask_filename)
 
     def __getitem__(self, idx: int):
-        img_filename = self.images[idx]
+        # <-- MODIFICADO: Obtenemos la información de la muestra de nuestra nueva lista
+        sample_info = self.samples[idx]
+        img_filename = sample_info["image_filename"]
+        apply_special_aug = sample_info["apply_special_aug"]
+
         img_path = os.path.join(self.image_dir, img_filename)
         mask_path = self._mask_path_from_image_name(img_filename)
         
@@ -107,22 +86,24 @@ class CloudDataset(torch.utils.data.Dataset):
         image = np.array(Image.open(img_path).convert("RGB"))
         mask = np.array(Image.open(mask_path).convert("L"))
 
-        # --- MODIFICACIÓN CLAVE: Aplicar recorte ANTES de las transformaciones ---
-        # 1. Añadir una dimensión de canal a la máscara para que sea (H, W, 1)
+        # Tu lógica de recorte permanece igual
         mask_3d = np.expand_dims(mask, axis=-1)
-        
-        # 2. Aplicar la función de recorte
         image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
-
-        # 3. Quitar la dimensión del canal de la máscara para Albumentations
         mask_cropped = mask_cropped_3d.squeeze()
-        # ------------------------------------------------------------------------
-
-        if self.transform:
-            # Pasa los arrays RECORTADOS a las transformaciones
+        
+        # <-- MODIFICADO: Aplicamos la transformación condicionalmente
+        if apply_special_aug and self.special_transform:
+            # Esta es una muestra que cumplió la condición y debe ser aumentada especialmente
+            augmented = self.special_transform(image=image_cropped, mask=mask_cropped)
+        elif self.transform:
+            # Esta es una muestra normal
             augmented = self.transform(image=image_cropped, mask=mask_cropped)
-            image = augmented["image"]
-            mask = augmented["mask"]
+        else:
+            # Si no hay transformaciones
+            augmented = {"image": image_cropped, "mask": mask_cropped}
+
+        image = augmented["image"]
+        mask = augmented["mask"]
 
         return image, mask
 
@@ -143,7 +124,6 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
             # Desempaquetamos o seleccionamos la salida principal
             output = model(data)
             predictions = output[0] if isinstance(output, tuple) else output
-            loss = loss_fn(predictions, targets)
             loss = loss_fn(predictions, targets)
 
         optimizer.zero_grad()
@@ -170,7 +150,6 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 
             output = model(x)
             logits = output[0] if isinstance(output, tuple) else output # <-- ¡ESTA ES LA CORRECCIÓN CLAVE!
-            preds  = torch.argmax(logits, dim=1)
             preds  = torch.argmax(logits, dim=1)
 
             for cls in range(n_classes):
@@ -199,79 +178,35 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.train()
     return miou_macro, dice_macro
 
-def save_performance_plot(train_history, val_history, save_path):
-    """
-    Guarda un gráfico comparando el mIoU de entrenamiento y validación por época.
-
-    Args:
-        train_history (list): Lista con los valores de mIoU de entrenamiento por época.
-        val_history (list): Lista con los valores de mIoU de validación por época.
-        save_path (str): Ruta donde se guardará el gráfico en formato PNG.
-    """
-    epochs = range(1, len(train_history) + 1)
-    
-    plt.style.use('seaborn-v0_8-darkgrid') # Estilo visual atractivo
-    fig, ax = plt.subplots(figsize=(12, 7))
-
-    # Graficar ambas curvas
-    ax.plot(epochs, train_history, 'o-', color="xkcd:sky blue", label='Entrenamiento (mIoU)', markersize=4)
-    ax.plot(epochs, val_history, 'o-', color="xkcd:amber", label='Validación (mIoU)', markersize=4)
-
-    # Títulos y etiquetas
-    ax.set_title('Rendimiento del Modelo: mIoU por Época', fontsize=16, weight='bold')
-    ax.set_xlabel('Época', fontsize=12)
-    ax.set_ylabel('mIoU (Mean Intersection over Union)', fontsize=12)
-    
-    # Leyenda, cuadrícula y límites
-    ax.legend(fontsize=11, frameon=True, shadow=True)
-    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
-    ax.set_ylim(0, max(1.0, max(val_history)*1.1)) # Límite Y hasta 1.0 o un poco más del máximo
-    ax.set_xticks(epochs) # Asegura que se muestren todas las épocas si no son demasiadas
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150) # Guardar con buena resolución
-    plt.close(fig) # Liberar memoria
-    print(f"📈 Gráfico de rendimiento guardado en '{save_path}'")
-
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
 # =================================================================================
 def main():
     print(f"Using device: {Config.DEVICE}")
     
+    # Transformaciones normales para todas las imágenes
     train_transform = A.Compose([
-        # Your custom cropping already happened in the Dataset's __getitem__
-        
-        # 1. Apply geometric augmentations on the cropped, variable-sized image
-        A.RandomRotate90(p=0.5),
+        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.3),
+        A.Normalize(
+            mean=[0.0, 0.0, 0.0],
+            std=[1.0, 1.0, 1.0],
+            max_pixel_value=255.0,
+        ),
+        ToTensorV2(),
+    ])
+
+    # <-- NUEVO: Pipeline de transformaciones especiales para las clases {0, 4}
+    # Incluye las transformaciones que pediste: rotaciones, traslaciones, etc.
+    special_aug_transform = A.Compose([
+        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
+        A.Rotate(limit=40, p=0.9, border_mode=cv2.BORDER_CONSTANT, value=0), # Rotación más fuerte
+        A.ShiftScaleRotate(shift_limit=0.15, scale_limit=0.15, rotate_limit=0, p=0.8, border_mode=cv2.BORDER_CONSTANT, value=0), # Traslaciones y escalados
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
-        A.Affine(shift_limit=0.1, scale_limit=0.2, rotate_limit=15, p=0.5),
-        
-        # =========================================================================
-        # 2. ADD THIS LINE: Resize all augmented images to a fixed size
-        # This is the fix. It ensures every image in the batch is the same size.
-        # =========================================================================
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
-
-        # 3. Apply color/noise augmentations on the resized image
-        A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-        A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=25, val_shift_limit=15, p=0.5),
-        A.RandomShadow(shadow_roi=(0.0,0.5,1.0,1.0), num_shadows=2, p=0.3),
-        A.GaussNoise(var_limit=(10.0,50.0), p=0.3),
-        A.GaussianBlur(blur_limit=3, p=0.2),
-        A.CoarseDropout(
-            max_holes=8, 
-            max_height=32, 
-            max_width=32, 
-            min_holes=8,
-            min_height=32,
-            min_width=32,
-            fill_value=0,
-            p=0.3
-        ),
-        
-        # 4. Normalize and convert to a tensor
+        A.RandomBrightnessContrast(p=0.3),
+        A.GaussNoise(p=0.2),
         A.Normalize(
             mean=[0.0, 0.0, 0.0],
             std=[1.0, 1.0, 1.0],
@@ -281,7 +216,7 @@ def main():
     ])
 
     val_transform = A.Compose([
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH), # <-- MUY IMPORTANTE
+        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
         A.Normalize(
             mean=[0.0, 0.0, 0.0],
             std=[1.0, 1.0, 1.0],
@@ -290,19 +225,22 @@ def main():
         ToTensorV2(),
     ])
 
+    # <-- MODIFICADO: Pasamos ambos pipelines de transformación al dataset de entrenamiento
     train_dataset = CloudDataset(
         image_dir=Config.TRAIN_IMG_DIR,
         mask_dir=Config.TRAIN_MASK_DIR,
-        transform=train_transform
+        transform=train_transform,
+        special_transform=special_aug_transform  # <-- Pasamos el nuevo pipeline
     )
     train_loader = DataLoader(
         train_dataset,
         batch_size=Config.BATCH_SIZE,
         num_workers=Config.NUM_WORKERS,
         pin_memory=Config.PIN_MEMORY,
-        shuffle=True
+        shuffle=True  # Shuffle es clave para mezclar las muestras originales y las aumentadas
     )
 
+    # El dataset de validación no se expande para tener una métrica consistente
     val_dataset = CloudDataset(
         image_dir=Config.VAL_IMG_DIR,
         mask_dir=Config.VAL_MASK_DIR,
@@ -325,7 +263,6 @@ def main():
     scaler = GradScaler() 
     best_mIoU = -1.0
 
-    # --- 2. INICIALIZAR LISTAS PARA EL HISTORIAL ---
     train_miou_history = []
     val_miou_history = []
 
@@ -333,44 +270,39 @@ def main():
         print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
         train_fn(train_loader, model, optimizer, loss_fn, scaler)
         
-        # --- 3. CALCULAR MÉTRICAS PARA ENTRENAMIENTO Y VALIDACIÓN ---
         print("Calculando métricas de entrenamiento...")
         train_mIoU, _ = check_metrics(train_loader, model, n_classes=6, device=Config.DEVICE)
         
         print("Calculando métricas de validación...")
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
 
-        # --- 4. GUARDAR LAS MÉTRICAS EN EL HISTORIAL ---
-        train_miou_history.append(train_mIoU.item()) # .item() para obtener el valor escalar
+        train_miou_history.append(train_mIoU.item())
         val_miou_history.append(current_mIoU.item())
 
         if current_mIoU > best_mIoU:
             best_mIoU = current_mIoU
             print(f"🔹 Nuevo mejor mIoU: {best_mIoU:.4f} | Dice: {current_dice:.4f}  →  guardando modelo…")
             checkpoint = {
-                "epoch":      epoch,
+                "epoch": epoch,
                 "state_dict": model.state_dict(),
-                "optimizer":  optimizer.state_dict(),
-                "best_mIoU":  best_mIoU,
+                "optimizer": optimizer.state_dict(),
+                "best_mIoU": best_mIoU,
             }
             torch.save(checkpoint, Config.MODEL_SAVE_PATH)
 
-    # --- 5. LLAMAR A LA FUNCIÓN DE GRAFICADO AL FINALIZAR ---
     save_performance_plot(
         train_history=train_miou_history,
         val_history=val_miou_history,
-        save_path="/content/drive/MyDrive/colab/rendimiento_miou.png"
+        save_path=Config.PERFORMANCE_PATH
     )
 
     print("\nEvaluando el modelo con mejor mIoU guardado…")
-
-    # --- Cargar el checkpoint del mejor modelo ---
-    # Añadir map_location para asegurar compatibilidad entre CPU/GPU
     best_model_checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
     model.load_state_dict(best_model_checkpoint['state_dict'])
-
-    # Ahora que el mejor modelo está cargado, se ejecuta la evaluación
     best_mIoU, best_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
     print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
+
 if __name__ == "__main__":
+    # <-- NUEVO: Necesitamos importar cv2 para las constantes de borde en Albumentations
+    import cv2
     main()

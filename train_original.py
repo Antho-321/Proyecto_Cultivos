@@ -14,64 +14,8 @@ import numpy as np
 # Importa la arquitectura del otro archivo
 from model import CloudDeepLabV3Plus
 import matplotlib.pyplot as plt
-from distribucion_por_clase   import imprimir_distribucion_clases_post_augmentation
-# =================================================================================
-# 1. CONFIGURACIÓN
-# =================================================================================
-class Config:
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    TRAIN_IMG_DIR = "Balanced/train/images"
-    TRAIN_MASK_DIR = "Balanced/train/masks"
-    VAL_IMG_DIR = "Balanced/val/images"
-    VAL_MASK_DIR = "Balanced/val/masks"
-    
-    LEARNING_RATE = 1e-4
-    BATCH_SIZE = 8
-    NUM_EPOCHS = 100
-    NUM_WORKERS = 2
-    
-    IMAGE_HEIGHT = 256
-    IMAGE_WIDTH = 256
-    
-    PIN_MEMORY = True
-    LOAD_MODEL = False
-    MODEL_SAVE_PATH = "/content/drive/MyDrive/colab/best_model.pth.tar"
-
-# =================================================================================
-# FUNCIÓN DE RECORTE (AÑADIDA)
-# =================================================================================
-def crop_around_classes(
-    image: np.ndarray,
-    mask: np.ndarray,
-    classes_to_find: list[int] = [1, 2, 3, 4, 5],
-    margin: int = 10  # <--- AÑADIDO: Un pequeño margen puede ser útil
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Recorta un rectángulo alrededor de todos los píxeles que pertenecen a las
-    clases especificadas en la máscara.
-    """
-    # is_class_present será 2D (H,W) ya que la máscara de entrada es (H,W,1)
-    is_class_present = np.isin(mask.squeeze(), classes_to_find)
-
-    ys, xs = np.where(is_class_present)
-
-    if ys.size == 0:
-        return image, mask # Devuelve la máscara original (H,W,1)
-
-    y_min, y_max = ys.min(), ys.max()
-    x_min, x_max = xs.min(), xs.max()
-
-    y0 = max(0, y_min - margin)
-    y1 = min(mask.shape[0], y_max + margin + 1)
-    x0 = max(0, x_min - margin)
-    x1 = min(mask.shape[1], x_max + margin + 1)
-
-    cropped_image = image[y0:y1, x0:x1]
-    # Se recorta la máscara (H,W,1) y mantiene sus 3 dimensiones
-    cropped_mask = mask[y0:y1, x0:x1, :]
-
-    return cropped_image, cropped_mask
+from utils   import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
+from config import Config
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -193,40 +137,6 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 
     model.train()
     return miou_macro, dice_macro
-
-def save_performance_plot(train_history, val_history, save_path):
-    """
-    Guarda un gráfico comparando el mIoU de entrenamiento y validación por época.
-
-    Args:
-        train_history (list): Lista con los valores de mIoU de entrenamiento por época.
-        val_history (list): Lista con los valores de mIoU de validación por época.
-        save_path (str): Ruta donde se guardará el gráfico en formato PNG.
-    """
-    epochs = range(1, len(train_history) + 1)
-    
-    plt.style.use('seaborn-v0_8-darkgrid') # Estilo visual atractivo
-    fig, ax = plt.subplots(figsize=(12, 7))
-
-    # Graficar ambas curvas
-    ax.plot(epochs, train_history, 'o-', color="xkcd:sky blue", label='Entrenamiento (mIoU)', markersize=4)
-    ax.plot(epochs, val_history, 'o-', color="xkcd:amber", label='Validación (mIoU)', markersize=4)
-
-    # Títulos y etiquetas
-    ax.set_title('Rendimiento del Modelo: mIoU por Época', fontsize=16, weight='bold')
-    ax.set_xlabel('Época', fontsize=12)
-    ax.set_ylabel('mIoU (Mean Intersection over Union)', fontsize=12)
-    
-    # Leyenda, cuadrícula y límites
-    ax.legend(fontsize=11, frameon=True, shadow=True)
-    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
-    ax.set_ylim(0, max(1.0, max(val_history)*1.1)) # Límite Y hasta 1.0 o un poco más del máximo
-    ax.set_xticks(epochs) # Asegura que se muestren todas las épocas si no son demasiadas
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150) # Guardar con buena resolución
-    plt.close(fig) # Liberar memoria
-    print(f"📈 Gráfico de rendimiento guardado en '{save_path}'")
 
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
