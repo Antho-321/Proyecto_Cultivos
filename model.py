@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import timm
 
 # =================================================================================
-# 1. MÓDULO DE ATENCIÓN (### MODIFICADO ###)
+# 1. MÓDULO DE ATENCIÓN (sin cambios)
 # =================================================================================
 class ChannelAttention(nn.Module):
     """Módulo de Atención de Canal para enfocar qué características son importantes."""
@@ -61,11 +61,11 @@ class AttentionModule(nn.Module):
         return x
 
 # =================================================================================
-# 2. MÓDULO ASPP (Sin cambios en la clase, pero se cambiarán los `rates` al instanciar)
+# 2. MÓDULO ASPP (Añadido Dropout)
 # =================================================================================
 class ASPPConv(nn.Sequential):
     def __init__(self, in_channels, out_channels, dilation):
-        super(ASPPConv, self).__init__(
+        super(ASPPConv, self).__init__( 
             nn.Conv2d(in_channels, out_channels, 3, padding=dilation, dilation=dilation, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU()
@@ -103,7 +103,7 @@ class ASPP(nn.Module):
             nn.Conv2d(len(self.convs) * out_channels, out_channels, 1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(),
-            nn.Dropout(0.5)
+            nn.Dropout(0.3)  # Añadido Dropout con probabilidad 0.3
         )
 
     def forward(self, x):
@@ -114,7 +114,7 @@ class ASPP(nn.Module):
         return self.project(res)
 
 # =================================================================================
-# 3. BLOQUE DE DECODIFICADOR FPN (### MODIFICADO ###)
+# 3. BLOQUE DE DECODIFICADOR FPN (Añadido Dropout)
 # =================================================================================
 class DecoderBlock(nn.Module):
     def __init__(self, in_channels_skip, in_channels_up, out_channels, use_attention=True):
@@ -139,6 +139,8 @@ class DecoderBlock(nn.Module):
             nn.ReLU(),
             nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
+            nn.ReLU(),
+            nn.Dropout(0.3)  # Añadido Dropout con probabilidad 0.3
         )
         self.final_relu = nn.ReLU()
 
@@ -161,18 +163,11 @@ class DecoderBlock(nn.Module):
         return self.final_relu(x_fused + x_residual)
 
 # =================================================================================
-# 4. ARQUITECTURA PRINCIPAL: CloudDeepLabV3+ (### IMPLEMENTACIÓN APLICADA ###)
+# 4. ARQUITECTURA PRINCIPAL: CloudDeepLabV3+ (con Dropout añadido)
 # =================================================================================
 class CloudDeepLabV3Plus(nn.Module):
     def __init__(self, num_classes=1):
-        """
-        (### MODIFICADO ###) 
-        1. Se han ajustado las tasas de dilatación de ASPP para capturar mejor los detalles pequeños.
-        2. Se ha añadido un cabezal de segmentación más robusto para refinar la salida final.
-        3. Se han añadido cabezales auxiliares para supervisión profunda (deep supervision).
-        """
-        # ### MODIFICADO ### Tasas de dilatación más pequeñas para detalles finos.
-        atrous_rates=(2, 6, 12)  # Better balance
+        atrous_rates=(2, 6, 12)  # Mejor balance de dilatación
         
         super(CloudDeepLabV3Plus, self).__init__()
         
@@ -211,9 +206,7 @@ class CloudDeepLabV3Plus(nn.Module):
             out_channels=decoder_out_channels[2]
         )
         
-        # --- (### MODIFICADO ###) Cabezal de Segmentación Mejorado ---
-        # En lugar de una sola conv 1x1, usamos un bloque convolucional para
-        # un refinamiento espacial final antes de la clasificación de píxeles.
+        # --- Cabezal de Segmentación Mejorado ---
         self.segmentation_head = nn.Sequential(
             nn.Conv2d(decoder_out_channels[2], 32, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(32),
@@ -221,7 +214,7 @@ class CloudDeepLabV3Plus(nn.Module):
             nn.Conv2d(32, num_classes, kernel_size=1)
         )
 
-        # --- (### NUEVO ###) Cabezales auxiliares para supervisión profunda ---
+        # --- Cabezales auxiliares para supervisión profunda ---
         self.aux_head_3 = nn.Conv2d(decoder_out_channels[0], num_classes, 1)
         self.aux_head_2 = nn.Conv2d(decoder_out_channels[1], num_classes, 1)
 
@@ -230,26 +223,19 @@ class CloudDeepLabV3Plus(nn.Module):
 
 
     def forward(self, x):
-        # 1. Obtener características del backbone en múltiples escalas
         features = self.backbone(x)
 
-        # 2. Procesar características de alto nivel con ASPP
         aspp_output = self.aspp(features[3])
         
-        # 3. Decodificar fusionando progresivamente
         decoder_out3 = self.decoder_block3(x_skip=features[2], x_up=aspp_output)
         decoder_out2 = self.decoder_block2(x_skip=features[1], x_up=decoder_out3)
         decoder_out1 = self.decoder_block1(x_skip=features[0], x_up=decoder_out2)
         
-        # 4. Generar el mapa de segmentación con el cabezal principal
         logits = self.segmentation_head(decoder_out1)
         
-        # 5. Sobredimensionar a tamaño de entrada original
         final_logits = self.final_upsample(logits)
         
-        # --- (### NUEVO ###) Lógica para la supervisión profunda ---
         if self.training:
-            # Salidas auxiliares para supervisión profunda
             aux3 = F.interpolate(self.aux_head_3(decoder_out3),
                                  size=x.shape[-2:], mode='bilinear', align_corners=False)
             aux2 = F.interpolate(self.aux_head_2(decoder_out2),
