@@ -247,8 +247,13 @@ def main():
             A.MultiplicativeNoise(multiplier=(0.9,1.1), p=1),
 
             # Dropout
-            A.CoarseDropout(num_holes_range=8, hole_height_range=8,
-                            hole_width_range=8, fill=0, p=1),
+            A.CoarseDropout(
+                num_holes_range=(1, 8),        # 1-8 agujeros por imagen
+                hole_height_range=(1, 8),      # altura de cada hueco en píxeles
+                hole_width_range=(1, 8),       # anchura de cada hueco en píxeles
+                fill=0,                        # píxeles negros en los huecos
+                p=1
+            ),
 
             # Weather
             A.RandomFog(fog_coef_range=(0.3,0.5), alpha_coef=0.1, p=1),
