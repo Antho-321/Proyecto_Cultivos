@@ -235,13 +235,16 @@ def main():
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
-        A.Rotate(limit=45, p=0.7, border_mode=cv2.BORDER_CONSTANT, value=0),
-        A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=0, p=0.7, border_mode=cv2.BORDER_CONSTANT, value=0),
-        A.Affine(scale=(0.9, 1.1), translate_percent=(-0.1, 0.1), rotate=(-10, 10), shear=(-10, 10), p=0.5),
-        A.Perspective(scale=(0.05, 0.1), keep_size=True, p=0.3),
-        A.ElasticTransform(p=0.3, alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
-        A.GridDistortion(p=0.3),
-        A.OpticalDistortion(p=0.3, distort_limit=2, shift_limit=0.5),
+        # CORREGIDO: value -> fill_value
+        A.Rotate(limit=45, p=0.7, border_mode=cv2.BORDER_CONSTANT, fill_value=0),
+        # CORREGIDO: Se elimina ShiftScaleRotate, ya que Affine es preferible y ya se usa.
+        A.Affine(scale=(0.9, 1.1), translate_percent=(-0.1, 0.1), rotate=(-10, 10), shear=(-10, 10), p=0.5, cval=0), # Se añade cval=0 para el relleno
+        A.Perspective(scale=(0.05, 0.1), keep_size=True, p=0.3, pad_val=0),
+        # CORREGIDO: alpha_affine -> affine_alpha
+        A.ElasticTransform(p=0.3, alpha=120, sigma=120 * 0.05, affine_alpha=120 * 0.03, border_value=0),
+        A.GridDistortion(p=0.3, border_mode=cv2.BORDER_CONSTANT, value=0),
+        # CORREGIDO: shift_limit -> translate_limit
+        A.OpticalDistortion(p=0.3, distort_limit=2, translate_limit=0.5, border_mode=cv2.BORDER_CONSTANT, value=0),
 
         # **3. Transformaciones de Color y Brillo**
         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.8),
@@ -267,24 +270,28 @@ def main():
 
         # **5. Adición de Ruido**
         A.OneOf([
-            A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
+            # CORREGIDO: var_limit -> variance_limit
+            A.GaussNoise(variance_limit=(10.0, 50.0), p=0.5),
             A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=0.5),
             A.MultiplicativeNoise(multiplier=(0.9, 1.1), p=0.5),
         ], p=0.4),
 
         # **6. Transformaciones de Clima (Simulación)**
-        A.RandomFog(fog_coef_lower=0.3, fog_coef_upper=0.5, alpha_coef=0.1, p=0.1),
+        # CORREGIDO: fog_coef_lower/upper -> fog_coef_limit
+        A.RandomFog(fog_coef_limit=(0.3, 0.5), alpha_coef=0.1, p=0.1),
         A.RandomRain(p=0.1),
         A.RandomSnow(p=0.1),
         A.RandomSunFlare(p=0.1),
         A.RandomShadow(p=0.1),
 
         # **7. Recorte y Eliminación (Cutout/Dropout)**
-        A.CoarseDropout(max_holes=8, max_height=8, max_width=8, min_holes=1, min_height=1, min_width=1, fill_value=0, p=0.3),
-        A.RandomResizedCrop(size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), scale=(0.8, 1.0), p=0.3),
+        # CORREGIDO: CoarseDropout -> Cutout y sus argumentos
+        A.Cutout(num_holes=8, max_h_size=8, max_w_size=8, fill_value=0, p=0.3),
+        A.RandomResizedCrop(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH, scale=(0.8, 1.0), p=0.3),
         
         # **8. Otras Transformaciones de Píxeles y Estilo**
-        A.Downscale(scale_min=0.25, scale_max=0.25, p=0.1),
+        # CORREGIDO: scale_min/max -> scale_limit
+        A.Downscale(scale_limit=(0.25, 0.25), p=0.1),
         A.Emboss(p=0.2),
         A.Sharpen(p=0.2),
         A.Posterize(p=0.1),
