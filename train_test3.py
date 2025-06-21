@@ -205,25 +205,30 @@ def main():
     # <-- NUEVO: Pipeline de transformaciones especiales para las clases {0, 4}
     # Incluye las transformaciones que pediste: rotaciones, traslaciones, etc.
     special_aug_transform = A.Compose([
-        # 1. ESSENTIAL: Initial Resize (Always apply)
+        # 1. ESENCIAL: Redimensionamiento inicial (Siempre se aplica)
         A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH, interpolation=cv2.INTER_LINEAR),
 
-        # 2. SELECTION: Apply a random subset of 14 augmentations from this list
+        # 2. SELECCIÓN: Aplica un subconjunto aleatorio de 14 aumentaciones de esta lista
         A.SomeOf([
-            # --- Geometric ---
+            # --- Geométricas ---
             A.HorizontalFlip(p=1),
             A.VerticalFlip(p=1),
             A.RandomRotate90(p=1),
-            A.Rotate(limit=45, border_mode=cv2.BORDER_CONSTANT, value=0, p=1),
-            A.Affine(scale=(0.9, 1.1), translate_percent=(-0.1, 0.1), rotate=(-10, 10), shear=(-10, 10), cval=0, p=1),
-            A.Perspective(scale=(0.05, 0.1), keep_size=True, pad_val=0, p=1),
-            A.ElasticTransform(alpha=120, sigma=120 * 0.05, affine_alpha=120 * 0.03, border_mode=cv2.BORDER_CONSTANT, value=0, p=1),
-            A.GridDistortion(border_mode=cv2.BORDER_CONSTANT, value=0, p=1),
-            A.OpticalDistortion(distort_limit=0.5, shift_limit=0.5, border_mode=cv2.BORDER_CONSTANT, value=0, p=1),
-            # CORRECTED: Uses a 'size' tuple instead of separate height/width
-            A.RandomResizedCrop(size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), scale=(0.8, 1.0), p=1),
+            # CORREGIDO: 'value' es ahora 'fill_value'
+            A.Rotate(limit=45, border_mode=cv2.BORDER_CONSTANT, fill_value=0, p=1),
+            # CORREGIDO: 'cval' es ahora 'fill_value'
+            A.Affine(scale=(0.9, 1.1), translate_percent=(-0.1, 0.1), rotate=(-10, 10), shear=(-10, 10), fill_value=0, p=1),
+            # CORREGIDO: 'pad_val' es ahora 'fill_value'
+            A.Perspective(scale=(0.05, 0.1), keep_size=True, fill_value=0, p=1),
+            # CORREGIDO: 'value' es ahora 'fill_value'
+            A.ElasticTransform(alpha=120, sigma=120 * 0.05, affine_alpha=120 * 0.03, border_mode=cv2.BORDER_CONSTANT, fill_value=0, p=1),
+            # CORREGIDO: 'value' es ahora 'fill_value'
+            A.GridDistortion(border_mode=cv2.BORDER_CONSTANT, fill_value=0, p=1),
+            # CORREGIDO: 'value' es ahora 'fill_value' y 'shift_limit' es más específico
+            A.OpticalDistortion(distort_limit=0.5, shift_limit_x=0.5, shift_limit_y=0.5, border_mode=cv2.BORDER_CONSTANT, fill_value=0, p=1),
+            A.RandomResizedCrop(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH, scale=(0.8, 1.0), p=1),
 
-            # --- Color & Brightness ---
+            # --- Color y Brillo ---
             A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1),
             A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2, p=1),
             A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=1),
@@ -237,26 +242,30 @@ def main():
             A.Equalize(p=1),
             A.ChannelShuffle(p=1),
 
-            # --- Blur ---
+            # --- Desenfoque (Blur) ---
             A.Blur(blur_limit=7, p=1),
             A.GaussianBlur(blur_limit=(3, 7), p=1),
             A.MedianBlur(blur_limit=5, p=1),
             A.MotionBlur(blur_limit=(3, 7), p=1),
 
-            # --- Noise ---
+            # --- Ruido (Noise) ---
+            # NOTA: 'var_limit' es válido pero se recomienda usar 'mean' y 'variance'
             A.GaussNoise(var_limit=(10.0, 50.0), p=1),
             A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=1),
             A.MultiplicativeNoise(multiplier=(0.9, 1.1), p=1),
+            # CORREGIDO: 'fill_value' es el parámetro correcto
             A.CoarseDropout(max_holes=8, max_height=8, max_width=8, fill_value=0, p=1),
 
-            # --- Weather ---
-            A.RandomFog(fog_coef_limit=(0.3, 0.5), alpha_coef=0.1, p=1),
+            # --- Clima (Weather) ---
+            # CORREGIDO: 'fog_coef_limit' se divide en 'lower' y 'upper'
+            A.RandomFog(fog_coef_lower=0.3, fog_coef_upper=0.5, alpha_coef=0.1, p=1),
             A.RandomRain(p=1),
             A.RandomSnow(p=1),
             A.RandomSunFlare(p=1),
             A.RandomShadow(p=1),
             
-            # --- Other ---
+            # --- Otros ---
+            # NOTA: 'scale_min' y 'scale_max' siguen siendo válidos
             A.Downscale(scale_min=0.25, scale_max=0.25, p=1),
             A.Emboss(p=1),
             A.Sharpen(p=1),
@@ -265,7 +274,7 @@ def main():
             
         ], n=Config.NUM_SPECIAL_AUGMENTATIONS, p=1.0),
 
-        # 3. ESSENTIAL: Normalization & Tensor Conversion (Always apply at the end)
+        # 3. ESENCIAL: Normalización y Conversión a Tensor (Siempre al final)
         A.Normalize(
             mean=[0.0, 0.0, 0.0],
             std=[1.0, 1.0, 1.0],
@@ -325,7 +334,7 @@ def main():
     optimizer = optim.AdamW(model.parameters(),
                         lr=Config.LEARNING_RATE,
                         fused=True)        # single-kernel update on GPU
-    scaler = GradScaler(enabled=Config.DEVICE.type == "cuda")
+    scaler = GradScaler(enabled=Config.DEVICE == "cuda")
     best_mIoU = -1.0
 
     train_miou_history = []
