@@ -9,7 +9,7 @@ class Config:
     VAL_MASK_DIR = "Balanced/val/masks"
     
     LEARNING_RATE = 1e-4
-    BATCH_SIZE = 16
+    BATCH_SIZE = 8
     NUM_EPOCHS = 200
     NUM_WORKERS = 2
     

@@ -16,6 +16,10 @@ from model import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, save_performance_plot, crop_around_classes
 from config import Config
 import cv2
+import torch.backends.cudnn as cudnn
+
+cudnn.benchmark = True                    # lets cuDNN pick the fastest algo per shape
+torch.set_float32_matmul_precision('high')   # enables TF32 on Ampere+ GPUs
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -117,7 +121,7 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
     model.train()
 
     for batch_idx, (data, targets) in enumerate(loop):
-        data     = data.to(Config.DEVICE, non_blocking=True)
+        data = data.to(Config.DEVICE, non_blocking=True).to(memory_format=torch.channels_last)
         targets  = targets.to(Config.DEVICE, non_blocking=True).long()
 
         with torch.cuda.amp.autocast():
@@ -312,8 +316,8 @@ def main():
     imprimir_distribucion_clases_post_augmentation(train_loader, 6,
         "Distribución de clases en ENTRENAMIENTO (post-aug)")
 
-    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
-    model = torch.compile(model)
+    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE, memory_format=torch.channels_last)
+    model = torch.compile(model, mode="reduce-overhead")   # or "max-autotune" when you’re done debugging
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
     scaler = GradScaler() 
