@@ -254,7 +254,7 @@ def main():
 
         # **7. Recorte y Eliminación (Cutout/Dropout)**
         A.CoarseDropout(max_holes=8, max_height=8, max_width=8, min_holes=1, min_height=1, min_width=1, fill_value=0, p=0.3),
-        A.RandomResizedCrop(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH, scale=(0.8, 1.0), p=0.3),
+        A.RandomResizedCrop(size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), scale=(0.8, 1.0), p=0.3),
         
         # **8. Otras Transformaciones de Píxeles y Estilo**
         A.Downscale(scale_min=0.25, scale_max=0.25, p=0.1),
