@@ -234,7 +234,7 @@ def main():
         # 2. SELECTION: Apply a random subset of 14 augmentations from this list
         A.SomeOf([
             # --- Geometric ---
-            A.HorizontalFlip(p=1), # p=1 here because the choice is made by SomeOf
+            A.HorizontalFlip(p=1),
             A.VerticalFlip(p=1),
             A.RandomRotate90(p=1),
             A.Rotate(limit=45, border_mode=cv2.BORDER_CONSTANT, value=0, p=1),
@@ -243,7 +243,8 @@ def main():
             A.ElasticTransform(alpha=120, sigma=120 * 0.05, affine_alpha=120 * 0.03, border_mode=cv2.BORDER_CONSTANT, value=0, p=1),
             A.GridDistortion(border_mode=cv2.BORDER_CONSTANT, value=0, p=1),
             A.OpticalDistortion(distort_limit=0.5, shift_limit=0.5, border_mode=cv2.BORDER_CONSTANT, value=0, p=1),
-            A.RandomResizedCrop(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH, scale=(0.8, 1.0), p=1),
+            # CORRECTED: Uses a 'size' tuple instead of separate height/width
+            A.RandomResizedCrop(size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), scale=(0.8, 1.0), p=1),
 
             # --- Color & Brightness ---
             A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1),
@@ -285,7 +286,7 @@ def main():
             A.Posterize(p=1),
             A.FancyPCA(alpha=0.1, p=1),
             
-        ], n=Config.NUM_SPECIAL_AUGMENTATIONS, p=1.0), # p=1.0 to ensure this block always runs
+        ], n=Config.NUM_SPECIAL_AUGMENTATIONS, p=1.0),
 
         # 3. ESSENTIAL: Normalization & Tensor Conversion (Always apply at the end)
         A.Normalize(
