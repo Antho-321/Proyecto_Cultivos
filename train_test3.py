@@ -315,6 +315,7 @@ def main():
         "Distribución de clases en ENTRENAMIENTO (post-aug)")
 
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
+    model = torch.compile(model)
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
     scaler = GradScaler() 
