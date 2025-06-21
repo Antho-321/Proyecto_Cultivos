@@ -2,7 +2,6 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.amp import GradScaler
 from torch.utils.data import DataLoader
@@ -135,74 +134,48 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
         loop.set_postfix(loss=loss.item())
 
 def check_metrics(loader, model, n_classes=6, device="cuda"):
-    """
-    Calcula mIoU macro y Dice macro usando operaciones vectorizadas en la GPU.
-    Esta versión es significativamente más rápida que usar un bucle for sobre las clases.
-    """
+    """Devuelve mIoU macro y Dice macro."""
     eps = 1e-8
-    # Tensores para acumular los valores a lo largo de todos los lotes
-    total_intersection = torch.zeros(n_classes, dtype=torch.float64, device=device)
-    total_union = torch.zeros(n_classes, dtype=torch.float64, device=device)
-    total_dice_num = torch.zeros(n_classes, dtype=torch.float64, device=device)
-    total_dice_den = torch.zeros(n_classes, dtype=torch.float64, device=device)
+    intersection_sum = torch.zeros(n_classes, dtype=torch.float64, device=device)
+    union_sum        = torch.zeros_like(intersection_sum)
+    dice_num_sum     = torch.zeros_like(intersection_sum)
+    dice_den_sum     = torch.zeros_like(intersection_sum)
 
-    model.eval()  # Poner el modelo en modo de evaluación
+    model.eval()
 
-    with torch.no_grad():  # Desactivar el cálculo de gradientes para la inferencia
+    with torch.no_grad():
         for x, y in loader:
             x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True).long()  # Shape: (B, H, W)
+            y = y.to(device, non_blocking=True).long()
 
-            # Inferencia del modelo
             output = model(x)
-            # Asegurarse de obtener los logits, incluso si el modelo devuelve una tupla
-            logits = output[0] if isinstance(output, tuple) else output
-            preds = torch.argmax(logits, dim=1)  # Shape: (B, H, W)
+            logits = output[0] if isinstance(output, tuple) else output # <-- ¡ESTA ES LA CORRECCIÓN CLAVE!
+            preds  = torch.argmax(logits, dim=1)
 
-            # --- INICIO DEL CÁLCULO VECTORIZADO ---
+            for cls in range(n_classes):
+                pred_c   = (preds == cls)
+                true_c   = (y == cls)
+                inter    = (pred_c & true_c).sum().double()
+                pred_sum = pred_c.sum().double()
+                true_sum = true_c.sum().double()
+                union    = pred_sum + true_sum - inter
 
-            # 1. Convertir a formato One-Hot
-            # Convierte las máscaras (y, preds) de (B, H, W) a (B, H, W, C)
-            y_one_hot = F.one_hot(y, num_classes=n_classes)
-            preds_one_hot = F.one_hot(preds, num_classes=n_classes)
-            
-            # 2. Reordenar dimensiones para el cálculo
-            # Cambia el formato a (B, C, H, W) para que las operaciones por canal (clase) sean fáciles
-            y_one_hot = y_one_hot.permute(0, 3, 1, 2)
-            preds_one_hot = preds_one_hot.permute(0, 3, 1, 2)
+                intersection_sum[cls] += inter
+                union_sum[cls]        += union
+                dice_num_sum[cls]     += 2 * inter
+                dice_den_sum[cls]     += pred_sum + true_sum
 
-            # 3. Calcular intersección y unión para todas las clases a la vez
-            # Multiplicar los tensores one-hot nos da la intersección
-            intersection = (preds_one_hot * y_one_hot).sum(dim=(0, 2, 3)).double()
-            
-            # La suma de los píxeles de cada clase por separado
-            sum_preds = preds_one_hot.sum(dim=(0, 2, 3)).double()
-            sum_true = y_one_hot.sum(dim=(0, 2, 3)).double()
-            
-            # Fórmula de la unión: A + B - Intersección
-            union = sum_preds + sum_true - intersection
-
-            # 4. Acumular los resultados del lote actual
-            total_intersection += intersection
-            total_union += union
-            total_dice_num += 2 * intersection
-            total_dice_den += sum_preds + sum_true
-
-            # --- FIN DEL CÁLCULO VECTORIZADO ---
-
-    # Calcular métricas finales después de procesar todos los lotes
-    iou_per_class = (total_intersection + eps) / (total_union + eps)
-    dice_per_class = (total_dice_num + eps) / (total_dice_den + eps)
+    iou_per_class  = (intersection_sum + eps) / (union_sum + eps)
+    dice_per_class = (dice_num_sum   + eps) / (dice_den_sum + eps)
 
     miou_macro = iou_per_class.mean()
     dice_macro = dice_per_class.mean()
 
-    # Imprimir resultados
     print("IoU por clase :", iou_per_class.cpu().numpy())
     print("Dice por clase:", dice_per_class.cpu().numpy())
     print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
 
-    model.train()  # Restaurar el modelo a modo de entrenamiento
+    model.train()
     return miou_macro, dice_macro
 
 # =================================================================================
