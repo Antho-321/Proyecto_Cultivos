@@ -205,81 +205,62 @@ def main():
     # <-- NUEVO: Pipeline de transformaciones especiales para las clases {0, 4}
     # Incluye las transformaciones que pediste: rotaciones, traslaciones, etc.
     special_aug_transform = A.Compose([
-        # 1. ESENCIAL: Redimensionamiento inicial (Siempre se aplica)
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH, interpolation=cv2.INTER_LINEAR),
+        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH,
+                interpolation=cv2.INTER_LINEAR),
 
-        # 2. SELECCIÓN: Aplica un subconjunto aleatorio de 14 aumentaciones de esta lista
         A.SomeOf([
-            # --- Geométricas ---
+            # ­­­Geometric
             A.HorizontalFlip(p=1),
             A.VerticalFlip(p=1),
             A.RandomRotate90(p=1),
-            # CORREGIDO: 'value' es ahora 'fill_value'
-            A.Rotate(limit=45, border_mode=cv2.BORDER_CONSTANT, fill_value=0, p=1),
-            # CORREGIDO: 'cval' es ahora 'fill_value'
-            A.Affine(scale=(0.9, 1.1), translate_percent=(-0.1, 0.1), rotate=(-10, 10), shear=(-10, 10), fill_value=0, p=1),
-            # CORREGIDO: 'pad_val' es ahora 'fill_value'
-            A.Perspective(scale=(0.05, 0.1), keep_size=True, fill_value=0, p=1),
-            # CORREGIDO: 'value' es ahora 'fill_value'
-            A.ElasticTransform(alpha=120, sigma=120 * 0.05, affine_alpha=120 * 0.03, border_mode=cv2.BORDER_CONSTANT, fill_value=0, p=1),
-            # CORREGIDO: 'value' es ahora 'fill_value'
-            A.GridDistortion(border_mode=cv2.BORDER_CONSTANT, fill_value=0, p=1),
-            # CORREGIDO: 'value' es ahora 'fill_value' y 'shift_limit' es más específico
-            A.OpticalDistortion(distort_limit=0.5, shift_limit_x=0.5, shift_limit_y=0.5, border_mode=cv2.BORDER_CONSTANT, fill_value=0, p=1),
-            A.RandomResizedCrop(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH, scale=(0.8, 1.0), p=1),
+            A.Rotate(limit=45, border_mode=cv2.BORDER_CONSTANT, fill=0, p=1),
+            A.Affine(scale=(0.9,1.1), translate_percent=(-.1,.1),
+                    rotate=(-10,10), shear=(-10,10), fill=0, p=1),
+            A.Perspective(scale=(.05,.1), keep_size=True, fill=0, p=1),
+            A.ElasticTransform(alpha=120, sigma=120*0.05, affine_alpha=120*0.03,
+                            border_mode=cv2.BORDER_CONSTANT, fill=0, p=1),
+            A.GridDistortion(border_mode=cv2.BORDER_CONSTANT, fill=0, p=1),
+            A.OpticalDistortion(distort_limit=.5, shift_limit_x=.5, shift_limit_y=.5,
+                                border_mode=cv2.BORDER_CONSTANT, fill=0, p=1),
+            A.RandomResizedCrop(size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
+                                scale=(0.8,1.0), p=1),
 
-            # --- Color y Brillo ---
-            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1),
-            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2, p=1),
-            A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=1),
-            A.RGBShift(r_shift_limit=20, g_shift_limit=20, b_shift_limit=20, p=1),
-            A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=1),
-            A.RandomGamma(gamma_limit=(80, 120), p=1),
-            A.ToGray(p=1),
-            A.ToSepia(p=1),
-            A.InvertImg(p=1),
-            A.Solarize(p=1),
-            A.Equalize(p=1),
-            A.ChannelShuffle(p=1),
+            # ­­­Color / brightness
+            A.RandomBrightnessContrast(.2, .2, p=1),
+            A.ColorJitter(.2, .2, .2, .2, p=1),
+            A.HueSaturationValue(20, 30, 20, p=1),
+            A.RGBShift(20, 20, 20, p=1),
+            A.CLAHE(clip_limit=4.0, tile_grid_size=(8,8), p=1),
+            A.RandomGamma((80,120), p=1),
+            A.ToGray(p=1), A.ToSepia(p=1), A.InvertImg(p=1),
+            A.Solarize(p=1), A.Equalize(p=1), A.ChannelShuffle(p=1),
 
-            # --- Desenfoque (Blur) ---
+            # ­­­Blur
             A.Blur(blur_limit=7, p=1),
-            A.GaussianBlur(blur_limit=(3, 7), p=1),
+            A.GaussianBlur(blur_limit=(3,7), p=1),
             A.MedianBlur(blur_limit=5, p=1),
-            A.MotionBlur(blur_limit=(3, 7), p=1),
+            A.MotionBlur(blur_limit=(3,7), p=1),
 
-            # --- Ruido (Noise) ---
-            # NOTA: 'var_limit' es válido pero se recomienda usar 'mean' y 'variance'
-            A.GaussNoise(var_limit=(10.0, 50.0), p=1),
-            A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=1),
-            A.MultiplicativeNoise(multiplier=(0.9, 1.1), p=1),
-            # CORREGIDO: 'fill_value' es el parámetro correcto
-            A.CoarseDropout(max_holes=8, max_height=8, max_width=8, fill_value=0, p=1),
+            # ­­­Noise
+            A.GaussNoise(std_range=(10.0, 50.0), p=1),
+            A.ISONoise(color_shift=(0.01,0.05), intensity=(0.1,0.5), p=1),
+            A.MultiplicativeNoise(multiplier=(0.9,1.1), p=1),
 
-            # --- Clima (Weather) ---
-            # CORREGIDO: 'fog_coef_limit' se divide en 'lower' y 'upper'
-            A.RandomFog(fog_coef_lower=0.3, fog_coef_upper=0.5, alpha_coef=0.1, p=1),
-            A.RandomRain(p=1),
-            A.RandomSnow(p=1),
-            A.RandomSunFlare(p=1),
-            A.RandomShadow(p=1),
-            
-            # --- Otros ---
-            # NOTA: 'scale_min' y 'scale_max' siguen siendo válidos
-            A.Downscale(scale_min=0.25, scale_max=0.25, p=1),
-            A.Emboss(p=1),
-            A.Sharpen(p=1),
-            A.Posterize(p=1),
-            A.FancyPCA(alpha=0.1, p=1),
-            
+            # ­­­Dropout
+            A.CoarseDropout(num_holes_range=8, hole_height_range=8,
+                            hole_width_range=8, fill=0, p=1),
+
+            # ­­­Weather
+            A.RandomFog(fog_coef_range=(0.3,0.5), alpha_coef=0.1, p=1),
+            A.RandomRain(p=1), A.RandomSnow(p=1),
+            A.RandomSunFlare(p=1), A.RandomShadow(p=1),
+
+            # ­­­Other
+            A.Downscale(scale_range=(0.25,0.25), p=1),
+            A.Emboss(p=1), A.Sharpen(p=1), A.Posterize(p=1), A.FancyPCA(alpha=.1, p=1),
         ], n=Config.NUM_SPECIAL_AUGMENTATIONS, p=1.0),
 
-        # 3. ESENCIAL: Normalización y Conversión a Tensor (Siempre al final)
-        A.Normalize(
-            mean=[0.0, 0.0, 0.0],
-            std=[1.0, 1.0, 1.0],
-            max_pixel_value=255.0,
-        ),
+        A.Normalize(mean=[0,0,0], std=[1,1,1], max_pixel_value=255.0),
         ToTensorV2(),
     ])
 
