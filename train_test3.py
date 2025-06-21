@@ -209,7 +209,7 @@ def main():
                 interpolation=cv2.INTER_LINEAR),
 
         A.SomeOf([
-            # ­­­Geometric
+            # Geometric
             A.HorizontalFlip(p=1),
             A.VerticalFlip(p=1),
             A.RandomRotate90(p=1),
@@ -225,7 +225,7 @@ def main():
             A.RandomResizedCrop(size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
                                 scale=(0.8,1.0), p=1),
 
-            # ­­­Color / brightness
+            # Color / brightness
             A.RandomBrightnessContrast(.2, .2, p=1),
             A.ColorJitter(.2, .2, .2, .2, p=1),
             A.HueSaturationValue(20, 30, 20, p=1),
@@ -235,27 +235,27 @@ def main():
             A.ToGray(p=1), A.ToSepia(p=1), A.InvertImg(p=1),
             A.Solarize(p=1), A.Equalize(p=1), A.ChannelShuffle(p=1),
 
-            # ­­­Blur
+            # Blur
             A.Blur(blur_limit=7, p=1),
             A.GaussianBlur(blur_limit=(3,7), p=1),
             A.MedianBlur(blur_limit=5, p=1),
             A.MotionBlur(blur_limit=(3,7), p=1),
 
-            # ­­­Noise
-            A.GaussNoise(std_range=(10.0, 50.0), p=1),
+            # Noise  (⇣ aquí el cambio)
+            A.GaussNoise(std_range=(10/255.0, 50/255.0), p=1),
             A.ISONoise(color_shift=(0.01,0.05), intensity=(0.1,0.5), p=1),
             A.MultiplicativeNoise(multiplier=(0.9,1.1), p=1),
 
-            # ­­­Dropout
+            # Dropout
             A.CoarseDropout(num_holes_range=8, hole_height_range=8,
                             hole_width_range=8, fill=0, p=1),
 
-            # ­­­Weather
+            # Weather
             A.RandomFog(fog_coef_range=(0.3,0.5), alpha_coef=0.1, p=1),
             A.RandomRain(p=1), A.RandomSnow(p=1),
             A.RandomSunFlare(p=1), A.RandomShadow(p=1),
 
-            # ­­­Other
+            # Other
             A.Downscale(scale_range=(0.25,0.25), p=1),
             A.Emboss(p=1), A.Sharpen(p=1), A.Posterize(p=1), A.FancyPCA(alpha=.1, p=1),
         ], n=Config.NUM_SPECIAL_AUGMENTATIONS, p=1.0),
