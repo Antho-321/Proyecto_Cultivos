@@ -293,10 +293,13 @@ def main():
     )
     train_loader = DataLoader(
         train_dataset,
-        batch_size=Config.BATCH_SIZE,
-        num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY,
-        shuffle=True  # Shuffle es clave para mezclar las muestras originales y las aumentadas
+        batch_size   = Config.BATCH_SIZE,
+        num_workers  = Config.NUM_WORKERS,   # leave high (≈#CPU cores)
+        pin_memory   = Config.PIN_MEMORY,                 # you already pass non_blocking=True later
+        persistent_workers = True,           # keeps worker processes alive
+        prefetch_factor    = 4,              # >2 helps hide latency
+        shuffle=True,
+        drop_last=True                       # keeps all batches same shape → cudnn.benchmark happier
     )
 
     # El dataset de validación no se expande para tener una métrica consistente
@@ -319,8 +322,10 @@ def main():
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE, memory_format=torch.channels_last)
     model = torch.compile(model, mode="reduce-overhead")   # or "max-autotune" when you’re done debugging
     loss_fn = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
-    scaler = GradScaler() 
+    optimizer = optim.AdamW(model.parameters(),
+                        lr=Config.LEARNING_RATE,
+                        fused=True)        # single-kernel update on GPU
+    scaler = GradScaler(enabled=Config.DEVICE.type == "cuda")
     best_mIoU = -1.0
 
     train_miou_history = []
