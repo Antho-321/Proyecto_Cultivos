@@ -48,23 +48,30 @@ class CloudDataset(torch.utils.data.Dataset):
         if not os.path.exists(mask_path):
             raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
 
-        image = np.array(Image.open(img_path).convert("RGB"))
-        mask = np.array(Image.open(mask_path).convert("L"))
+        # 1. Load data as NumPy arrays on the CPU
+        image_np = np.array(Image.open(img_path).convert("RGB"))
+        mask_np = np.array(Image.open(mask_path).convert("L"))
+        mask_3d_np = np.expand_dims(mask_np, axis=-1)
 
-        # --- MODIFICACIÓN CLAVE: Aplicar recorte ANTES de las transformaciones ---
-        # 1. Añadir una dimensión de canal a la máscara para que sea (H, W, 1)
-        mask_3d = np.expand_dims(mask, axis=-1)
+        # 2. Move data from CPU (NumPy) to GPU (CuPy)
+        image_gpu = cp.asarray(image_np)
+        mask_3d_gpu = cp.asarray(mask_3d_np)
         
-        # 2. Aplicar la función de recorte
-        image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
+        # 3. Apply the GPU-based cropping function
+        image_cropped_gpu, mask_cropped_3d_gpu = crop_around_classes(image_gpu, mask_3d_gpu)
 
-        # 3. Quitar la dimensión del canal de la máscara para Albumentations
-        mask_cropped = mask_cropped_3d.squeeze()
-        # ------------------------------------------------------------------------
+        # 4. Move the cropped result from GPU (CuPy) back to CPU (NumPy)
+        #    This is crucial because Albumentations and PyTorch's collate_fn
+        #    expect CPU-based NumPy arrays or PIL Images.
+        image_cropped_np = cp.asnumpy(image_cropped_gpu)
+        mask_cropped_3d_np = cp.asnumpy(mask_cropped_3d_gpu)
+
+        # 5. Squeeze the mask for Albumentations
+        mask_cropped_np = mask_cropped_3d_np.squeeze()
 
         if self.transform:
-            # Pasa los arrays RECORTADOS a las transformaciones
-            augmented = self.transform(image=image_cropped, mask=mask_cropped)
+            # Pass the CROPPED NUMPY arrays to the transformations
+            augmented = self.transform(image=image_cropped_np, mask=mask_cropped_np)
             image = augmented["image"]
             mask = augmented["mask"]
 
