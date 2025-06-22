@@ -137,75 +137,50 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
 
         loop.set_postfix(loss=loss.item())
 
-@torch.no_grad()
 def check_metrics(loader, model, n_classes=6, device="cuda"):
-    """
-    Devuelve mIoU macro y Dice macro calculados de forma eficiente.
+    """Devuelve mIoU macro y Dice macro."""
+    eps = 1e-8
+    intersection_sum = torch.zeros(n_classes, dtype=torch.float64, device=device)
+    union_sum        = torch.zeros_like(intersection_sum)
+    dice_num_sum     = torch.zeros_like(intersection_sum)
+    dice_den_sum     = torch.zeros_like(intersection_sum)
 
-    Esta función calcula la matriz de confusión de manera optimizada usando
-    torch.bincount, evitando bucles lentos en Python. Luego, deriva
-    las métricas de mIoU y Dice a partir de la matriz.
-    """
     model.eval()
 
-    # Inicializa la matriz de confusión para acumular los resultados de todos los lotes.
-    conf_mat = torch.zeros((n_classes, n_classes), dtype=torch.int64, device=device)
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True).long()
 
-    for x, y in loader:
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True).long()
+            output = model(x)
+            logits = output[0] if isinstance(output, tuple) else output # <-- ¡ESTA ES LA CORRECCIÓN CLAVE!
+            preds  = torch.argmax(logits, dim=1)
 
-        # Obtiene las predicciones del modelo.
-        # Maneja tanto salidas directas como en tuplas (p. ej., de modelos con auxiliary heads).
-        output = model(x)
-        logits = output[0] if isinstance(output, tuple) else output
-        preds = torch.argmax(logits, dim=1)
+            for cls in range(n_classes):
+                pred_c   = (preds == cls)
+                true_c   = (y == cls)
+                inter    = (pred_c & true_c).sum().double()
+                pred_sum = pred_c.sum().double()
+                true_sum = true_c.sum().double()
+                union    = pred_sum + true_sum - inter
 
-        # El truco para una actualización eficiente de la matriz de confusión:
-        # a) Codificamos el par (etiqueta_real, etiqueta_predicha) en un único entero.
-        #    Cada par (y, pred) tiene un índice único en el rango [0, n_classes**2 - 1].
-        k = (y * n_classes + preds).view(-1)
+                intersection_sum[cls] += inter
+                union_sum[cls]        += union
+                dice_num_sum[cls]     += 2 * inter
+                dice_den_sum[cls]     += pred_sum + true_sum
 
-        # b) Usamos bincount para contar las ocurrencias de cada par (y, pred) en el lote.
-        #    Este es un kernel de CUDA/C++ muy rápido. El resultado se remodela
-        #    a la forma de la matriz de confusión y se suma al total.
-        conf_mat += torch.bincount(
-            k, minlength=n_classes ** 2).reshape(n_classes, n_classes)
+    iou_per_class  = (intersection_sum + eps) / (union_sum + eps)
+    dice_per_class = (dice_num_sum   + eps) / (dice_den_sum + eps)
 
-    # --- Cálculo de métricas a partir de la matriz de confusión completa ---
-
-    # Usamos double para mayor precisión, como en la función original.
-    conf_mat_float = conf_mat.double()
-    eps = 1e-8
-
-    # Verdaderos Positivos (TP) por clase son los elementos de la diagonal.
-    intersection = torch.diag(conf_mat_float)
-
-    # Suma de filas (TP + FN) y columnas (TP + FP).
-    sum_filas = conf_mat_float.sum(axis=1) # Total de etiquetas reales por clase
-    sum_cols = conf_mat_float.sum(axis=0) # Total de etiquetas predichas por clase
-
-    # Unión (TP + FP + FN) por clase.
-    union = sum_filas + sum_cols - intersection
-
-    # IoU por clase.
-    iou_per_class = (intersection + eps) / (union + eps)
-
-    # Coeficiente de Dice por clase.
-    # Numerador = 2 * TP; Denominador = (TP + FN) + (TP + FP)
-    dice_per_class = (2 * intersection + eps) / (sum_filas + sum_cols + eps)
-
-    # Métricas macro-promediadas.
     miou_macro = iou_per_class.mean()
     dice_macro = dice_per_class.mean()
 
-    # Se mantienen los prints solicitados de la función original.
     print("IoU por clase :", iou_per_class.cpu().numpy())
     print("Dice por clase:", dice_per_class.cpu().numpy())
-    print(f"mIoU macro = {miou_macro.item():.4f} | Dice macro = {dice_macro.item():.4f}")
+    print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
 
     model.train()
-    return miou_macro.item(), dice_macro.item()
+    return miou_macro, dice_macro
 
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
@@ -361,8 +336,8 @@ def main():
         print("Calculando métricas de validación...")
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
 
-        train_miou_history.append(train_mIoU)
-        val_miou_history.append(current_mIoU)
+        train_miou_history.append(train_mIoU.item())
+        val_miou_history.append(current_mIoU.item())
 
         if current_mIoU > best_mIoU:
             best_mIoU = current_mIoU
