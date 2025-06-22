@@ -1,8 +1,6 @@
-# utils.py
-
 import torch
 from tqdm import tqdm
-import cupy as cp
+import numpy as np
 import matplotlib.pyplot as plt
 
 def imprimir_distribucion_clases_post_augmentation(loader, n_classes=6, title="Distribución de clases post-augmentation"):
@@ -41,7 +39,7 @@ def imprimir_distribucion_clases_post_augmentation(loader, n_classes=6, title="D
     # Normalizamos para que el promedio sea 1 (opcional pero práctico).
     eps = 1e-8                                         # evita división por 0
     raw_weights = total_pixels / (n_classes * (class_counts.float() + eps))
-    class_weights = raw_weights / raw_weights.mean()
+    class_weights = raw_weights / raw_weights.mean()   # media = 1
     # ------------------------------------------------------------------
 
     # Imprime los resultados
@@ -63,48 +61,33 @@ def imprimir_distribucion_clases_post_augmentation(loader, n_classes=6, title="D
 # FUNCIÓN DE RECORTE (AÑADIDA)
 # =================================================================================
 def crop_around_classes(
-    image: cp.ndarray,
-    mask: cp.ndarray,
+    image: np.ndarray,
+    mask: np.ndarray,
     classes_to_find: list[int] = [1, 2, 3, 4, 5],
-    margin: int = 10
-) -> tuple[cp.ndarray, cp.ndarray]:
+    margin: int = 10  # <--- AÑADIDO: Un pequeño margen puede ser útil
+) -> tuple[np.ndarray, np.ndarray]:
     """
-    Crops a rectangle around all pixels belonging to the specified
-    classes in the mask using CuPy for GPU execution.
-
-    Args:
-        image (cp.ndarray): Input image on the GPU.
-        mask (cp.ndarray): Input mask on the GPU.
-        classes_to_find (list[int]): List of class IDs to find.
-        margin (int): Margin to add around the bounding box.
-
-    Returns:
-        A tuple containing the cropped image and cropped mask as cp.ndarray.
+    Recorta un rectángulo alrededor de todos los píxeles que pertenecen a las
+    clases especificadas en la máscara.
     """
-    # Ensure classes_to_find is a CuPy array for isin
-    classes_to_find_gpu = cp.array(classes_to_find, dtype=cp.int32)
+    # is_class_present será 2D (H,W) ya que la máscara de entrada es (H,W,1)
+    is_class_present = np.isin(mask.squeeze(), classes_to_find)
 
-    # is_class_present will be 2D (H,W)
-    is_class_present = cp.isin(mask.squeeze(), classes_to_find_gpu)
-
-    # cp.where returns tuple of arrays, just like np.where
-    ys, xs = cp.where(is_class_present)
+    ys, xs = np.where(is_class_present)
 
     if ys.size == 0:
-        return image, mask # Return original GPU arrays
+        return image, mask # Devuelve la máscara original (H,W,1)
 
-    # .min() and .max() are efficient on GPU
     y_min, y_max = ys.min(), ys.max()
     x_min, x_max = xs.min(), xs.max()
 
-    # Calculations are done on the GPU
-    y0 = cp.maximum(0, y_min - margin)
-    y1 = cp.minimum(mask.shape[0], y_max + margin + 1)
-    x0 = cp.maximum(0, x_min - margin)
-    x1 = cp.minimum(mask.shape[1], x_max + margin + 1)
+    y0 = max(0, y_min - margin)
+    y1 = min(mask.shape[0], y_max + margin + 1)
+    x0 = max(0, x_min - margin)
+    x1 = min(mask.shape[1], x_max + margin + 1)
 
-    # Slicing is also performed on the GPU
     cropped_image = image[y0:y1, x0:x1]
+    # Se recorta la máscara (H,W,1) y mantiene sus 3 dimensiones
     cropped_mask = mask[y0:y1, x0:x1, :]
 
     return cropped_image, cropped_mask
