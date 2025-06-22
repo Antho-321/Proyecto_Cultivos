@@ -60,7 +60,7 @@ def imprimir_distribucion_clases_post_augmentation(loader, n_classes=6, title="D
 # =================================================================================
 # FUNCIÓN DE RECORTE (AÑADIDA)
 # =================================================================================
-def crop_around_classes_gpu(
+def crop_around_classes(
     image: cp.ndarray,
     mask: cp.ndarray,
     classes_to_find: list[int] = [1, 2, 3, 4, 5],
