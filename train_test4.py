@@ -11,6 +11,7 @@ from albumentations.pytorch import ToTensorV2
 import os
 from PIL import Image
 import numpy as np
+import cupy as cp
 # Importa la arquitectura del otro archivo
 from model import CloudDeepLabV3Plus
 import matplotlib.pyplot as plt
