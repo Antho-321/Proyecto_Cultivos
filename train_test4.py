@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
+import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
@@ -176,6 +177,16 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.train()
     return miou_macro, dice_macro
 
+def worker_init_fn(worker_id):
+    """Initializes the CUDA device for CuPy in each worker process."""
+    # The worker gets a new process, so we need to set the device for CuPy
+    # We use the device PyTorch is using in the main process
+    try:
+        gpu_id = torch.cuda.current_device()
+        cp.cuda.Device(gpu_id).use()
+    except Exception as e:
+        print(f"Error initializing CuPy in worker {worker_id}: {e}")
+
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
 # =================================================================================
@@ -217,7 +228,8 @@ def main():
         batch_size=Config.BATCH_SIZE,
         num_workers=Config.NUM_WORKERS,
         pin_memory=Config.PIN_MEMORY,
-        shuffle=True
+        shuffle=True,
+        worker_init_fn=worker_init_fn
     )
 
     val_dataset = CloudDataset(
@@ -230,7 +242,8 @@ def main():
         batch_size=Config.BATCH_SIZE,
         num_workers=Config.NUM_WORKERS,
         pin_memory=Config.PIN_MEMORY,
-        shuffle=False
+        shuffle=False,
+        worker_init_fn=worker_init_fn
     )
 
     imprimir_distribucion_clases_post_augmentation(train_loader, 6,
@@ -292,4 +305,13 @@ def main():
     best_mIoU, best_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
     print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
 if __name__ == "__main__":
+    # CRITICAL: Set the start method to 'spawn'
+    # This must be done inside the __name__ == "__main__" block
+    # and before any CUDA operations or DataLoader instantiation.
+    try:
+        mp.set_start_method('spawn', force=True)
+        print("Multiprocessing start method set to 'spawn'.")
+    except RuntimeError:
+        pass # It may already be set
+
     main()
