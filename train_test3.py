@@ -361,8 +361,8 @@ def main():
         print("Calculando métricas de validación...")
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
 
-        train_miou_history.append(train_mIoU.item())
-        val_miou_history.append(current_mIoU.item())
+        train_miou_history.append(train_mIoU)
+        val_miou_history.append(current_mIoU)
 
         if current_mIoU > best_mIoU:
             best_mIoU = current_mIoU
