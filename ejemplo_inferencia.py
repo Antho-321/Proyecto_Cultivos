@@ -16,7 +16,7 @@ def main():
                               "5-365m3_jpg.rf.03efe0cdb37570e749c0c0c55be70e12.jpg")
     mask_path  = os.path.join(Config.VAL_MASK_DIR,
                               "5-365m3_jpg.rf.03efe0cdb37570e749c0c0c55be70e12.png")
-    model_path = "datos_expo/cultivos_deeplab_final.pt"
+    model_path = "/content/drive/MyDrive/colab/cultivos_deeplab_final.pt"
 
     # 2) Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
