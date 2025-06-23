@@ -67,7 +67,7 @@ def main():
     pred_rgb = pred_img.convert("RGB").resize(original.size, resample=Image.NEAREST)
 
     # 8) Plot de los tres paneles
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6), constrained_layout=True)
 
     axes[0].imshow(original)
     axes[0].set_title("Imagen Original")
@@ -81,9 +81,8 @@ def main():
     axes[2].set_title("Máscara Predicha")
     axes[2].axis("off")
 
-    plt.tight_layout()
-    plt.savefig("image_and_masks.png", dpi=300)
-    print("Guardado image_and_masks.png")
+    # guardamos sin recortar nada
+    plt.savefig("image_and_masks.png", dpi=300, bbox_inches='tight')
     plt.show()
 
 if __name__ == "__main__":
