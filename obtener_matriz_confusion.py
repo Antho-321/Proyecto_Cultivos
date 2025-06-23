@@ -1,14 +1,15 @@
+import os
 import torch
-from config import Config
-from train_test4 import CloudDataset, CloudDeepLabV3Plus
 from torch.utils.data import DataLoader
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from sklearn.metrics import confusion_matrix
 import numpy as np
-import os
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+from config import Config
+from train_test4 import CloudDataset, CloudDeepLabV3Plus
 
 def get_val_loader():
     val_transform = A.Compose([
@@ -19,7 +20,7 @@ def get_val_loader():
 
     val_ds = CloudDataset(
         image_dir=Config.VAL_IMG_DIR,
-        mask_dir= Config.VAL_MASK_DIR,
+        mask_dir=Config.VAL_MASK_DIR,
         transform=val_transform
     )
     return DataLoader(
@@ -30,38 +31,21 @@ def get_val_loader():
         shuffle=False
     )
 
-# ================================
-# 2. CARGA DE MODELO
-# ================================
 def load_model(checkpoint_path: str, device: torch.device):
-    """
-    Carga el modelo desde un checkpoint, manejando el prefijo '_orig_mod.' 
-    añadido por torch.compile().
-    """
     model = CloudDeepLabV3Plus(num_classes=6).to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    
-    # Obtener el state_dict del checkpoint
     state_dict = checkpoint['state_dict']
-    
-    # Crear un nuevo state_dict sin el prefijo '_orig_mod.'
-    new_state_dict = {}
-    for k, v in state_dict.items():
+    # corregir prefijo de torch.compile()
+    new_sd = {}
+    for k,v in state_dict.items():
         if k.startswith('_orig_mod.'):
-            # Eliminar el prefijo: '_orig_mod.' tiene 10 caracteres
-            name = k[10:] 
-            new_state_dict[name] = v
+            new_sd[k[10:]] = v
         else:
-            new_state_dict[k] = v
-            
-    # Cargar el state_dict corregido
-    model.load_state_dict(new_state_dict)
+            new_sd[k] = v
+    model.load_state_dict(new_sd)
     model.eval()
     return model
 
-# ================================
-# 3. CÁLCULO DE MATRIZ DE CONFUSIÓN
-# ================================
 def compute_and_plot_confusion_matrix(model, loader, device):
     all_preds = []
     all_labels = []
@@ -80,34 +64,37 @@ def compute_and_plot_confusion_matrix(model, loader, device):
     y_pred = np.concatenate(all_preds)
     y_true = np.concatenate(all_labels)
 
-    # generar matriz de confusión
+    # 1) Confusion matrix absoluta
     cm = confusion_matrix(y_true, y_pred, labels=list(range(6)))
-    print("Matriz de confusión:\n", cm)
+    print("Matriz de confusión (absoluta):\n", cm)
 
-    # plot
     class_names = [f"Clase {i}" for i in range(6)]
     plt.figure(figsize=(7,6))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
                 xticklabels=class_names, yticklabels=class_names)
     plt.xlabel("Predichos")
     plt.ylabel("Reales")
-    plt.title("Matriz de Confusión")
+    plt.title("Matriz de Confusión (absoluta)")
     plt.tight_layout()
+    plt.savefig("matriz_confusion_absoluta.png", dpi=300)
+    plt.close()
 
-    # =================================================================
-    # AÑADE ESTA LÍNEA PARA GUARDAR EL GRÁFICO
-    # =================================================================
-    # Puedes cambiar el nombre y el formato del archivo (png, jpg, pdf, etc.)
-    plt.savefig('matriz_de_confusion.png', dpi=300) 
-    # =================================================================
-
-    plt.show() # Esta línea ahora mostrará el gráfico después de guardarlo.
+    # 2) Confusion matrix normalizada por fila
+    cm_norm = cm.astype(float) / cm.sum(axis=1)[:, np.newaxis]
+    plt.figure(figsize=(7,6))
+    sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues",
+                xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel("Predichos")
+    plt.ylabel("Reales")
+    plt.title("Matriz de Confusión (normalizada por fila)")
+    plt.tight_layout()
+    plt.savefig("matriz_confusion_normalizada.png", dpi=300)
+    plt.show()
 
 def main():
     device = torch.device(Config.DEVICE)
     val_loader = get_val_loader()
 
-    # ruta a tu checkpoint
     checkpoint_path = r"/content/drive/MyDrive/colab/0.8410.pth.tar"
     if not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(f"No se encontró el archivo: {checkpoint_path}")
