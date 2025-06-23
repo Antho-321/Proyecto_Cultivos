@@ -93,7 +93,15 @@ def compute_and_plot_confusion_matrix(model, loader, device):
     plt.ylabel("Reales")
     plt.title("Matriz de Confusión")
     plt.tight_layout()
-    plt.show()
+
+    # =================================================================
+    # AÑADE ESTA LÍNEA PARA GUARDAR EL GRÁFICO
+    # =================================================================
+    # Puedes cambiar el nombre y el formato del archivo (png, jpg, pdf, etc.)
+    plt.savefig('matriz_de_confusion.png', dpi=300) 
+    # =================================================================
+
+    plt.show() # Esta línea ahora mostrará el gráfico después de guardarlo.
 
 def main():
     device = torch.device(Config.DEVICE)
