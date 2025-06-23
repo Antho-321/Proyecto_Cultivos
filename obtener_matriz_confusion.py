@@ -81,7 +81,7 @@ def main():
     val_loader = get_val_loader()
 
     # ruta a tu checkpoint
-    checkpoint_path = r"C:\Users\Administrador\Documents\INGENIERIA_EN_SOFTWARE\BIG_DATA\CÓDIGO\Proyecto_Cultivos\checkpoints\0.8410.pth.tar"
+    checkpoint_path = r"/content/drive/MyDrive/colab/0.8410.pth.tar"
     if not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(f"No se encontró el archivo: {checkpoint_path}")
 
