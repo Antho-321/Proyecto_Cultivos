@@ -24,7 +24,7 @@ def main():
     # Corrected block
     # 3) Carga del modelo
     # The .pt file is a TorchScript model, so we load it directly.
-    model = torch.load(model_path, map_location=device)
+    model = torch.load(model_path, map_location=device, weights_only=False)
     model.eval()
 
     # 4) Carga de la imagen y la máscara GT
