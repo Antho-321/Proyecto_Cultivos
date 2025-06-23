@@ -21,12 +21,10 @@ def main():
     # 2) Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Corrected block
     # 3) Carga del modelo
-    model = CloudDeepLabV3Plus(num_classes=6).to(device)
-    ckpt = torch.load(model_path, map_location=device, weights_only=False)
-    # Asume que el checkpoint guarda directamente state_dict; si usas {"state_dict":...}, ajusta:
-    state = ckpt.get("state_dict", ckpt)
-    model.load_state_dict(state)
+    # The .pt file is a TorchScript model, so we load it directly.
+    model = torch.load(model_path, map_location=device)
     model.eval()
 
     # 4) Carga de la imagen y la máscara GT
