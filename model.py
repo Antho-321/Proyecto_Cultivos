@@ -157,8 +157,9 @@ class DecoderBlock(nn.Module):
         
         # Residual connection
         x_residual = self.align_channels(x_skip)
-        if x_residual.shape[-2:] != x_fused.shape[-2:]:
-            x_residual = F.interpolate(x_residual, size=x_fused.shape[-2:], mode='bilinear', align_corners=False)
+        x_residual = F.interpolate(
+            x_residual, size=x_fused.shape[-2:], mode='bilinear', align_corners=False
+        )
         
         return self.final_relu(x_fused + x_residual)
 
