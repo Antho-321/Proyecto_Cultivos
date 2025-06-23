@@ -15,7 +15,7 @@ def main():
     image_path = os.path.join(Config.VAL_IMG_DIR,
                               "5-365m3_jpg.rf.03efe0cdb37570e749c0c0c55be70e12.jpg")
     mask_path  = os.path.join(Config.VAL_MASK_DIR,
-                              "5-365m3_jpg.rf.03efe0cdb37570e749c0c0c55be70e12.png")
+                              "5-365m3_jpg.rf.03efe0cdb37570e749c0c0c55be70e12_mask.png")
     model_path = "/content/drive/MyDrive/colab/cultivos_deeplab_final.pt"
 
     # 2) Device
