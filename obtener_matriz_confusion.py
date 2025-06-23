@@ -34,9 +34,28 @@ def get_val_loader():
 # 2. CARGA DE MODELO
 # ================================
 def load_model(checkpoint_path: str, device: torch.device):
+    """
+    Carga el modelo desde un checkpoint, manejando el prefijo '_orig_mod.' 
+    añadido por torch.compile().
+    """
     model = CloudDeepLabV3Plus(num_classes=6).to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint['state_dict'])
+    
+    # Obtener el state_dict del checkpoint
+    state_dict = checkpoint['state_dict']
+    
+    # Crear un nuevo state_dict sin el prefijo '_orig_mod.'
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith('_orig_mod.'):
+            # Eliminar el prefijo: '_orig_mod.' tiene 10 caracteres
+            name = k[10:] 
+            new_state_dict[name] = v
+        else:
+            new_state_dict[k] = v
+            
+    # Cargar el state_dict corregido
+    model.load_state_dict(new_state_dict)
     model.eval()
     return model
 
