@@ -63,7 +63,7 @@ class CloudDataset(torch.utils.data.Dataset):
         print(f"Dataset inicializado. Tamaño original: {len(all_images)}, Tamaño con aumentación: {len(self.samples)}")
 
     def __len__(self) -> int:
-        return len(self.images)
+        return len(self.samples)
 
     def _mask_path_from_image_name(self, image_filename: str) -> str:
         name_without_ext = image_filename.rsplit('.', 1)[0]
