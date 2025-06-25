@@ -349,10 +349,10 @@ def main():
 
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
-        train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
         
         # --- 3. CALCULAR MÉTRICAS PARA ENTRENAMIENTO Y VALIDACIÓN ---
         print("Calculando métricas de entrenamiento...")
+        train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
         print(f"mIoU por clase en entrenamiento: {train_mIoU.cpu().numpy()}")
         #train_mIoU, _ = check_metrics(train_loader, model, n_classes=6, device=Config.DEVICE)
         
