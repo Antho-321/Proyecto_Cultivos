@@ -115,14 +115,19 @@ class CloudDataset(torch.utils.data.Dataset):
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
 # ... (El resto de tu código: train_fn, check_metrics)
 # =================================================================================
-def train_fn(loader, model, optimizer, loss_fn, scaler):
-    """Procesa una época de entrenamiento."""
+def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
+    """Procesa una época de entrenamiento con cálculo de IoU por clase."""
     loop = tqdm(loader, leave=True)
     model.train()
 
+    # Inicializamos los contadores para cada clase
+    tp = torch.zeros(num_classes).to(Config.DEVICE)
+    fp = torch.zeros(num_classes).to(Config.DEVICE)
+    fn = torch.zeros(num_classes).to(Config.DEVICE)
+
     for batch_idx, (data, targets) in enumerate(loop):
-        data     = data.to(Config.DEVICE, non_blocking=True)
-        targets  = targets.to(Config.DEVICE, non_blocking=True).long()
+        data = data.to(Config.DEVICE, non_blocking=True)
+        targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
         with autocast(device_type=Config.DEVICE, dtype=torch.float16):
             # Desempaquetamos o seleccionamos la salida principal
@@ -135,7 +140,26 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
         scaler.step(optimizer)
         scaler.update()
 
+        # Convertir las predicciones a etiquetas de clase
+        _, predicted_classes = torch.max(predictions, dim=1)
+
+        # Para cada clase, contar TP, FP y FN
+        for c in range(num_classes):
+            true_positives = (predicted_classes == c) & (targets == c)
+            false_positives = (predicted_classes == c) & (targets != c)
+            false_negatives = (predicted_classes != c) & (targets == c)
+
+            tp[c] += true_positives.sum().item()
+            fp[c] += false_positives.sum().item()
+            fn[c] += false_negatives.sum().item()
+
+        # Actualizar el loop con la pérdida
         loop.set_postfix(loss=loss.item())
+
+    # Calcular el IoU para cada clase
+    iou = tp / (tp + fp + fn)
+    
+    return iou
 
 def check_metrics(loader, model, n_classes=6, device="cuda"):
     """Devuelve mIoU macro y Dice macro."""
@@ -325,11 +349,12 @@ def main():
 
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
-        train_fn(train_loader, model, optimizer, loss_fn, scaler)
+        train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
         
         # --- 3. CALCULAR MÉTRICAS PARA ENTRENAMIENTO Y VALIDACIÓN ---
         print("Calculando métricas de entrenamiento...")
-        train_mIoU, _ = check_metrics(train_loader, model, n_classes=6, device=Config.DEVICE)
+        print(f"mIoU por clase en entrenamiento: {train_mIoU.cpu().numpy()}")
+        #train_mIoU, _ = check_metrics(train_loader, model, n_classes=6, device=Config.DEVICE)
         
         print("Calculando métricas de validación...")
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
