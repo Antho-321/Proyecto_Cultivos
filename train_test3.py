@@ -360,7 +360,7 @@ def main():
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
 
         # --- 4. GUARDAR LAS MÉTRICAS EN EL HISTORIAL ---
-        train_miou_history.append(train_mIoU.item()) # .item() para obtener el valor escalar
+        train_miou_history.append(train_mIoU.mean().item())
         val_miou_history.append(current_mIoU.item())
 
         if current_mIoU > best_mIoU:
