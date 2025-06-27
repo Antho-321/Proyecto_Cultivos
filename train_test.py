@@ -143,8 +143,10 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
 # =================================================================================
+torch.backends.cudnn.benchmark = True
+
 def main():
-    torch.backends.cudnn.benchmark = True
+    
 
     print(f"Using device: {Config.DEVICE}")
     
@@ -202,7 +204,7 @@ def main():
 
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
-    model = torch.compile(model)
+    model = torch.compile(model, mode="max-autotune")
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
     scaler = GradScaler() 
