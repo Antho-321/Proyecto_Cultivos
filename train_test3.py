@@ -67,19 +67,26 @@ class CloudDataset(torch.utils.data.Dataset):
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (CORREGIDAS)
 # =================================================================================
 def train_fn(loader, model, optimizer, loss_fn, scaler, accumulation_steps=4, num_classes=6):
-    """Train function with gradient accumulation to reduce memory usage."""
+    """
+    Train function with the fix for the CUDA graph runtime error.
+    """
     loop = tqdm(loader, leave=True)
     model.train()
     optimizer.zero_grad()
 
-    # Inicializamos las listas para almacenar las métricas por clase
+    # Initialization for metrics
     iou_per_class = [0] * num_classes
     dice_per_class = [0] * num_classes
     total = [0] * num_classes
     correct = [0] * num_classes
 
     for batch_idx, (data, targets) in enumerate(loop):
+        # =====================================================================
+        # CORRECTED LINE: Signal the start of a new step to the CUDA graph compiler.
+        # This prevents the "overwritten tensor" error.
         torch.compiler.cudagraph_mark_step_begin()
+        # =====================================================================
+
         data = data.to(Config.DEVICE, non_blocking=True)
         targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
@@ -88,55 +95,44 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, accumulation_steps=4, nu
             predictions = output[0] if isinstance(output, tuple) else output
             loss = loss_fn(predictions, targets)
 
-        scaler.scale(loss).backward() # Scale loss for GradScaler
+        scaler.scale(loss).backward()  # Scale loss for GradScaler
 
         if (batch_idx + 1) % accumulation_steps == 0:
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
 
-        # Aquí comenzamos a calcular las métricas por clase
-        # Usamos las predicciones más altas para obtener la clase predicha
+        # Calculate metrics (your implementation)
         preds = predictions.argmax(dim=1)
-
         for class_idx in range(num_classes):
-            # Obtenemos los valores binarizados de predicciones y etiquetas
             pred_class = (preds == class_idx).cpu().numpy()
             target_class = (targets == class_idx).cpu().numpy()
-
-            # Calculamos el IoU y Dice para cada clase
             intersection = (pred_class & target_class).sum()
             union = (pred_class | target_class).sum()
-            iou = intersection / (union + 1e-6)
-            dice = (2 * intersection) / (pred_class.sum() + target_class.sum() + 1e-6)
-
-            # Sumamos las métricas para cada clase
-            iou_per_class[class_idx] += iou
-            dice_per_class[class_idx] += dice
-            total[class_idx] += target_class.sum()
-            correct[class_idx] += intersection
+            iou_per_class[class_idx] += intersection / (union + 1e-6)
+            dice_per_class[class_idx] += (2 * intersection) / (pred_class.sum() + target_class.sum() + 1e-6)
 
         loop.set_postfix(loss=loss.item())
 
-    # Promediamos las métricas por clase
-    avg_iou_per_class = [iou / (len(loader) + 1e-6) for iou in iou_per_class] # Corrected averaging
-    avg_dice_per_class = [dice / (len(loader) + 1e-6) for dice in dice_per_class] # Corrected averaging
-
+    # Averaging and printing metrics
+    avg_iou_per_class = [iou / len(loader) for iou in iou_per_class]
+    avg_dice_per_class = [dice / len(loader) for dice in dice_per_class]
     mIoU = sum(avg_iou_per_class) / num_classes
 
-    # Imprimimos las métricas por clase
-    print("IoU por clase (Train):")
+    print("\nIoU por clase (Train):")
     for class_idx, iou in enumerate(avg_iou_per_class):
-        print(f"Clase {class_idx}: IoU = {iou:.4f}")
-
+        print(f"  Clase {class_idx}: IoU = {iou:.4f}")
+    
     print("Dice por clase (Train):")
     for class_idx, dice in enumerate(avg_dice_per_class):
-        print(f"Clase {class_idx}: Dice = {dice:.4f}")
+        print(f"  Clase {class_idx}: Dice = {dice:.4f}")
 
     return mIoU
 
 def check_metrics(loader, model, n_classes=6, device="cuda"):
-    """Devuelve mIoU macro y Dice macro."""
+    """
+    Returns macro mIoU and macro Dice with a robust fix for compiled models.
+    """
     eps = 1e-8
     intersection_sum = torch.zeros(n_classes, dtype=torch.float64, device=device)
     union_sum = torch.zeros_like(intersection_sum)
@@ -147,7 +143,11 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 
     with torch.no_grad():
         for x, y in loader:
-            x = x.to(device, non_blocking=True).clone() # <-- ROBUST FIX: Clone the data tensor
+            # =====================================================================
+            # CORRECTED LINE: Clone the input tensor to prevent any potential
+            # in-place modification conflicts with the compiled graph.
+            x = x.to(device, non_blocking=True).clone()
+            # =====================================================================
             y = y.to(device, non_blocking=True).long()
 
             output = model(x)
@@ -173,9 +173,9 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     miou_macro = iou_per_class.mean()
     dice_macro = dice_per_class.mean()
 
-    print("IoU por clase (Validation):", iou_per_class.cpu().numpy())
+    print("\nIoU por clase (Validation):", iou_per_class.cpu().numpy())
     print("Dice por clase (Validation):", dice_per_class.cpu().numpy())
-    print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
+    print(f"Validation Result: mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
 
     model.train()
     return miou_macro, dice_macro
