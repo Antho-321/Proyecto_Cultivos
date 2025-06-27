@@ -242,7 +242,7 @@ def main():
 
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
-    model = torch.compile(model, mode="max-autotune")
+    model = torch.compile(model, mode="reduce-overhead")
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
     # Note: Use GradScaler with autocast for mixed precision
