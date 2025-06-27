@@ -1,5 +1,3 @@
-# train.py
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -11,6 +9,8 @@ from albumentations.pytorch import ToTensorV2
 import os
 from PIL import Image
 import numpy as np
+import torch.compiler # <-- FIX: Import the compiler module
+
 # Importa la arquitectura del otro archivo
 from model import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
@@ -43,7 +43,7 @@ class CloudDataset(torch.utils.data.Dataset):
         img_filename = self.images[idx]
         img_path = os.path.join(self.image_dir, img_filename)
         mask_path = self._mask_path_from_image_name(img_filename)
-        
+
         if not os.path.exists(mask_path):
             raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
 
@@ -53,7 +53,7 @@ class CloudDataset(torch.utils.data.Dataset):
         # --- MODIFICACIÓN CLAVE: Aplicar recorte ANTES de las transformaciones ---
         # 1. Añadir una dimensión de canal a la máscara para que sea (H, W, 1)
         mask_3d = np.expand_dims(mask, axis=-1)
-        
+
         # 2. Aplicar la función de recorte
         image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
 
@@ -70,8 +70,7 @@ class CloudDataset(torch.utils.data.Dataset):
         return image, mask
 
 # =================================================================================
-# 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
-# ... (El resto de tu código: train_fn, check_metrics)
+# 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (CORREGIDAS)
 # =================================================================================
 def train_fn(loader, model, optimizer, loss_fn, scaler, accumulation_steps=4, num_classes=21):
     """Train function with gradient accumulation to reduce memory usage."""
@@ -87,6 +86,8 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, accumulation_steps=4, nu
     correct = [0] * num_classes
 
     for batch_idx, (data, targets) in enumerate(loop):
+        torch.compiler.cudagraph_mark_step_begin() # <-- FIX: Mark the beginning of a new step for the compiler
+
         data = data.to(Config.DEVICE, non_blocking=True)
         targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
@@ -113,7 +114,7 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, accumulation_steps=4, nu
             # Calculamos el IoU y Dice para cada clase
             intersection = (pred_class & target_class).sum()
             union = (pred_class | target_class).sum()
-            iou = intersection / (union + 1e-6)  # Añadimos un pequeño valor para evitar divisiones por cero
+            iou = intersection / (union + 1e-6)
             dice = (2 * intersection) / (pred_class.sum() + target_class.sum() + 1e-6)
 
             # Sumamos las métricas para cada clase
@@ -125,79 +126,79 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, accumulation_steps=4, nu
         loop.set_postfix(loss=loss.item())
 
     # Promediamos las métricas por clase
-    avg_iou_per_class = [iou / (total[class_idx] + 1e-6) for class_idx, iou in enumerate(iou_per_class)]
-    avg_dice_per_class = [dice / (total[class_idx] + 1e-6) for class_idx, dice in enumerate(dice_per_class)]
+    avg_iou_per_class = [iou / (len(loader) + 1e-6) for iou in iou_per_class] # Corrected averaging
+    avg_dice_per_class = [dice / (len(loader) + 1e-6) for dice in dice_per_class] # Corrected averaging
 
     mIoU = sum(avg_iou_per_class) / num_classes
 
     # Imprimimos las métricas por clase
-    print("IoU por clase:")
+    print("IoU por clase (Train):")
     for class_idx, iou in enumerate(avg_iou_per_class):
         print(f"Clase {class_idx}: IoU = {iou:.4f}")
 
-    print("Dice por clase:")
+    print("Dice por clase (Train):")
     for class_idx, dice in enumerate(avg_dice_per_class):
         print(f"Clase {class_idx}: Dice = {dice:.4f}")
-    
+
     return mIoU
 
 def check_metrics(loader, model, n_classes=6, device="cuda"):
     """Devuelve mIoU macro y Dice macro."""
     eps = 1e-8
     intersection_sum = torch.zeros(n_classes, dtype=torch.float64, device=device)
-    union_sum        = torch.zeros_like(intersection_sum)
-    dice_num_sum     = torch.zeros_like(intersection_sum)
-    dice_den_sum     = torch.zeros_like(intersection_sum)
+    union_sum = torch.zeros_like(intersection_sum)
+    dice_num_sum = torch.zeros_like(intersection_sum)
+    dice_den_sum = torch.zeros_like(intersection_sum)
 
     model.eval()
 
     with torch.no_grad():
         for x, y in loader:
+            torch.compiler.cudagraph_mark_step_begin() # <-- FIX: Mark the beginning of a new step for the compiler
+
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()
 
             output = model(x)
-            logits = output[0] if isinstance(output, tuple) else output # <-- ¡ESTA ES LA CORRECCIÓN CLAVE!
-            preds  = torch.argmax(logits, dim=1)
+            logits = output[0] if isinstance(output, tuple) else output
+            preds = torch.argmax(logits, dim=1)
 
             for cls in range(n_classes):
-                pred_c   = (preds == cls)
-                true_c   = (y == cls)
-                inter    = (pred_c & true_c).sum().double()
+                pred_c = (preds == cls)
+                true_c = (y == cls)
+                inter = (pred_c & true_c).sum().double()
                 pred_sum = pred_c.sum().double()
                 true_sum = true_c.sum().double()
-                union    = pred_sum + true_sum - inter
+                union = pred_sum + true_sum - inter
 
                 intersection_sum[cls] += inter
-                union_sum[cls]        += union
-                dice_num_sum[cls]     += 2 * inter
-                dice_den_sum[cls]     += pred_sum + true_sum
+                union_sum[cls] += union
+                dice_num_sum[cls] += 2 * inter
+                dice_den_sum[cls] += pred_sum + true_sum
 
-    iou_per_class  = (intersection_sum + eps) / (union_sum + eps)
-    dice_per_class = (dice_num_sum   + eps) / (dice_den_sum + eps)
+    iou_per_class = (intersection_sum + eps) / (union_sum + eps)
+    dice_per_class = (dice_num_sum + eps) / (dice_den_sum + eps)
 
     miou_macro = iou_per_class.mean()
     dice_macro = dice_per_class.mean()
 
-    print("IoU por clase :", iou_per_class.cpu().numpy())
-    print("Dice por clase:", dice_per_class.cpu().numpy())
+    print("IoU por clase (Validation):", iou_per_class.cpu().numpy())
+    print("Dice por clase (Validation):", dice_per_class.cpu().numpy())
     print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
 
     model.train()
     return miou_macro, dice_macro
 
 # =================================================================================
-# 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
+# 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN
 # =================================================================================
 torch.backends.cudnn.benchmark = True
 
 def main():
-    
-
     print(f"Using device: {Config.DEVICE}")
-    
+
     train_transform = A.Compose([
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH), # <-- MUY IMPORTANTE
+        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
         A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
@@ -210,7 +211,7 @@ def main():
     ])
 
     val_transform = A.Compose([
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH), # <-- MUY IMPORTANTE
+        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
         A.Normalize(
             mean=[0.0, 0.0, 0.0],
             std=[1.0, 1.0, 1.0],
@@ -253,7 +254,7 @@ def main():
     model = torch.compile(model, mode="max-autotune")
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
-    scaler = GradScaler() 
+    scaler = GradScaler()
     best_mIoU = -1.0
 
     # --- 2. INICIALIZAR LISTAS PARA EL HISTORIAL ---
@@ -262,12 +263,8 @@ def main():
 
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
-        train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
-        
-        # --- 3. CALCULAR MÉTRICAS PARA ENTRENAMIENTO Y VALIDACIÓN ---
-        #print("Calculando métricas de entrenamiento...")
-        #train_mIoU, _ = check_metrics(train_loader, model, n_classes=6, device=Config.DEVICE)
-        
+        train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler, num_classes=6)
+
         print("Calculando métricas de validación...")
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
 
@@ -296,12 +293,12 @@ def main():
     print("\nEvaluando el modelo con mejor mIoU guardado…")
 
     # --- Cargar el checkpoint del mejor modelo ---
-    # Añadir map_location para asegurar compatibilidad entre CPU/GPU
     best_model_checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
     model.load_state_dict(best_model_checkpoint['state_dict'])
 
     # Ahora que el mejor modelo está cargado, se ejecuta la evaluación
     best_mIoU, best_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
     print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
+
 if __name__ == "__main__":
     main()
