@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.amp import GradScaler
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
@@ -13,7 +13,6 @@ from PIL import Image
 import numpy as np
 # Importa la arquitectura del otro archivo
 from model import CloudDeepLabV3Plus
-import matplotlib.pyplot as plt
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
 from config import Config
 
@@ -83,7 +82,7 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
         data     = data.to(Config.DEVICE, non_blocking=True)
         targets  = targets.to(Config.DEVICE, non_blocking=True).long()
 
-        with torch.cuda.amp.autocast():
+        with autocast(device_type=Config.DEVICE, dtype=torch.float16):
             # Desempaquetamos o seleccionamos la salida principal
             output = model(data)
             predictions = output[0] if isinstance(output, tuple) else output
@@ -145,6 +144,8 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
 # =================================================================================
 def main():
+    torch.backends.cudnn.benchmark = True
+
     print(f"Using device: {Config.DEVICE}")
     
     train_transform = A.Compose([
@@ -200,6 +201,8 @@ def main():
         "Distribución de clases en ENTRENAMIENTO (post-aug)")
 
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
+    print("Compiling the model... (this may take a minute)")
+    model = torch.compile(model)
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
     scaler = GradScaler() 
