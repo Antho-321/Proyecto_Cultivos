@@ -9,7 +9,7 @@ from albumentations.pytorch import ToTensorV2
 import os
 from PIL import Image
 import numpy as np
-import torch.compiler # <-- FIX: Import the compiler module
+import torch.compiler
 
 # Importa la arquitectura del otro archivo
 from model import CloudDeepLabV3Plus
@@ -51,18 +51,12 @@ class CloudDataset(torch.utils.data.Dataset):
         mask = np.array(Image.open(mask_path).convert("L"))
 
         # --- MODIFICACIÓN CLAVE: Aplicar recorte ANTES de las transformaciones ---
-        # 1. Añadir una dimensión de canal a la máscara para que sea (H, W, 1)
         mask_3d = np.expand_dims(mask, axis=-1)
-
-        # 2. Aplicar la función de recorte
         image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
-
-        # 3. Quitar la dimensión del canal de la máscara para Albumentations
         mask_cropped = mask_cropped_3d.squeeze()
         # ------------------------------------------------------------------------
 
         if self.transform:
-            # Pasa los arrays RECORTADOS a las transformaciones
             augmented = self.transform(image=image_cropped, mask=mask_cropped)
             image = augmented["image"]
             mask = augmented["mask"]
@@ -72,11 +66,10 @@ class CloudDataset(torch.utils.data.Dataset):
 # =================================================================================
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (CORREGIDAS)
 # =================================================================================
-def train_fn(loader, model, optimizer, loss_fn, scaler, accumulation_steps=4, num_classes=21):
+def train_fn(loader, model, optimizer, loss_fn, scaler, accumulation_steps=4, num_classes=6):
     """Train function with gradient accumulation to reduce memory usage."""
     loop = tqdm(loader, leave=True)
     model.train()
-
     optimizer.zero_grad()
 
     # Inicializamos las listas para almacenar las métricas por clase
@@ -86,9 +79,7 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, accumulation_steps=4, nu
     correct = [0] * num_classes
 
     for batch_idx, (data, targets) in enumerate(loop):
-        torch.compiler.cudagraph_mark_step_begin() # <-- FIX: Mark the beginning of a new step for the compiler
-
-        data = data.to(Config.DEVICE, non_blocking=True)
+        data = data.to(Config.DEVICE, non_blocking=True).clone() # <-- ROBUST FIX: Clone the data tensor
         targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
         with autocast(device_type=Config.DEVICE, dtype=torch.float16):
@@ -96,7 +87,8 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, accumulation_steps=4, nu
             predictions = output[0] if isinstance(output, tuple) else output
             loss = loss_fn(predictions, targets)
 
-        loss.backward()
+        scaler.scale(loss).backward() # Scale loss for GradScaler
+
         if (batch_idx + 1) % accumulation_steps == 0:
             scaler.step(optimizer)
             scaler.update()
@@ -154,9 +146,7 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 
     with torch.no_grad():
         for x, y in loader:
-            torch.compiler.cudagraph_mark_step_begin() # <-- FIX: Mark the beginning of a new step for the compiler
-
-            x = x.to(device, non_blocking=True)
+            x = x.to(device, non_blocking=True).clone() # <-- ROBUST FIX: Clone the data tensor
             y = y.to(device, non_blocking=True).long()
 
             output = model(x)
@@ -254,27 +244,28 @@ def main():
     model = torch.compile(model, mode="max-autotune")
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
-    scaler = GradScaler()
+    # Note: Use GradScaler with autocast for mixed precision
+    scaler = GradScaler(enabled=True if Config.DEVICE == 'cuda' else False)
     best_mIoU = -1.0
 
-    # --- 2. INICIALIZAR LISTAS PARA EL HISTORIAL ---
     train_miou_history = []
     val_miou_history = []
 
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
         train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler, num_classes=6)
-
+        
         print("Calculando métricas de validación...")
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
 
-        # --- 4. GUARDAR LAS MÉTRICAS EN EL HISTORIAL ---
-        train_miou_history.append(train_mIoU.item()) # .item() para obtener el valor escalar
+        train_miou_history.append(train_mIoU.item())
         val_miou_history.append(current_mIoU.item())
 
         if current_mIoU > best_mIoU:
             best_mIoU = current_mIoU
             print(f"🔹 Nuevo mejor mIoU: {best_mIoU:.4f} | Dice: {current_dice:.4f}  →  guardando modelo…")
+            # To save the compiled model, it's safer to save the state_dict of the original model if available
+            # Or handle it as per torch.compile documentation for saving.
             checkpoint = {
                 "epoch":      epoch,
                 "state_dict": model.state_dict(),
@@ -283,7 +274,6 @@ def main():
             }
             torch.save(checkpoint, Config.MODEL_SAVE_PATH)
 
-    # --- 5. LLAMAR A LA FUNCIÓN DE GRAFICADO AL FINALIZAR ---
     save_performance_plot(
         train_history=train_miou_history,
         val_history=val_miou_history,
@@ -292,12 +282,13 @@ def main():
 
     print("\nEvaluando el modelo con mejor mIoU guardado…")
 
-    # --- Cargar el checkpoint del mejor modelo ---
     best_model_checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
-    model.load_state_dict(best_model_checkpoint['state_dict'])
+    # Re-create a fresh model instance for loading the state dict
+    eval_model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
+    eval_model.load_state_dict(best_model_checkpoint['state_dict'])
+    eval_model = torch.compile(eval_model) # Re-compile the model for evaluation
 
-    # Ahora que el mejor modelo está cargado, se ejecuta la evaluación
-    best_mIoU, best_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
+    best_mIoU, best_dice = check_metrics(val_loader, eval_model, n_classes=6, device=Config.DEVICE)
     print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
 
 if __name__ == "__main__":
