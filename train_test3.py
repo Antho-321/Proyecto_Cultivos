@@ -79,6 +79,7 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, accumulation_steps=4, nu
     correct = [0] * num_classes
 
     for batch_idx, (data, targets) in enumerate(loop):
+        torch.compiler.cudagraph_mark_step_begin()
         data = data.to(Config.DEVICE, non_blocking=True).clone() # <-- ROBUST FIX: Clone the data tensor
         targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
