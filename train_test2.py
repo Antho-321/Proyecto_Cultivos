@@ -74,7 +74,6 @@ class CloudDataset(torch.utils.data.Dataset):
 # ... (El resto de tu código: train_fn, check_metrics)
 # =================================================================================
 def train_fn(loader, model, optimizer, loss_fn, scaler, accumulation_steps=4):
-    """Train function with gradient accumulation to reduce memory usage."""
     loop = tqdm(loader, leave=True)
     model.train()
 
@@ -84,10 +83,11 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, accumulation_steps=4):
         data = data.to(Config.DEVICE, non_blocking=True)
         targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
-        with autocast(device_type=Config.DEVICE, dtype=torch.float16):
-            output = model(data)
-            predictions = output[0] if isinstance(output, tuple) else output
-            loss = loss_fn(predictions, targets)
+        # Try removing autocast to see if it resolves the issue
+        # with autocast(device_type=Config.DEVICE, dtype=torch.float16): 
+        output = model(data)
+        predictions = output[0] if isinstance(output, tuple) else output
+        loss = loss_fn(predictions, targets)
 
         loss.backward()
         if (batch_idx + 1) % accumulation_steps == 0:
