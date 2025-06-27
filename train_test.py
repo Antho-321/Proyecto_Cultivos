@@ -73,17 +73,21 @@ class CloudDataset(torch.utils.data.Dataset):
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
 # ... (El resto de tu código: train_fn, check_metrics)
 # =================================================================================
-def train_fn(loader, model, optimizer, loss_fn, scaler):
-    """Procesa una época de entrenamiento."""
+def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
+    """Procesa una época de entrenamiento con cálculo de IoU y Dice por clase."""
     loop = tqdm(loader, leave=True)
     model.train()
 
+    # Inicializamos los contadores para cada clase
+    tp = torch.zeros(num_classes, device=Config.DEVICE)
+    fp = torch.zeros(num_classes, device=Config.DEVICE)
+    fn = torch.zeros(num_classes, device=Config.DEVICE)
+
     for batch_idx, (data, targets) in enumerate(loop):
-        data     = data.to(Config.DEVICE, non_blocking=True)
-        targets  = targets.to(Config.DEVICE, non_blocking=True).long()
+        data = data.to(Config.DEVICE, non_blocking=True)
+        targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
         with autocast(device_type=Config.DEVICE, dtype=torch.float16):
-            # Desempaquetamos o seleccionamos la salida principal
             output = model(data)
             predictions = output[0] if isinstance(output, tuple) else output
             loss = loss_fn(predictions, targets)
@@ -93,7 +97,46 @@ def train_fn(loader, model, optimizer, loss_fn, scaler):
         scaler.step(optimizer)
         scaler.update()
 
+        # Convertir las predicciones a etiquetas de clase
+        _, predicted_classes = torch.max(predictions, dim=1)
+
+        # Para cada clase, contar TP, FP y FN
+        for c in range(num_classes):
+            true_positives = (predicted_classes == c) & (targets == c)
+            false_positives = (predicted_classes == c) & (targets != c)
+            false_negatives = (predicted_classes != c) & (targets == c)
+
+            tp[c] += true_positives.sum()
+            fp[c] += false_positives.sum()
+            fn[c] += false_negatives.sum()
+
+        # Actualizar el loop con la pérdida
         loop.set_postfix(loss=loss.item())
+
+    # --- INICIO DE LAS MODIFICACIONES ---
+
+    # Para evitar división por cero, añadimos un pequeño epsilon
+    epsilon = 1e-6
+
+    # 1. Calcular el IoU para cada clase
+    iou_per_class = tp / (tp + fp + fn + epsilon)
+    
+    # 2. Calcular el Dice para cada clase (<--- MODIFICACIÓN 1: CALCULAR DICE)
+    dice_per_class = (2 * tp) / (2 * tp + fp + fn + epsilon)
+
+    # 3. Imprimir el Dice por clase (<--- MODIFICACIÓN 2: IMPRIMIR DICE)
+    print(f"\nÉpoca de entrenamiento finalizada:")
+    # .cpu().numpy() es para imprimirlo de forma más limpia si estás en GPU
+    print(f"  - Dice por clase: {dice_per_class.cpu().numpy()}")
+    print(f"  - IoU por clase: {iou_per_class.cpu().numpy()}")
+
+    # 4. Calcular el Mean IoU (<--- MODIFICACIÓN 3: CALCULAR mIoU Y CAMBIAR RETURN)
+    mean_iou = torch.nanmean(iou_per_class)
+
+    print(f"  - mIoU: {mean_iou:.4f}")
+    
+    # Devolver el mIoU
+    return mean_iou
 
 def check_metrics(loader, model, n_classes=6, device="cuda"):
     """Devuelve mIoU macro y Dice macro."""
@@ -216,11 +259,9 @@ def main():
 
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
-        train_fn(train_loader, model, optimizer, loss_fn, scaler)
         
-        # --- 3. CALCULAR MÉTRICAS PARA ENTRENAMIENTO Y VALIDACIÓN ---
         print("Calculando métricas de entrenamiento...")
-        train_mIoU, _ = check_metrics(train_loader, model, n_classes=6, device=Config.DEVICE)
+        train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
         
         print("Calculando métricas de validación...")
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)

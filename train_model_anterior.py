@@ -132,6 +132,8 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
 
     # 4. Calcular el Mean IoU (<--- MODIFICACIÓN 3: CALCULAR mIoU Y CAMBIAR RETURN)
     mean_iou = torch.nanmean(iou_per_class)
+
+    print(f"  - mIoU: {mean_iou:.4f}")
     
     # Devolver el mIoU
     return mean_iou
