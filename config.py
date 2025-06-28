@@ -25,4 +25,4 @@ class Config:
     MODEL_SAVE_PATH = BASE_PATH + "best_model.pth.tar"
     PERFORMANCE_PATH = BASE_PATH + "rendimiento_miou.png"
 
-    NUM_SPECIAL_AUGMENTATIONS = 14
+    NUM_SPECIAL_AUGMENTATIONS = 8
