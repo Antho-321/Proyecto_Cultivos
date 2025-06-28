@@ -237,7 +237,7 @@ def main():
         # Color
         K.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.15, p=1.0),
         # Resize
-        K.Resize((Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), interpolation='bilinear'),
+        K.Resize((Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), resample='bilinear'),
         # Normalize [0,255]→[0,1]
         K.Normalize(mean=torch.tensor([0.0,0.0,0.0]), std=torch.tensor([255.0,255.0,255.0]), p=1.0),
         # Map [0,1]→[−1,1]
