@@ -11,7 +11,7 @@ class Config:
     NUM_CLASSES      = 6
 
     BATCH_SIZE       = 16
-    NUM_EPOCHS       = 100
+    NUM_EPOCHS       = 200
     LEARNING_RATE    = 1e-4
     WEIGHT_DECAY     = 1e-5
 
