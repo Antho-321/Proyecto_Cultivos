@@ -12,7 +12,7 @@ import os
 from PIL import Image
 import numpy as np
 # Importa la arquitectura del otro archivo
-from model_anterior import CloudDeepLabV3Plus
+from model_original import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
 from config import Config
 
