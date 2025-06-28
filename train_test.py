@@ -249,7 +249,7 @@ def main():
     print("Compiling the model... (this may take a minute)")
     model = torch.compile(model, mode="max-autotune")
     loss_fn = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
+    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
     scaler = GradScaler() 
     best_mIoU = -1.0
 
