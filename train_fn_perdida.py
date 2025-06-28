@@ -70,55 +70,45 @@ class CloudDataset(torch.utils.data.Dataset):
 
         return image, mask
 
-def dice_coefficient(y_true, y_pred, smooth=1e-6):
-    y_true_f = tf.reshape(tf.cast(y_true, tf.float32), [-1, Config.NUM_CLASSES])
-    y_pred_f = tf.reshape(tf.cast(y_pred, tf.float32), [-1, Config.NUM_CLASSES])
+def torch_dice_coeff(y_true, y_pred, smooth=1e-6):
+    # y_true, y_pred: [B, C, H, W]
+    y_true_f = y_true.view(y_true.size(0), y_true.size(1), -1)
+    y_pred_f = y_pred.view(y_pred.size(0), y_pred.size(1), -1)
+    intersection = (y_true_f * y_pred_f).sum(-1)
+    dice = (2. * intersection + smooth) / (y_true_f.sum(-1) + y_pred_f.sum(-1) + smooth)
+    return dice.mean()
 
-    intersection = tf.reduce_sum(y_true_f * y_pred_f, axis=0)
-    dice_scores = (2. * intersection + smooth) / (tf.reduce_sum(y_true_f, axis=0) + tf.reduce_sum(y_pred_f, axis=0) + smooth)
+def torch_focal_loss(y_true, y_pred, gamma=2.0, alpha=0.75, eps=1e-6):
+    # Both inputs are floats, y_true one-hot
+    y_pred = y_pred.clamp(eps, 1. - eps)
+    ce = - y_true * torch.log(y_pred)
+    mod = (1 - y_pred).pow(gamma)
+    loss = alpha * mod * ce  # shape [B, C, H, W]
+    return loss
 
-    return tf.reduce_mean(dice_scores)
+def combined_loss_torch(y_true, y_pred):
+    """
+    y_true: one-hot torch.Tensor, shape [B, H, W, C] or [B, C, H, W]
+    y_pred: softmax probabilities, same shape
+    """
+    # bring channels to dim=1
+    if y_true.ndim == 4 and y_true.shape[-1] == y_true.shape[1] == Config.NUM_CLASSES:
+        # if channels last, permute
+        y_true = y_true.permute(0, 3, 1, 2)
+        y_pred = y_pred.permute(0, 3, 1, 2)
 
-# Corrected Focal Loss Implementation
-def focal_loss(gamma=2.0, alpha=0.25):
-    def focal_loss_fixed(y_true, y_pred):
-        y_true = tf.cast(y_true, tf.float32)
-        epsilon = tf.keras.backend.epsilon()
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+    # class weights on the channel dimension
+    class_weights = torch.tensor([0.4, 3.5, 3.5, 1.0, 4.0, 3.5],
+                                 device=y_true.device).view(1, -1, 1, 1)
 
-        # Calculate cross_entropy per pixel per class
-        cross_entropy = -y_true * tf.math.log(y_pred)
+    # focal loss per pixel per class
+    f_loss = torch_focal_loss(y_true, y_pred)  # [B, C, H, W]
+    f_loss = (f_loss * class_weights).sum(dim=1).mean()  # sum classes, avg pixels & batch
 
-        # Calculate focal loss modulation term per pixel per class
-        loss = alpha * tf.pow(1 - y_pred, gamma) * cross_entropy
+    # dice loss
+    dice = 1 - torch_dice_coeff(y_true, y_pred)
 
-        # DO NOT sum over axis=-1 here. Return the loss per pixel per class.
-        return loss # Shape will be [?, H, W, NUM_CLASSES]
-    return focal_loss_fixed
-
-def dice_loss(y_true, y_pred):
-    return 1 - dice_coefficient(y_true, y_pred)
-
-def combined_loss(y_true, y_pred):
-    y_true = tf.cast(y_true, tf.float32)
-
-    # Class weights for each of the NUM_CLASSES
-    class_weights = tf.constant([0.4, 3.5, 3.5, 1.0, 4.0, 3.5]) # Shape [6]
-
-    # Calculate unreduced focal loss per pixel per class
-    f_loss_per_pixel_per_class = focal_loss(gamma=2.0, alpha=0.75)(y_true, y_pred) # Shape [?, H, W, NUM_CLASSES]
-
-    # Apply class weights. Reshape class_weights to [1, 1, 1, NUM_CLASSES] for broadcasting.
-    # Alternatively, TensorFlow's broadcasting should handle [6] automatically if applied to the last dimension.
-    weighted_f_loss = f_loss_per_pixel_per_class * class_weights
-
-    # Now, sum the weighted focal loss across the class dimension and average over pixels/batch
-    f_loss_reduced = tf.reduce_sum(weighted_f_loss, axis=-1) # Sum over classes for each pixel
-    f_loss_mean = tf.reduce_mean(f_loss_reduced) # Average over spatial dimensions and batch
-
-    d_loss = dice_loss(y_true, y_pred)
-
-    return f_loss_mean + (1.5 * d_loss) # Combine mean focal loss with dice loss
+    return f_loss + 1.5 * dice
 
 # =================================================================================
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
@@ -141,9 +131,10 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
         with autocast(device_type=Config.DEVICE, dtype=torch.float16):
             output = model(data)
             predictions = output[0] if isinstance(output, tuple) else output
-            y_true_oh = F.one_hot(targets, num_classes=Config.NUM_CLASSES).float()
-            y_pred_probs = F.softmax(predictions, dim=1)
-            loss = loss_fn(y_true_oh, y_pred_probs)
+            y_true_oh = F.one_hot(targets, num_classes=Config.NUM_CLASSES) \
+                 .permute(0, 3, 1, 2).float()  # [B, C, H, W]
+            y_pred_probs = F.softmax(predictions, dim=1)           # [B, C, H, W]
+            loss = combined_loss_torch(y_true_oh, y_pred_probs)
 
         optimizer.zero_grad()
         scaler.scale(loss).backward()
@@ -301,7 +292,7 @@ def main():
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
     model = torch.compile(model, mode="max-autotune")
-    loss_fn = combined_loss
+    loss_fn = combined_loss_torch
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
     scaler = GradScaler() 
     best_mIoU = -1.0
