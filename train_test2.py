@@ -7,7 +7,6 @@ from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
-from albumentations.pytorch import ToTensorV2
 import os
 from PIL import Image
 import numpy as np
@@ -15,7 +14,7 @@ import numpy as np
 from model import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
 from config import Config
-import cv2
+import kornia.augmentation as K
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -227,126 +226,82 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 torch.backends.cudnn.benchmark = True
 
 def main():
-    
-
     print(f"Using device: {Config.DEVICE}")
-    
-    train_transform = A.Compose([
-        # 1) Espaciales
-        A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.5),
-        A.RandomRotate90(p=0.5),           # rotación por múltiplos de 90°
 
-        # 2) Color
-        A.ColorJitter(
-            brightness=0.4,                # ±40% de brillo
-            contrast=0.4,                  # ±40% de contraste
-            saturation=0.4,                # ±40% de saturación
-            hue=0.15,                      # ±15% de matiz
-            p=1.0
-        ),
+    # 1) TRAIN PIPELINE
+    train_transform = K.AugmentationSequential(
+        # Spatial
+        K.RandomHorizontalFlip(p=0.5),
+        K.RandomVerticalFlip(p=0.5),
+        K.RandomRotation(degrees=90.0, resample='nearest', p=0.5),
+        # Color
+        K.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.15, p=1.0),
+        # Resize
+        K.Resize((Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), interpolation='bilinear'),
+        # Normalize [0,255]→[0,1]
+        K.Normalize(mean=torch.tensor([0.0,0.0,0.0]), std=torch.tensor([255.0,255.0,255.0]), p=1.0),
+        # Map [0,1]→[−1,1]
+        K.Lambda(lambda x: x * 2.0 - 1.0, p=1.0),
+        data_keys=["input", "mask"]
+    ).to(Config.DEVICE)
 
-        # 3) Clip automático: Albumentations ya mantiene [0,255]
-
-        A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
-
-        # 4) Preproc EfficientNetV2: mapear [0,255]→[−1,1]
-        A.Normalize(
-            mean=(0.0, 0.0, 0.0),
-            std=(1.0, 1.0, 1.0),
-            max_pixel_value=255.0
-        ),
-        A.Lambda(
-            image=lambda x, **kwargs: x * 2.0 - 1.0,
-            p=1.0
-        ),
-
-        # 5) Convertir a Tensor y cambiar HWC→CHW
-        ToTensorV2(),
-    ])
-
-    special_aug_transform = A.Compose([
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH,
-                interpolation=cv2.INTER_LINEAR),
-
-        A.SomeOf([
+    # 2) SPECIAL AUGMENTATION PIPELINE
+    special_aug_transform = K.AugmentationSequential(
+        K.Resize((Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), interpolation='bilinear'),
+        K.SomeOf([
             # Geometric
-            A.HorizontalFlip(p=1),
-            A.VerticalFlip(p=1),
-            A.RandomRotate90(p=1),
-            A.Rotate(limit=45, border_mode=cv2.BORDER_CONSTANT, fill=0, p=1),
-            A.Affine(scale=(0.9,1.1), translate_percent=(-.1,.1),
-                    rotate=(-10,10), shear=(-10,10), fill=0, p=1),
-            A.Perspective(scale=(.05,.1), keep_size=True, fill=0, p=1),
-            A.ElasticTransform(alpha=120, sigma=120*0.05, affine_alpha=120*0.03,
-                            border_mode=cv2.BORDER_CONSTANT, fill=0, p=1),
-            A.GridDistortion(border_mode=cv2.BORDER_CONSTANT, fill=0, p=1),
-            A.OpticalDistortion(distort_limit=.5, shift_limit_x=.5, shift_limit_y=.5,
-                                border_mode=cv2.BORDER_CONSTANT, fill=0, p=1),
-            A.RandomResizedCrop(size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
-                                scale=(0.8,1.0), p=1),
-
+            K.RandomHorizontalFlip(p=1.0),
+            K.RandomVerticalFlip(p=1.0),
+            K.RandomRotation(degrees=90.0, p=1.0),
+            K.RandomAffine(degrees=10, translate=0.1, scale=(0.9,1.1), shear=10.0, p=1.0),
+            K.RandomPerspective(distortion_scale=0.1, p=1.0),
+            K.RandomElasticTransform(kernel_size=31, sigma=120*0.05, p=1.0),
+            K.RandomGridShuffle(num_steps=4, p=1.0),
             # Color / brightness
-            A.RandomBrightnessContrast(.2, .2, p=1),
-            A.ColorJitter(.2, .2, .2, .2, p=1),
-            A.HueSaturationValue(20, 30, 20, p=1),
-            A.RGBShift(20, 20, 20, p=1),
-            A.CLAHE(clip_limit=4.0, tile_grid_size=(8,8), p=1),
-            A.RandomGamma((80,120), p=1),
-            A.ToGray(p=1), A.ToSepia(p=1), A.InvertImg(p=1),
-            A.Solarize(p=1), A.Equalize(p=1), A.ChannelShuffle(p=1),
-
+            K.RandomBrightness(0.2, p=1.0),
+            K.RandomContrast(0.2, p=1.0),
+            K.RandomHue(0.1, p=1.0),
+            K.RandomSaturation(0.2, p=1.0),
+            K.RandomChannelShuffle(p=1.0),
             # Blur
-            A.Blur(blur_limit=7, p=1),
-            A.GaussianBlur(blur_limit=(3,7), p=1),
-            A.MedianBlur(blur_limit=5, p=1),
-            A.MotionBlur(blur_limit=(3,7), p=1),
-
-            # Noise  (⇣ aquí el cambio)
-            A.GaussNoise(std_range=(10/255.0, 50/255.0), p=1),
-            A.ISONoise(color_shift=(0.01,0.05), intensity=(0.1,0.5), p=1),
-            A.MultiplicativeNoise(multiplier=(0.9,1.1), p=1),
-
+            K.RandomGaussianBlur((3,7), p=1.0),
+            K.RandomMedianBlur(kernel_size=5, p=1.0),
+            K.RandomMotionBlur(kernel_size=7, p=1.0),
+            # Noise
+            K.RandomGaussianNoise(mean=0.0, std=0.1, p=1.0),
+            K.RandomIsoNoise(p=1.0),
+            K.RandomMultiplicativeNoise(p=1.0),
             # Dropout
-            A.CoarseDropout(
-                num_holes_range=(1, 8),        # 1-8 agujeros por imagen
-                hole_height_range=(1, 8),      # altura de cada hueco en píxeles
-                hole_width_range=(1, 8),       # anchura de cada hueco en píxeles
-                fill=0,                        # píxeles negros en los huecos
-                p=1
-            ),
-
+            K.RandomErasing(scale=(0.02, 0.2), p=1.0),
             # Weather
-            A.RandomFog(fog_coef_range=(0.3,0.5), alpha_coef=0.1, p=1),
-            A.RandomRain(p=1), A.RandomSnow(p=1),
-            A.RandomSunFlare(p=1), A.RandomShadow(p=1),
-
+            K.RandomFog(p=1.0),
+            K.RandomRain(p=1.0),
+            K.RandomSnow(p=1.0),
             # Other
-            A.Downscale(scale_range=(0.25,0.25), p=1),
-            A.Emboss(p=1), A.Sharpen(p=1), A.Posterize(p=1), A.FancyPCA(alpha=.1, p=1),
-        ], n=Config.NUM_SPECIAL_AUGMENTATIONS, p=1.0),
+            K.RandomSolarize(p=1.0),
+            K.RandomPosterize(bits=4, p=1.0),
+        ], num_samples=Config.NUM_SPECIAL_AUGMENTATIONS, p=1.0),
+        # Normalize and to tensor-range
+        K.Normalize(mean=torch.tensor([0.0,0.0,0.0]), std=torch.tensor([255.0,255.0,255.0]), p=1.0),
+        K.Lambda(lambda x: x * 2.0 - 1.0, p=1.0),
+        data_keys=["input"],
+    ).to(Config.DEVICE)
 
-        A.Normalize(mean=[0,0,0], std=[1,1,1], max_pixel_value=255.0),
-        ToTensorV2(),
-    ])
+    # 3) VALIDATION PIPELINE
+    val_transform = K.AugmentationSequential(
+        K.Resize((Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), interpolation='bilinear'),
+        K.Normalize(mean=torch.tensor([0.0,0.0,0.0]), std=torch.tensor([255.0,255.0,255.0]), p=1.0),
+        K.Lambda(lambda x: x * 2.0 - 1.0, p=1.0),
+        data_keys=["input"],
+    ).to(Config.DEVICE)
 
-    val_transform = A.Compose([
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH), # <-- MUY IMPORTANTE
-        A.Normalize(
-            mean=[0.0, 0.0, 0.0],
-            std=[1.0, 1.0, 1.0],
-            max_pixel_value=255.0,
-        ),
-        ToTensorV2(),
-    ])
-
+    # --- DATASETS & LOADERS ---
     train_dataset = CloudDataset(
         image_dir=Config.TRAIN_IMG_DIR,
         mask_dir=Config.TRAIN_MASK_DIR,
         transform=train_transform,
-        special_transform=special_aug_transform  # <-- Pasamos el nuevo pipeline
+        special_transform=special_aug_transform
     )
-
     train_loader = DataLoader(
         train_dataset,
         batch_size=Config.BATCH_SIZE,
@@ -354,7 +309,6 @@ def main():
         pin_memory=Config.PIN_MEMORY,
         shuffle=True
     )
-
     val_dataset = CloudDataset(
         image_dir=Config.VAL_IMG_DIR,
         mask_dir=Config.VAL_MASK_DIR,
@@ -368,46 +322,38 @@ def main():
         shuffle=False
     )
 
+    # --- TRAINING SETUP ---
     imprimir_distribucion_clases_post_augmentation(train_loader, 6,
         "Distribución de clases en ENTRENAMIENTO (post-aug)")
-
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
     model = torch.compile(model, mode="max-autotune")
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
-    scaler = GradScaler() 
+    scaler = GradScaler()
     best_mIoU = -1.0
-
-    # --- 2. INICIALIZAR LISTAS PARA EL HISTORIAL ---
-    train_miou_history = []
-    val_miou_history = []
+    train_miou_history, val_miou_history = [], []
 
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
-        
         print("Calculando métricas de entrenamiento...")
         train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
-        
         print("Calculando métricas de validación...")
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
 
-        # --- 4. GUARDAR LAS MÉTRICAS EN EL HISTORIAL ---
-        train_miou_history.append(train_mIoU.item()) # .item() para obtener el valor escalar
+        train_miou_history.append(train_mIoU.item())
         val_miou_history.append(current_mIoU.item())
 
         if current_mIoU > best_mIoU:
             best_mIoU = current_mIoU
             print(f"🔹 Nuevo mejor mIoU: {best_mIoU:.4f} | Dice: {current_dice:.4f}  →  guardando modelo…")
-            checkpoint = {
+            torch.save({
                 "epoch":      epoch,
                 "state_dict": model.state_dict(),
                 "optimizer":  optimizer.state_dict(),
                 "best_mIoU":  best_mIoU,
-            }
-            torch.save(checkpoint, Config.MODEL_SAVE_PATH)
+            }, Config.MODEL_SAVE_PATH)
 
-    # --- 5. LLAMAR A LA FUNCIÓN DE GRAFICADO AL FINALIZAR ---
     save_performance_plot(
         train_history=train_miou_history,
         val_history=val_miou_history,
@@ -415,14 +361,10 @@ def main():
     )
 
     print("\nEvaluando el modelo con mejor mIoU guardado…")
-
-    # --- Cargar el checkpoint del mejor modelo ---
-    # Añadir map_location para asegurar compatibilidad entre CPU/GPU
-    best_model_checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
-    model.load_state_dict(best_model_checkpoint['state_dict'])
-
-    # Ahora que el mejor modelo está cargado, se ejecuta la evaluación
+    checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
+    model.load_state_dict(checkpoint['state_dict'])
     best_mIoU, best_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
     print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
+
 if __name__ == "__main__":
     main()
