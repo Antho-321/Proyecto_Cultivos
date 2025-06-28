@@ -210,6 +210,8 @@ def main():
 
         # 3) Clip automático: Albumentations ya mantiene [0,255]
 
+        A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
+
         # 4) Preproc EfficientNetV2: mapear [0,255]→[−1,1]
         A.Normalize(
             mean=(0.0, 0.0, 0.0),
