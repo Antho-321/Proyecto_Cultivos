@@ -194,15 +194,34 @@ def main():
     print(f"Using device: {Config.DEVICE}")
     
     train_transform = A.Compose([
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH), # <-- MUY IMPORTANTE
-        A.Rotate(limit=35, p=0.7),
+        # 1) Espaciales
         A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.3),
-        A.Normalize(
-            mean=[0.0, 0.0, 0.0],
-            std=[1.0, 1.0, 1.0],
-            max_pixel_value=255.0,
+        A.VerticalFlip(p=0.5),
+        A.RandomRotate90(p=0.5),           # rotación por múltiplos de 90°
+
+        # 2) Color
+        A.ColorJitter(
+            brightness=0.4,                # ±40% de brillo
+            contrast=0.4,                  # ±40% de contraste
+            saturation=0.4,                # ±40% de saturación
+            hue=0.15,                      # ±15% de matiz
+            p=1.0
         ),
+
+        # 3) Clip automático: Albumentations ya mantiene [0,255]
+
+        # 4) Preproc EfficientNetV2: mapear [0,255]→[−1,1]
+        A.Normalize(
+            mean=(0.0, 0.0, 0.0),
+            std=(1.0, 1.0, 1.0),
+            max_pixel_value=255.0
+        ),
+        A.Lambda(
+            image=lambda x, **kwargs: x * 2.0 - 1.0,
+            p=1.0
+        ),
+
+        # 5) Convertir a Tensor y cambiar HWC→CHW
         ToTensorV2(),
     ])
 
