@@ -16,6 +16,7 @@ from model import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
 from config import Config
 import cv2
+from functools import lru_cache
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -71,41 +72,29 @@ class CloudDataset(torch.utils.data.Dataset):
         mask_filename = f"{name_without_ext}_mask.png"
         return os.path.join(self.mask_dir, mask_filename)
 
-    def __getitem__(self, idx: int):
-        # <-- MODIFICADO: Obtenemos la información de la muestra de nuestra nueva lista
-        sample_info = self.samples[idx]
-        img_filename = sample_info["image_filename"]
-        apply_special_aug = sample_info["apply_special_aug"]
-
-        img_path = os.path.join(self.image_dir, img_filename)
+    @lru_cache(maxsize=None)
+    def _load_and_crop(self, img_filename: str):
+        img_path  = os.path.join(self.image_dir, img_filename)
         mask_path = self._mask_path_from_image_name(img_filename)
-        
-        if not os.path.exists(mask_path):
-            raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
 
-        image = np.array(Image.open(img_path).convert("RGB"))
-        mask = np.array(Image.open(mask_path).convert("L"))
+        # use opencv for faster decoding
+        img  = cv2.imread(img_path, cv2.IMREAD_COLOR)[..., ::-1]  # BGR→RGB
+        msk  = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        img_c, msk_c3 = crop_around_classes(img, msk[...,None])
+        return img_c, msk_c3.squeeze()
 
-        # Tu lógica de recorte permanece igual
-        mask_3d = np.expand_dims(mask, axis=-1)
-        image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
-        mask_cropped = mask_cropped_3d.squeeze()
-        
-        # <-- MODIFICADO: Aplicamos la transformación condicionalmente
-        if apply_special_aug and self.special_transform:
-            # Esta es una muestra que cumplió la condición y debe ser aumentada especialmente
+    def __getitem__(self, idx):
+        img_filename = self.samples[idx]["image_filename"]
+        apply_special = self.samples[idx]["apply_special_aug"]
+
+        image_cropped, mask_cropped = self._load_and_crop(img_filename)
+
+        if apply_special and self.special_transform:
             augmented = self.special_transform(image=image_cropped, mask=mask_cropped)
-        elif self.transform:
-            # Esta es una muestra normal
-            augmented = self.transform(image=image_cropped, mask=mask_cropped)
         else:
-            # Si no hay transformaciones
-            augmented = {"image": image_cropped, "mask": mask_cropped}
+            augmented = self.transform(image=image_cropped, mask=mask_cropped)
 
-        image = augmented["image"]
-        mask = augmented["mask"]
-
-        return image, mask
+        return augmented["image"], augmented["mask"]
 
 # =================================================================================
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
