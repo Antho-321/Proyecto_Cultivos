@@ -239,9 +239,9 @@ def main():
         # Resize
         K.Resize((Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), resample='bilinear'),
         # Normalize [0,255]→[0,1]
-        K.Normalize(mean=torch.tensor([0.0,0.0,0.0]), std=torch.tensor([255.0,255.0,255.0]), p=1.0),
-        # Map [0,1]→[−1,1]
-        K.Lambda(lambda x: x * 2.0 - 1.0, p=1.0),
+        K.Normalize(mean=torch.tensor([0.5,0.5,0.5]),
+                std=torch.tensor([0.5,0.5,0.5]),
+                p=1.0),
         data_keys=["input", "mask"]
     ).to(Config.DEVICE)
 
@@ -282,8 +282,9 @@ def main():
             K.RandomPosterize(bits=4, p=1.0),
         ], num_samples=Config.NUM_SPECIAL_AUGMENTATIONS, p=1.0),
         # Normalize and to tensor-range
-        K.Normalize(mean=torch.tensor([0.0,0.0,0.0]), std=torch.tensor([255.0,255.0,255.0]), p=1.0),
-        K.Lambda(lambda x: x * 2.0 - 1.0, p=1.0),
+        K.Normalize(mean=torch.tensor([0.5,0.5,0.5]),
+                std=torch.tensor([0.5,0.5,0.5]),
+                p=1.0),
         data_keys=["input"],
     ).to(Config.DEVICE)
 
