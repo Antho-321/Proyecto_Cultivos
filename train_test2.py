@@ -15,6 +15,8 @@ from model import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
 from config import Config
 import kornia.augmentation as K
+from kornia.augmentation.auto import RandAugment
+from kornia.augmentation import AugmentationSequential
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -246,46 +248,9 @@ def main():
     ).to(Config.DEVICE)
 
     # 2) SPECIAL AUGMENTATION PIPELINE
-    special_aug_transform = K.AugmentationSequential(
-        K.Resize((Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), resample='bilinear'),
-        K.SomeOf([
-            # Geometric
-            K.RandomHorizontalFlip(p=1.0),
-            K.RandomVerticalFlip(p=1.0),
-            K.RandomRotation(degrees=90.0, p=1.0),
-            K.RandomAffine(degrees=10, translate=0.1, scale=(0.9,1.1), shear=10.0, p=1.0),
-            K.RandomPerspective(distortion_scale=0.1, p=1.0),
-            K.RandomElasticTransform(kernel_size=31, sigma=120*0.05, p=1.0),
-            K.RandomGridShuffle(num_steps=4, p=1.0),
-            # Color / brightness
-            K.RandomBrightness(0.2, p=1.0),
-            K.RandomContrast(0.2, p=1.0),
-            K.RandomHue(0.1, p=1.0),
-            K.RandomSaturation(0.2, p=1.0),
-            K.RandomChannelShuffle(p=1.0),
-            # Blur
-            K.RandomGaussianBlur((3,7), p=1.0),
-            K.RandomMedianBlur(kernel_size=5, p=1.0),
-            K.RandomMotionBlur(kernel_size=7, p=1.0),
-            # Noise
-            K.RandomGaussianNoise(mean=0.0, std=0.1, p=1.0),
-            K.RandomIsoNoise(p=1.0),
-            K.RandomMultiplicativeNoise(p=1.0),
-            # Dropout
-            K.RandomErasing(scale=(0.02, 0.2), p=1.0),
-            # Weather
-            K.RandomFog(p=1.0),
-            K.RandomRain(p=1.0),
-            K.RandomSnow(p=1.0),
-            # Other
-            K.RandomSolarize(p=1.0),
-            K.RandomPosterize(bits=4, p=1.0),
-        ], num_samples=Config.NUM_SPECIAL_AUGMENTATIONS, p=1.0),
-        # Normalize and to tensor-range
-        K.Normalize(mean=torch.tensor([0.5,0.5,0.5]),
-                std=torch.tensor([0.5,0.5,0.5]),
-                p=1.0),
-        data_keys=["input"],
+    special_aug_transform = AugmentationSequential(
+        RandAugment(num_ops=Config.NUM_SPECIAL_AUGMENTATIONS, magnitude=7, p=1.0),
+        data_keys=["input", "mask"],
     ).to(Config.DEVICE)
 
     # 3) VALIDATION PIPELINE
