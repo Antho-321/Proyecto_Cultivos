@@ -4,7 +4,7 @@ import os
 import torch
 
 class Config:
-    BASE_PATH        = '/content/Balanced'
+    BASE_PATH        = 'Balanced'
 
     IMAGE_HEIGHT     = 128
     IMAGE_WIDTH      = 128
