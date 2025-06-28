@@ -23,5 +23,5 @@ class Config:
     DEVICE           = 'cuda' if torch.cuda.is_available() else 'cpu'
     MODEL_SAVE_PATH  = 'best_weed_model.pth'
 
-    NUM_WORKERS      = 4
+    NUM_WORKERS      = 2
     PIN_MEMORY       = True
