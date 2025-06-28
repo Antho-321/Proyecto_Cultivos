@@ -247,7 +247,7 @@ def main():
 
     # 2) SPECIAL AUGMENTATION PIPELINE
     special_aug_transform = K.AugmentationSequential(
-        K.Resize((Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), interpolation='bilinear'),
+        K.Resize((Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), resample='bilinear'),
         K.SomeOf([
             # Geometric
             K.RandomHorizontalFlip(p=1.0),
@@ -290,9 +290,10 @@ def main():
 
     # 3) VALIDATION PIPELINE
     val_transform = K.AugmentationSequential(
-        K.Resize((Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), interpolation='bilinear'),
-        K.Normalize(mean=torch.tensor([0.0,0.0,0.0]), std=torch.tensor([255.0,255.0,255.0]), p=1.0),
-        K.Lambda(lambda x: x * 2.0 - 1.0, p=1.0),
+        K.Resize((Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), resample='bilinear'),
+        K.Normalize(mean=torch.tensor([0.5,0.5,0.5]),
+                std=torch.tensor([0.5,0.5,0.5]),
+                p=1.0),
         data_keys=["input"],
     ).to(Config.DEVICE)
 
