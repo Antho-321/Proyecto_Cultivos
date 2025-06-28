@@ -1,16 +1,14 @@
 import os
-from glob import glob
 from PIL import Image
 import numpy as np
 
-torch_imports = '''import torch
+import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-'''
-print(torch_imports)
+
 from model import CloudDeepLabV3Plus
 from utils import (
     imprimir_distribucion_clases_post_augmentation,
