@@ -19,7 +19,8 @@ from config import Config
 import kornia.augmentation as K
 from kornia.augmentation import AugmentationSequential
 from kornia.augmentation.auto import RandAugment
-
+import multiprocessing as mp
+mp.set_start_method('spawn', force=True)
 
 def mascara_contiene_solo_0_y_4(mask: np.ndarray) -> bool:
     """
