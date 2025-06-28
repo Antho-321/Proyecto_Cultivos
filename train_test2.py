@@ -249,7 +249,7 @@ def main():
 
     # 2) SPECIAL AUGMENTATION PIPELINE
     special_aug_transform = AugmentationSequential(
-        RandAugment(num_ops=Config.NUM_SPECIAL_AUGMENTATIONS, magnitude=7, p=1.0),
+        RandAugment(n=Config.NUM_SPECIAL_AUGMENTATIONS, m=7),
         data_keys=["input", "mask"],
     ).to(Config.DEVICE)
 
