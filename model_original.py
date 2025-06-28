@@ -4,7 +4,8 @@ import torch.nn.functional as F
 import timm
 
 # =================================================================================
-# 1. MÓDULO DE ATENCIÓN (sin cambios)
+# 1. MÓDULO DE ATENCIÓN (Reconstrucción inspirada en CBAM)
+# Esta es la innovación clave aplicada a las características de bajo nivel.
 # =================================================================================
 class ChannelAttention(nn.Module):
     """Módulo de Atención de Canal para enfocar qué características son importantes."""
@@ -27,30 +28,22 @@ class ChannelAttention(nn.Module):
         return self.sigmoid(out)
 
 class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):  # Revert to 7 for better context
+    """Módulo de Atención Espacial para enfocar dónde están las características importantes."""
+    def __init__(self, kernel_size=7):
         super(SpatialAttention, self).__init__()
-        padding = kernel_size // 2
-        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
+        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=kernel_size//2, bias=False)
         self.sigmoid = nn.Sigmoid()
-        
-        # Add learnable weighting
-        self.channel_weight = nn.Parameter(torch.ones(2))
 
     def forward(self, x):
         avg_out = torch.mean(x, dim=1, keepdim=True)
         max_out, _ = torch.max(x, dim=1, keepdim=True)
-        
-        # Weighted combination
-        weighted_avg = avg_out * self.channel_weight[0]
-        weighted_max = max_out * self.channel_weight[1]
-        
-        x = torch.cat([weighted_avg, weighted_max], dim=1)
+        x = torch.cat([avg_out, max_out], dim=1)
         x = self.conv1(x)
         return self.sigmoid(x)
 
 class AttentionModule(nn.Module):
     """Módulo de Atención completo que combina Canal y Espacial."""
-    def __init__(self, in_channels, reduction_ratio=16, kernel_size=3):
+    def __init__(self, in_channels, reduction_ratio=16, kernel_size=7):
         super(AttentionModule, self).__init__()
         self.channel_attention = ChannelAttention(in_channels, reduction_ratio)
         self.spatial_attention = SpatialAttention(kernel_size)
@@ -61,11 +54,12 @@ class AttentionModule(nn.Module):
         return x
 
 # =================================================================================
-# 2. MÓDULO ASPP (Añadido Dropout)
+# 2. MÓDULO ASPP (Atrous Spatial Pyramid Pooling)
+# Componente estándar de DeepLabV3+ para capturar contexto multi-escala.
 # =================================================================================
 class ASPPConv(nn.Sequential):
     def __init__(self, in_channels, out_channels, dilation):
-        super(ASPPConv, self).__init__( 
+        super(ASPPConv, self).__init__(
             nn.Conv2d(in_channels, out_channels, 3, padding=dilation, dilation=dilation, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU()
@@ -94,16 +88,19 @@ class ASPP(nn.Module):
             nn.BatchNorm2d(out_channels),
             nn.ReLU()
         ))
+
         rates = tuple(atrous_rates)
         for rate in rates:
             modules.append(ASPPConv(in_channels, out_channels, rate))
+
         modules.append(ASPPPooling(in_channels, out_channels))
+
         self.convs = nn.ModuleList(modules)
         self.project = nn.Sequential(
             nn.Conv2d(len(self.convs) * out_channels, out_channels, 1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(),
-            nn.Dropout(0.3)  # Añadido Dropout con probabilidad 0.3
+            nn.Dropout(0.5)
         )
 
     def forward(self, x):
@@ -114,133 +111,126 @@ class ASPP(nn.Module):
         return self.project(res)
 
 # =================================================================================
-# 3. BLOQUE DE DECODIFICADOR FPN (Añadido Dropout)
-# =================================================================================
-class DecoderBlock(nn.Module):
-    def __init__(self, in_channels_skip, in_channels_up, out_channels, use_attention=True):
-        super(DecoderBlock, self).__init__()
-        
-        self.upsample = nn.ConvTranspose2d(
-            in_channels_up, in_channels_up, kernel_size=2, stride=2
-        )
-        
-        # Channel alignment for residual connection
-        self.align_channels = nn.Conv2d(in_channels_skip, out_channels, 1, bias=False) if in_channels_skip != out_channels else nn.Identity()
-        
-        total_in_channels = in_channels_skip + in_channels_up
-        
-        self.use_attention = use_attention
-        if use_attention:
-            self.attention = AttentionModule(in_channels=in_channels_skip, kernel_size=7)
-
-        self.conv_fuse = nn.Sequential(
-            nn.Conv2d(total_in_channels, out_channels, 3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(),
-            nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(),
-            nn.Dropout(0.3)  # Añadido Dropout con probabilidad 0.3
-        )
-        self.final_relu = nn.ReLU()
-
-    def forward(self, x_skip, x_up):
-        x_up = self.upsample(x_up)
-        
-        if self.use_attention:
-            x_skip_att = self.attention(x_skip)
-        else:
-            x_skip_att = x_skip
-        
-        x_concat = torch.cat([x_up, x_skip_att], dim=1)
-        x_fused = self.conv_fuse(x_concat)
-        
-        # Residual connection
-        x_residual = self.align_channels(x_skip)
-        x_residual = F.interpolate(
-            x_residual, size=x_fused.shape[-2:], mode='bilinear', align_corners=False
-        )
-        
-        return self.final_relu(x_fused + x_residual)
-
-# =================================================================================
-# 4. ARQUITECTURA PRINCIPAL: CloudDeepLabV3+ (con Dropout añadido)
+# 3. ARQUITECTURA PRINCIPAL: CloudDeepLabV3+
 # =================================================================================
 class CloudDeepLabV3Plus(nn.Module):
-    def __init__(self, num_classes=1):
-        atrous_rates=(2, 6, 12)  # Mejor balance de dilatación
-        
+    def __init__(self, num_classes=1, atrous_rates=(12, 24, 36)):
         super(CloudDeepLabV3Plus, self).__init__()
         
-        self.training = True # Se establece a True por defecto, se puede cambiar con model.eval()
-
-        # --- Backbone: EfficientNetV2-S ---
+        # --- Backbone: EfficientNetV2-S Ligero ---
+        # Usamos timm para cargar el backbone pre-entrenado en ImageNet-21k.
+        # 'features_only=True' nos devuelve las características de cada etapa.
+        # 'out_indices=(1, 3)' selecciona las salidas de la etapa 1 (stride 4, low-level)
+        # y la etapa 3 (stride 16, high-level). Esto implementa la idea de "eliminar la última etapa".
         self.backbone = timm.create_model(
-            'tf_efficientnetv2_s.in21k',
+            'tf_efficientnetv2_s_in21k',
             pretrained=True,
             features_only=True,
-            out_indices=(0, 1, 2, 3) # Stride 2, 4, 8, 16
+            out_indices=(1, 3)
         )
         
+        # Obtenemos las dimensiones de los canales de salida del backbone
         backbone_channels = self.backbone.feature_info.channels()
-        # [24, 48, 64, 160]
+        low_level_channels = backbone_channels[0]
+        high_level_channels = backbone_channels[1]
         
-        # --- Módulo ASPP para el nivel más profundo ---
-        self.aspp = ASPP(in_channels=backbone_channels[3], atrous_rates=atrous_rates, out_channels=256)
+        # --- Módulo ASPP ---
+        self.aspp = ASPP(in_channels=high_level_channels, atrous_rates=atrous_rates)
         
-        # --- Decoder FPN-Style ---
-        decoder_out_channels = [128, 64, 48]
-        
-        self.decoder_block3 = DecoderBlock(
-            in_channels_skip=backbone_channels[2], # Stride 8
-            in_channels_up=256, # Salida del ASPP
-            out_channels=decoder_out_channels[0]
-        )
-        self.decoder_block2 = DecoderBlock(
-            in_channels_skip=backbone_channels[1], # Stride 4
-            in_channels_up=decoder_out_channels[0],
-            out_channels=decoder_out_channels[1]
-        )
-        self.decoder_block1 = DecoderBlock(
-            in_channels_skip=backbone_channels[0], # Stride 2
-            in_channels_up=decoder_out_channels[1],
-            out_channels=decoder_out_channels[2]
+        # --- Módulo de Atención para Características de Bajo Nivel ---
+        self.attention = AttentionModule(in_channels=low_level_channels)
+
+        # --- Decoder ---
+        # Proyección de 1x1 para las características de bajo nivel después de la atención
+        self.low_level_conv = nn.Sequential(
+            nn.Conv2d(low_level_channels, 48, 1, bias=False),
+            nn.BatchNorm2d(48),
+            nn.ReLU()
         )
         
-        # --- Cabezal de Segmentación Mejorado ---
-        self.segmentation_head = nn.Sequential(
-            nn.Conv2d(decoder_out_channels[2], 32, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(32),
+        # Capas de convolución para fusionar características y refinar la segmentación
+        self.decoder_conv = nn.Sequential(
+            nn.Conv2d(256 + 48, 256, 3, padding=1, bias=False),
+            nn.BatchNorm2d(256),
             nn.ReLU(),
-            nn.Conv2d(32, num_classes, kernel_size=1)
+            nn.Conv2d(256, 256, 3, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU()
         )
 
-        # --- Cabezales auxiliares para supervisión profunda ---
-        self.aux_head_3 = nn.Conv2d(decoder_out_channels[0], num_classes, 1)
-        self.aux_head_2 = nn.Conv2d(decoder_out_channels[1], num_classes, 1)
-
-        # --- Upsampling Final ---
-        self.final_upsample = nn.UpsamplingBilinear2d(scale_factor=2)
-
+        # --- Clasificador Final ---
+        # Convierte las características refinadas en el mapa de segmentación final
+        self.classifier = nn.Conv2d(256, num_classes, 1)
 
     def forward(self, x):
+        input_size = x.shape[-2:]
+        
+        # 1. Obtener características del backbone
         features = self.backbone(x)
+        low_level_features = features[0]   # Stride 4
+        high_level_features = features[1]  # Stride 16
 
-        aspp_output = self.aspp(features[3])
+        # 2. Aplicar atención a las características de bajo nivel
+        low_level_features_refined = self.attention(low_level_features)
+        low_level_features_refined = self.low_level_conv(low_level_features_refined)
         
-        decoder_out3 = self.decoder_block3(x_skip=features[2], x_up=aspp_output)
-        decoder_out2 = self.decoder_block2(x_skip=features[1], x_up=decoder_out3)
-        decoder_out1 = self.decoder_block1(x_skip=features[0], x_up=decoder_out2)
+        # 3. Procesar características de alto nivel con ASPP
+        aspp_output = self.aspp(high_level_features)
         
-        logits = self.segmentation_head(decoder_out1)
+        # 4. Sobredimensionar la salida del ASPP
+        aspp_output_upsampled = F.interpolate(
+            aspp_output, 
+            size=low_level_features_refined.shape[-2:], 
+            mode='bilinear', 
+            align_corners=False
+        )
+
+        # 5. Concatenar y decodificar
+        concatenated_features = torch.cat([aspp_output_upsampled, low_level_features_refined], dim=1)
+        decoded_features = self.decoder_conv(concatenated_features)
+
+        # 6. Generar el mapa de segmentación final
+        final_logits = self.classifier(decoded_features)
         
-        final_logits = self.final_upsample(logits)
+        # 7. Sobredimensionar a tamaño de entrada original
+        final_logits_upsampled = F.interpolate(
+            final_logits, 
+            size=input_size, 
+            mode='bilinear', 
+            align_corners=False
+        )
         
-        if self.training:
-            aux3 = F.interpolate(self.aux_head_3(decoder_out3),
-                                 size=x.shape[-2:], mode='bilinear', align_corners=False)
-            aux2 = F.interpolate(self.aux_head_2(decoder_out2),
-                                 size=x.shape[-2:], mode='bilinear', align_corners=False)
-            return final_logits, aux3, aux2
-        
-        return final_logits
+        return final_logits_upsampled
+
+# =================================================================================
+# 4. SCRIPT DE PRUEBA
+# Para verificar que la arquitectura está correctamente ensamblada.
+# =================================================================================
+# if __name__ == '__main__':
+#     # Parámetros del modelo
+#     NUM_CLASSES = 1  # Segmentación binaria (nube vs no-nube)
+#     INPUT_SIZE = (256, 256)
+    
+#     # Crear una instancia del modelo
+#     model = CloudDeepLabV3Plus(num_classes=NUM_CLASSES)
+#     model.eval() # Poner en modo de evaluación
+    
+#     # Crear un tensor de entrada de prueba (batch_size=1, canales=3, altura=256, ancho=256)
+#     dummy_input = torch.randn(1, 3, *INPUT_SIZE)
+    
+#     # Realizar una pasada hacia adelante (forward pass)
+#     with torch.no_grad():
+#         output = model(dummy_input)
+    
+#     # Imprimir información para verificación
+#     print("Arquitectura CloudDeepLabV3+ instanciada correctamente.")
+#     print(f"Tamaño de la entrada: {dummy_input.shape}")
+#     print(f"Tamaño de la salida: {output.shape}")
+    
+#     # Verificar que el tamaño de salida coincide con el de entrada (y canales de clase)
+#     assert output.shape == (1, NUM_CLASSES, *INPUT_SIZE)
+#     print("¡La forma de la salida es correcta!")
+
+#     # Contar parámetros para tener una idea de la complejidad
+#     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+#     print(f"Número total de parámetros entrenables: {total_params / 1e6:.2f} M")
