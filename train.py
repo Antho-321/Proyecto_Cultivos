@@ -26,9 +26,9 @@ class CloudDataset(torch.utils.data.Dataset):
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
     def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
-        self.image_dir = image_dir
-        self.mask_dir = mask_dir
-        self.transform = transform
+        self.image_dir  = image_dir
+        self.mask_dir   = mask_dir
+        self.transform  = transform
         self.images = [
             f for f in os.listdir(image_dir)
             if f.lower().endswith(self._IMG_EXTENSIONS)
@@ -39,41 +39,38 @@ class CloudDataset(torch.utils.data.Dataset):
 
     def _mask_path_from_image_name(self, image_filename: str) -> str:
         name_without_ext = image_filename.rsplit('.', 1)[0]
-        mask_filename = f"{name_without_ext}_mask.png"
+        mask_filename    = f"{name_without_ext}_mask.png"
         return os.path.join(self.mask_dir, mask_filename)
 
     def __getitem__(self, idx: int):
         img_filename = self.images[idx]
-        img_path = os.path.join(self.image_dir, img_filename)
+        img_path  = os.path.join(self.image_dir, img_filename)
         mask_path = self._mask_path_from_image_name(img_filename)
-        
+
         if not os.path.exists(mask_path):
             raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
 
         image = np.array(Image.open(img_path).convert("RGB"))
-        mask = np.array(Image.open(mask_path).convert("L"))
+        mask  = np.array(Image.open(mask_path).convert("L"))
 
-        # --- MODIFICACIÓN CLAVE: Aplicar recorte ANTES de las transformaciones ---
-        # 1. Añadir una dimensión de canal a la máscara para que sea (H, W, 1)
-        mask_3d = np.expand_dims(mask, axis=-1)
-        
-        # 2. Aplicar la función de recorte
-        image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
-
-        # 3. Quitar la dimensión del canal de la máscara para Albumentations
-        mask_cropped = mask_cropped_3d.squeeze()
-        # ------------------------------------------------------------------------
+        # --- Recorte alrededor de las clases ---
+        mask_3d           = np.expand_dims(mask, axis=-1)
+        image_cropped, mc = crop_around_classes(image, mask_3d)
+        mask_cropped      = mc.squeeze()
+        # ---------------------------------------
 
         if self.transform:
-            # Pasa los arrays RECORTADOS a las transformaciones
             augmented = self.transform(image=image_cropped, mask=mask_cropped)
-            image = augmented["image"]
-            mask = augmented["mask"]
+            image, mask = augmented["image"], augmented["mask"]
 
-        return (
-            torch.from_numpy(image).to(memory_format=torch.channels_last),
-            torch.from_numpy(mask)
-        )
+        # --- Conversión segura a tensor y layout channels_last ---
+        if isinstance(image, np.ndarray):
+            image = torch.from_numpy(image)
+            mask  = torch.from_numpy(mask)
+        image = image.contiguous(memory_format=torch.channels_last)
+        mask  = mask.long()
+
+        return image, mask
 
 # =================================================================================
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
