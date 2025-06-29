@@ -40,8 +40,8 @@ class DiceLoss(nn.Module):
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         # ambas con forma [B, C, H, W], one-hot y probabilidades
         # aplanar
-        y_true_f = y_true.view(y_true.size(0), -1)
-        y_pred_f = y_pred.view(y_pred.size(0), -1)
+        y_true_f = y_true.reshape(y_true.size(0), -1)
+        y_pred_f = y_pred.reshape(y_pred.size(0), -1)
 
         intersection = (y_true_f * y_pred_f).sum(dim=1)
         dice_score = (2.0 * intersection + self.smooth) / (
