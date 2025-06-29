@@ -15,9 +15,6 @@ import numpy as np
 from model import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
 from config import Config
-torch.backends.cuda.matmul.allow_tf32 = True      # kernels TF32 en Ampere+
-torch.backends.cudnn.benchmark = True             # ya lo tienes ✔
-torch.set_float32_matmul_precision("high")        # PyTorch 2.3+
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -26,9 +23,9 @@ class CloudDataset(torch.utils.data.Dataset):
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
     def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
-        self.image_dir  = image_dir
-        self.mask_dir   = mask_dir
-        self.transform  = transform
+        self.image_dir = image_dir
+        self.mask_dir = mask_dir
+        self.transform = transform
         self.images = [
             f for f in os.listdir(image_dir)
             if f.lower().endswith(self._IMG_EXTENSIONS)
@@ -39,39 +36,36 @@ class CloudDataset(torch.utils.data.Dataset):
 
     def _mask_path_from_image_name(self, image_filename: str) -> str:
         name_without_ext = image_filename.rsplit('.', 1)[0]
-        mask_filename    = f"{name_without_ext}_mask.png"
+        mask_filename = f"{name_without_ext}_mask.png"
         return os.path.join(self.mask_dir, mask_filename)
 
     def __getitem__(self, idx: int):
         img_filename = self.images[idx]
-        img_path  = os.path.join(self.image_dir, img_filename)
+        img_path = os.path.join(self.image_dir, img_filename)
         mask_path = self._mask_path_from_image_name(img_filename)
-
+        
         if not os.path.exists(mask_path):
             raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
 
         image = np.array(Image.open(img_path).convert("RGB"))
-        mask  = np.array(Image.open(mask_path).convert("L"))
+        mask = np.array(Image.open(mask_path).convert("L"))
 
-        # --- Recorte alrededor de las clases ---
-        mask_3d           = np.expand_dims(mask, axis=-1)
-        image_cropped, mc = crop_around_classes(image, mask_3d)
-        mask_cropped      = mc.squeeze()
-        # ---------------------------------------
+        # --- MODIFICACIÓN CLAVE: Aplicar recorte ANTES de las transformaciones ---
+        # 1. Añadir una dimensión de canal a la máscara para que sea (H, W, 1)
+        mask_3d = np.expand_dims(mask, axis=-1)
+        
+        # 2. Aplicar la función de recorte
+        image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
+
+        # 3. Quitar la dimensión del canal de la máscara para Albumentations
+        mask_cropped = mask_cropped_3d.squeeze()
+        # ------------------------------------------------------------------------
 
         if self.transform:
+            # Pasa los arrays RECORTADOS a las transformaciones
             augmented = self.transform(image=image_cropped, mask=mask_cropped)
-            image, mask = augmented["image"], augmented["mask"]
-
-        # --- Conversión segura a tensor y layout channels_last ---
-        if isinstance(image, np.ndarray):
-            image = torch.from_numpy(image)
-            mask  = torch.from_numpy(mask)
-        if image.dim() == 4:
-            image = image.contiguous(memory_format=torch.channels_last)
-        else:
-            image = image.contiguous()
-        mask  = mask.long()
+            image = augmented["image"]
+            mask = augmented["mask"]
 
         return image, mask
 
@@ -192,6 +186,7 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
 # =================================================================================
+torch.backends.cudnn.benchmark = True
 
 def main():
     
@@ -250,7 +245,7 @@ def main():
     imprimir_distribucion_clases_post_augmentation(train_loader, 6,
         "Distribución de clases en ENTRENAMIENTO (post-aug)")
 
-    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE, memory_format=torch.channels_last)
+    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
     model = torch.compile(model, mode="max-autotune")
     loss_fn = nn.CrossEntropyLoss()
