@@ -52,8 +52,8 @@ class CloudDataset(torch.utils.data.Dataset):
         return img_c, msk_c3.squeeze()
 
     def __getitem__(self, idx):
-        img_filename = self.samples[idx]["image_filename"]
-        apply_special = self.samples[idx]["apply_special_aug"]
+        img_filename = self.images[idx]["image_filename"]
+        apply_special = self.images[idx]["apply_special_aug"]
 
         image_cropped, mask_cropped = self._load_and_crop(img_filename)
 
