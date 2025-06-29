@@ -141,43 +141,46 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
     # Devolver el mIoU
     return mean_iou
 
-def check_metrics(loader, model, n_classes=6, device="cuda"):
-    """Devuelve mIoU macro y Dice macro."""
+def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
+    """
+    Calcula métricas macro-promedio (mIoU y Dice) *sin* bucle por clase,
+    usando una matriz de confusión acumulada en GPU.
+    """
     eps = 1e-8
-    intersection_sum = torch.zeros(n_classes, dtype=torch.float64, device=device)
-    union_sum        = torch.zeros_like(intersection_sum)
-    dice_num_sum     = torch.zeros_like(intersection_sum)
-    dice_den_sum     = torch.zeros_like(intersection_sum)
+    conf_mat = torch.zeros((n_classes, n_classes), dtype=torch.float64, device=device)
 
     model.eval()
-
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()
 
-            output = model(x)
-            logits = output[0] if isinstance(output, tuple) else output # <-- ¡ESTA ES LA CORRECCIÓN CLAVE!
+            logits = model(x)
+            logits = logits[0] if isinstance(logits, tuple) else logits
             preds  = torch.argmax(logits, dim=1)
 
-            for cls in range(n_classes):
-                pred_c   = (preds == cls)
-                true_c   = (y == cls)
-                inter    = (pred_c & true_c).sum().double()
-                pred_sum = pred_c.sum().double()
-                true_sum = true_c.sum().double()
-                union    = pred_sum + true_sum - inter
+            # ── Sustituimos el bucle TP/FP/FN por una matriz de confusión en GPU ──
+            flattened = (preds * n_classes + y).view(-1).float()
+            conf      = torch.histc(
+                flattened,
+                bins = n_classes * n_classes,
+                min  = 0,
+                max  = n_classes * n_classes - 1
+            ).view(n_classes, n_classes)
 
-                intersection_sum[cls] += inter
-                union_sum[cls]        += union
-                dice_num_sum[cls]     += 2 * inter
-                dice_den_sum[cls]     += pred_sum + true_sum
+            conf_mat += conf
+    # ─────────────────────────────────────────────────────────────────────────────
 
-    iou_per_class  = (intersection_sum + eps) / (union_sum + eps)
-    dice_per_class = (dice_num_sum   + eps) / (dice_den_sum + eps)
+    intersection = torch.diag(conf_mat)                  # TP por clase
+    pred_sum     = conf_mat.sum(dim=1)                   # TP + FP
+    true_sum     = conf_mat.sum(dim=0)                   # TP + FN
+    union        = pred_sum + true_sum - intersection    # TP + FP + FN
 
-    miou_macro = iou_per_class.mean()
-    dice_macro = dice_per_class.mean()
+    iou_per_class  = (intersection + eps) / (union + eps)
+    dice_per_class = (2 * intersection + eps) / (pred_sum + true_sum + eps)
+
+    miou_macro  = iou_per_class.mean()
+    dice_macro  = dice_per_class.mean()
 
     print("IoU por clase :", iou_per_class.cpu().numpy())
     print("Dice por clase:", dice_per_class.cpu().numpy())
@@ -249,6 +252,8 @@ def main():
 
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
+    torch._inductor.config.triton.unique_kernel_names = True
+    torch._inductor.config.epilogue_fusion           = "max"
     model = torch.compile(model, mode="max-autotune")
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
