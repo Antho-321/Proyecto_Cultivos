@@ -15,34 +15,21 @@ import numpy as np
 from model import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
 from config import Config
-import cv2
-from functools import lru_cache
+
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
 # =================================================================================
 class CloudDataset(torch.utils.data.Dataset):
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
-    def __init__(self, image_dir, mask_dir, transform=None,
-                 special_transform=None):
+    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
         self.image_dir = image_dir
-        self.mask_dir  = mask_dir
+        self.mask_dir = mask_dir
         self.transform = transform
-        self.special_transform = special_transform
-
-        self.images = []
-        for f in os.listdir(image_dir):
-            if f.lower().endswith(self._IMG_EXTENSIONS):
-                # marca inicial (sin aug especial)
-                self.images.append(
-                    {"image_filename": f, "apply_special_aug": False}
-                )
-                # si quieres duplicar con augmentaciones especiales:
-                if self.special_transform is not None:
-                    for _ in range(Config.NUM_SPECIAL_AUGMENTATIONS):
-                        self.images.append(
-                            {"image_filename": f, "apply_special_aug": True}
-                        )
+        self.images = [
+            f for f in os.listdir(image_dir)
+            if f.lower().endswith(self._IMG_EXTENSIONS)
+        ]
 
     def __len__(self) -> int:
         return len(self.images)
@@ -52,29 +39,35 @@ class CloudDataset(torch.utils.data.Dataset):
         mask_filename = f"{name_without_ext}_mask.png"
         return os.path.join(self.mask_dir, mask_filename)
 
-    @lru_cache(maxsize=None)
-    def _load_and_crop(self, img_filename: str):
-        img_path  = os.path.join(self.image_dir, img_filename)
+    def __getitem__(self, idx: int):
+        img_filename = self.images[idx]
+        img_path = os.path.join(self.image_dir, img_filename)
         mask_path = self._mask_path_from_image_name(img_filename)
+        
+        if not os.path.exists(mask_path):
+            raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
 
-        # use opencv for faster decoding
-        img  = cv2.imread(img_path, cv2.IMREAD_COLOR)[..., ::-1]  # BGR→RGB
-        msk  = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        img_c, msk_c3 = crop_around_classes(img, msk[...,None])
-        return img_c, msk_c3.squeeze()
+        image = np.array(Image.open(img_path).convert("RGB"))
+        mask = np.array(Image.open(mask_path).convert("L"))
 
-    def __getitem__(self, idx):
-        img_filename  = self.images[idx]["image_filename"]
-        apply_special = self.images[idx]["apply_special_aug"]
+        # --- MODIFICACIÓN CLAVE: Aplicar recorte ANTES de las transformaciones ---
+        # 1. Añadir una dimensión de canal a la máscara para que sea (H, W, 1)
+        mask_3d = np.expand_dims(mask, axis=-1)
+        
+        # 2. Aplicar la función de recorte
+        image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
 
-        image_cropped, mask_cropped = self._load_and_crop(img_filename)
+        # 3. Quitar la dimensión del canal de la máscara para Albumentations
+        mask_cropped = mask_cropped_3d.squeeze()
+        # ------------------------------------------------------------------------
 
-        if apply_special and self.special_transform:
-            augmented = self.special_transform(image=image_cropped, mask=mask_cropped)
-        else:
+        if self.transform:
+            # Pasa los arrays RECORTADOS a las transformaciones
             augmented = self.transform(image=image_cropped, mask=mask_cropped)
+            image = augmented["image"]
+            mask = augmented["mask"]
 
-        return augmented["image"], augmented["mask"]
+        return image, mask
 
 # =================================================================================
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
