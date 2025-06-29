@@ -23,14 +23,26 @@ from functools import lru_cache
 class CloudDataset(torch.utils.data.Dataset):
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
-    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
+    def __init__(self, image_dir, mask_dir, transform=None,
+                 special_transform=None):
         self.image_dir = image_dir
-        self.mask_dir = mask_dir
+        self.mask_dir  = mask_dir
         self.transform = transform
-        self.images = [
-            f for f in os.listdir(image_dir)
-            if f.lower().endswith(self._IMG_EXTENSIONS)
-        ]
+        self.special_transform = special_transform
+
+        self.images = []
+        for f in os.listdir(image_dir):
+            if f.lower().endswith(self._IMG_EXTENSIONS):
+                # marca inicial (sin aug especial)
+                self.images.append(
+                    {"image_filename": f, "apply_special_aug": False}
+                )
+                # si quieres duplicar con augmentaciones especiales:
+                if self.special_transform is not None:
+                    for _ in range(Config.NUM_SPECIAL_AUGMENTATIONS):
+                        self.images.append(
+                            {"image_filename": f, "apply_special_aug": True}
+                        )
 
     def __len__(self) -> int:
         return len(self.images)
