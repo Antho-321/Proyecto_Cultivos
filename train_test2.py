@@ -16,7 +16,9 @@ from model import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
 from config import Config
 import cv2
-from functools import lru_cache
+torch.backends.cuda.matmul.allow_tf32 = True      # kernels TF32 en Ampere+
+torch.backends.cudnn.benchmark = True             # ya lo tienes ✔
+torch.set_float32_matmul_precision("high")        # PyTorch 2.3+
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -30,71 +32,52 @@ def mascara_contiene_solo_0_y_4(mask: np.ndarray) -> bool: # <-- Ponemos la func
 class CloudDataset(torch.utils.data.Dataset):
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
-    # <-- MODIFICADO: __init__ ahora acepta un pipeline de transformación especial
-    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None, special_transform: A.Compose | None = None):
+    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
         self.transform = transform
-        self.special_transform = special_transform  # <-- NUEVO: Guardar el pipeline de aumentación especial
-        
-        self.samples = []  # <-- NUEVO: Esta será nuestra lista principal de muestras
-
-        print("Inicializando dataset y buscando imágenes para aumentación especial...")
-        all_images = [
+        self.images = [
             f for f in os.listdir(image_dir)
             if f.lower().endswith(self._IMG_EXTENSIONS)
         ]
 
-        # <-- NUEVO: Lógica para construir la lista de muestras expandida
-        for img_filename in tqdm(all_images, desc="Procesando imágenes iniciales"):
-            # Siempre añadimos la muestra original (usará la transformación normal)
-            self.samples.append({"image_filename": img_filename, "apply_special_aug": False})
-
-            # Si se proporciona una transformación especial, verificamos la condición
-            if self.special_transform:
-                mask_path = self._mask_path_from_image_name(img_filename)
-                if os.path.exists(mask_path):
-                    mask = np.array(Image.open(mask_path).convert("L"))
-                    
-                    # Si la máscara cumple la condición, añadimos N copias "virtuales"
-                    if mascara_contiene_solo_0_y_4(mask):
-                        for _ in range(Config.NUM_SPECIAL_AUGMENTATIONS):
-                            self.samples.append({"image_filename": img_filename, "apply_special_aug": True})
-        
-        print(f"Dataset inicializado. Tamaño original: {len(all_images)}, Tamaño con aumentación: {len(self.samples)}")
-
     def __len__(self) -> int:
-        # <-- MODIFICADO: La longitud ahora es el tamaño de nuestra lista de muestras expandida
-        return len(self.samples)
+        return len(self.images)
 
     def _mask_path_from_image_name(self, image_filename: str) -> str:
         name_without_ext = image_filename.rsplit('.', 1)[0]
         mask_filename = f"{name_without_ext}_mask.png"
         return os.path.join(self.mask_dir, mask_filename)
 
-    @lru_cache(maxsize=None)
-    def _load_and_crop(self, img_filename: str):
-        img_path  = os.path.join(self.image_dir, img_filename)
+    def __getitem__(self, idx: int):
+        img_filename = self.images[idx]
+        img_path = os.path.join(self.image_dir, img_filename)
         mask_path = self._mask_path_from_image_name(img_filename)
+        
+        if not os.path.exists(mask_path):
+            raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
 
-        # use opencv for faster decoding
-        img  = cv2.imread(img_path, cv2.IMREAD_COLOR)[..., ::-1]  # BGR→RGB
-        msk  = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        img_c, msk_c3 = crop_around_classes(img, msk[...,None])
-        return img_c, msk_c3.squeeze()
+        image = np.array(Image.open(img_path).convert("RGB"))
+        mask = np.array(Image.open(mask_path).convert("L"))
 
-    def __getitem__(self, idx):
-        img_filename = self.samples[idx]["image_filename"]
-        apply_special = self.samples[idx]["apply_special_aug"]
+        # --- MODIFICACIÓN CLAVE: Aplicar recorte ANTES de las transformaciones ---
+        # 1. Añadir una dimensión de canal a la máscara para que sea (H, W, 1)
+        mask_3d = np.expand_dims(mask, axis=-1)
+        
+        # 2. Aplicar la función de recorte
+        image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
 
-        image_cropped, mask_cropped = self._load_and_crop(img_filename)
+        # 3. Quitar la dimensión del canal de la máscara para Albumentations
+        mask_cropped = mask_cropped_3d.squeeze()
+        # ------------------------------------------------------------------------
 
-        if apply_special and self.special_transform:
-            augmented = self.special_transform(image=image_cropped, mask=mask_cropped)
-        else:
+        if self.transform:
+            # Pasa los arrays RECORTADOS a las transformaciones
             augmented = self.transform(image=image_cropped, mask=mask_cropped)
+            image = augmented["image"]
+            mask = augmented["mask"]
 
-        return augmented["image"], augmented["mask"]
+        return image, mask
 
 # =================================================================================
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
@@ -213,7 +196,6 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
 # =================================================================================
-torch.backends.cudnn.benchmark = True
 
 def main():
     
