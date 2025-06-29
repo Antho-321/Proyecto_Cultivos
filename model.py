@@ -24,11 +24,12 @@ class ChannelAttention(nn.Module):
     def forward(self, x):
         avg_out = self.fc(self.avg_pool(x))
         max_out = self.fc(self.max_pool(x))
-        out = avg_out + max_out
-        out = self.sigmoid(out)
-        
+        out = avg_out + max_out           # shape (B, C, 1, 1)
+
         if self.use_softmax:
-            out = F.softmax(out, dim=1)  # Normalización de los pesos a través de los canales
+            out = F.softmax(out, dim=1)   # attention weights sum to 1
+        else:
+            out = torch.sigmoid(out)      # independent gating
         return out
 
 class SpatialAttention(nn.Module):
@@ -140,7 +141,12 @@ class DecoderBlock(nn.Module):
         
         self.use_attention = use_attention
         if use_attention:
-            self.attention = AttentionModule(in_channels=in_channels_skip, kernel_size=7)
+            self.attention = AttentionModule(
+                in_channels=in_channels_skip,
+                reduction_ratio=8,     # <- was 16, keeps more information
+                kernel_size=7,
+                use_softmax=True       # <- allow channels to fight for weight
+            )
 
         self.conv_fuse = nn.Sequential(
             nn.Conv2d(total_in_channels, out_channels, 3, padding=1, bias=False),
