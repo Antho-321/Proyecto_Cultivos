@@ -15,6 +15,9 @@ import numpy as np
 from model import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
 from config import Config
+torch.backends.cuda.matmul.allow_tf32 = True      # kernels TF32 en Ampere+
+torch.backends.cudnn.benchmark = True             # ya lo tienes ✔
+torch.set_float32_matmul_precision("high")        # PyTorch 2.3+
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -67,7 +70,10 @@ class CloudDataset(torch.utils.data.Dataset):
             image = augmented["image"]
             mask = augmented["mask"]
 
-        return image, mask
+        return (
+            torch.from_numpy(image).to(memory_format=torch.channels_last),
+            torch.from_numpy(mask)
+        )
 
 # =================================================================================
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
@@ -186,7 +192,6 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
 # =================================================================================
-torch.backends.cudnn.benchmark = True
 
 def main():
     
@@ -245,7 +250,7 @@ def main():
     imprimir_distribucion_clases_post_augmentation(train_loader, 6,
         "Distribución de clases en ENTRENAMIENTO (post-aug)")
 
-    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
+    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE, memory_format=torch.channels_last)
     print("Compiling the model... (this may take a minute)")
     model = torch.compile(model, mode="max-autotune")
     loss_fn = nn.CrossEntropyLoss()
