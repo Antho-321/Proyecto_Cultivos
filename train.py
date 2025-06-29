@@ -67,7 +67,10 @@ class CloudDataset(torch.utils.data.Dataset):
         if isinstance(image, np.ndarray):
             image = torch.from_numpy(image)
             mask  = torch.from_numpy(mask)
-        image = image.contiguous(memory_format=torch.channels_last)
+        if image.dim() == 4:
+            image = image.contiguous(memory_format=torch.channels_last)
+        else:
+            image = image.contiguous()
         mask  = mask.long()
 
         return image, mask
