@@ -15,6 +15,9 @@ import numpy as np
 from model import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
 from config import Config
+torch.backends.cuda.matmul.allow_tf32 = True      # kernels TF32 en Ampere+
+torch.backends.cudnn.benchmark = True             # ya lo tienes ✔
+torch.set_float32_matmul_precision("high")        # PyTorch 2.3+
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -186,7 +189,6 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
 # =================================================================================
-torch.backends.cudnn.benchmark = True
 
 def main():
     
