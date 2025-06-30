@@ -98,6 +98,7 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
 
         optimizer.zero_grad()
         scaler.scale(loss).backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
 
