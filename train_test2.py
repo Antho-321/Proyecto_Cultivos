@@ -199,7 +199,7 @@ def main():
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
 
     # ► Congelar las dos primeras etapas del backbone (stride 2 y 4) ◄
-    for idx, block in enumerate(model.backbone):
+    for idx, block in enumerate(model.backbone.children()):
         if idx < 2:
             block.requires_grad_(False)
 
@@ -253,7 +253,7 @@ def main():
 
         # ── Ejemplo de descongelado progresivo (opcional) ------------------
         # if epoch == 10:  # p.ej. después de 10 épocas
-        #     for idx, block in enumerate(model.backbone):
+        #     for idx, block in enumerate(model.backbone.children()):
         #         if idx == 1:  # segundo stage
         #             block.requires_grad_(True)
         #     # Re‑crear el optimizador para incluir nuevos params con grad
