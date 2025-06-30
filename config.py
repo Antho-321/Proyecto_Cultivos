@@ -1,3 +1,5 @@
+# config.py
+
 import torch
 
 class Config:
@@ -9,8 +11,9 @@ class Config:
     VAL_MASK_DIR = "Balanced/val/masks"
     
     LEARNING_RATE = 1e-4
+    WEIGHT_DECAY = 1e-5
     BATCH_SIZE = 8
-    NUM_EPOCHS = 100
+    NUM_EPOCHS = 200
     NUM_WORKERS = 2
     
     IMAGE_HEIGHT = 256
@@ -22,4 +25,4 @@ class Config:
     MODEL_SAVE_PATH = BASE_PATH + "best_model.pth.tar"
     PERFORMANCE_PATH = BASE_PATH + "rendimiento_miou.png"
 
-    NUM_SPECIAL_AUGMENTATIONS = 25
+    NUM_SPECIAL_AUGMENTATIONS = 8
