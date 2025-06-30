@@ -214,6 +214,14 @@ def validate_fn(loader, model, loss_fn, device=Config.DEVICE):
 
 def main():
     
+    # Enable memory pool for faster allocations
+    torch.cuda.empty_cache()
+    torch.cuda.set_per_process_memory_fraction(0.95)  # Use 95% of GPU memory
+    
+    # Set optimal memory format
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True  # ← NEW: Enable TF32 for cuDNN
 
     print(f"Using device: {Config.DEVICE}")
     
@@ -273,7 +281,12 @@ def main():
     print("Compiling the model... (this may take a minute)")
     torch._inductor.config.triton.unique_kernel_names = True
     torch._inductor.config.epilogue_fusion           = "max"
-    model = torch.compile(model, mode="max-autotune")
+    model = torch.compile(
+        model, 
+        mode="max-autotune",
+        dynamic=False,           # ← NEW: Disable dynamic shapes for better optimization
+        fullgraph=True          # ← NEW: Compile entire model as one graph
+    )
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
     scheduler = ReduceLROnPlateau(
