@@ -19,6 +19,7 @@ torch.backends.cuda.matmul.allow_tf32 = True      # kernels TF32 en Ampere+
 torch.backends.cudnn.benchmark = True             # ya lo tienes ✔
 torch.set_float32_matmul_precision("high")        # PyTorch 2.3+
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from losses import CombinedLoss
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -274,7 +275,12 @@ def main():
     torch._inductor.config.triton.unique_kernel_names = True
     torch._inductor.config.epilogue_fusion           = "max"
     model = torch.compile(model, mode="max-autotune")
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = CombinedLoss(
+        class_weights=[1,1,1,1,2,1],
+        gamma=2.0,
+        alpha=0.75,
+        dice_weight=1.5
+    ).to(Config.DEVICE)
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
     scheduler = ReduceLROnPlateau(
         optimizer,
