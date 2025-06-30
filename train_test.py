@@ -274,7 +274,9 @@ def main():
     torch._inductor.config.triton.unique_kernel_names = True
     torch._inductor.config.epilogue_fusion           = "max"
     model = torch.compile(model, mode="max-autotune")
-    loss_fn = nn.CrossEntropyLoss()
+    class_weights = torch.tensor([0.0456, 1.0845, 0.7029, 1.2376, 2.6297, 0.2997],
+                             device=Config.DEVICE)
+    loss_fn = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
     scheduler = ReduceLROnPlateau(
         optimizer,
