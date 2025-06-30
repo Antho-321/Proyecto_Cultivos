@@ -118,7 +118,6 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, aux_weight: float = 0.4,
 
         # Clipping
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         scaler.step(optimizer)
         scaler.update()
