@@ -19,6 +19,7 @@ torch.backends.cuda.matmul.allow_tf32 = True      # kernels TF32 en Ampere+
 torch.backends.cudnn.benchmark = True             # ya lo tienes ✔
 torch.set_float32_matmul_precision("high")        # PyTorch 2.3+
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -77,69 +78,70 @@ class CloudDataset(torch.utils.data.Dataset):
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
 # ... (El resto de tu código: train_fn, check_metrics)
 # =================================================================================
-def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
-    """Procesa una época de entrenamiento con cálculo de IoU y Dice por clase."""
-    loop = tqdm(loader, leave=True)
+def train_fn(loader, model, optimizer, loss_fn, scaler, aux_weight: float = 0.4, num_classes: int = 6):
+    """
+    Procesa una época de entrenamiento:
+    - Soporta salidas auxiliares (tupla de 3 preds)
+    - Usa AMP (autocast + GradScaler)
+    - Aplica clip_grad_norm_
+    - Calcula IoU y Dice por clase
+    """
     model.train()
+    loop = tqdm(loader, leave=True)
 
-    # Inicializamos los contadores para cada clase
+    # Inicializar contadores
     tp = torch.zeros(num_classes, device=Config.DEVICE)
     fp = torch.zeros(num_classes, device=Config.DEVICE)
     fn = torch.zeros(num_classes, device=Config.DEVICE)
 
     for batch_idx, (data, targets) in enumerate(loop):
-        data = data.to(Config.DEVICE, non_blocking=True)
+        data    = data.to(Config.DEVICE, non_blocking=True)
         targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
         with autocast(device_type=Config.DEVICE, dtype=torch.float16):
-            output = model(data)
-            predictions = output[0] if isinstance(output, tuple) else output
-            loss = loss_fn(predictions, targets)
+            outputs = model(data)
+
+            if isinstance(outputs, tuple):
+                main_pred, aux3_pred, aux2_pred = outputs
+                main_loss = loss_fn(main_pred, targets)
+                aux3_loss = loss_fn(aux3_pred, targets)
+                aux2_loss = loss_fn(aux2_pred, targets)
+                total_loss = main_loss + aux_weight * (aux3_loss + aux2_loss)
+                preds_logits = main_pred
+            else:
+                total_loss   = loss_fn(outputs, targets)
+                preds_logits = outputs
 
         optimizer.zero_grad()
-        scaler.scale(loss).backward()
+        scaler.scale(total_loss).backward()
+
+        # Clipping
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         scaler.step(optimizer)
         scaler.update()
 
-        # Convertir las predicciones a etiquetas de clase
-        _, predicted_classes = torch.max(predictions, dim=1)
-
-        # Para cada clase, contar TP, FP y FN
+        # Métricas
+        _, predicted_classes = torch.max(preds_logits, dim=1)
         for c in range(num_classes):
-            true_positives = (predicted_classes == c) & (targets == c)
-            false_positives = (predicted_classes == c) & (targets != c)
-            false_negatives = (predicted_classes != c) & (targets == c)
+            tp[c] += ((predicted_classes == c) & (targets == c)).sum()
+            fp[c] += ((predicted_classes == c) & (targets != c)).sum()
+            fn[c] += ((predicted_classes != c) & (targets == c)).sum()
 
-            tp[c] += true_positives.sum()
-            fp[c] += false_positives.sum()
-            fn[c] += false_negatives.sum()
+        loop.set_postfix(loss=total_loss.item())
 
-        # Actualizar el loop con la pérdida
-        loop.set_postfix(loss=loss.item())
-
-    # --- INICIO DE LAS MODIFICACIONES ---
-
-    # Para evitar división por cero, añadimos un pequeño epsilon
-    epsilon = 1e-6
-
-    # 1. Calcular el IoU para cada clase
-    iou_per_class = tp / (tp + fp + fn + epsilon)
-    
-    # 2. Calcular el Dice para cada clase (<--- MODIFICACIÓN 1: CALCULAR DICE)
-    dice_per_class = (2 * tp) / (2 * tp + fp + fn + epsilon)
-
-    # 3. Imprimir el Dice por clase (<--- MODIFICACIÓN 2: IMPRIMIR DICE)
-    print(f"\nÉpoca de entrenamiento finalizada:")
-    # .cpu().numpy() es para imprimirlo de forma más limpia si estás en GPU
-    print(f"  - Dice por clase: {dice_per_class.cpu().numpy()}")
-    print(f"  - IoU por clase: {iou_per_class.cpu().numpy()}")
-
-    # 4. Calcular el Mean IoU (<--- MODIFICACIÓN 3: CALCULAR mIoU Y CAMBIAR RETURN)
+    # Cálculo final de IoU y Dice
+    eps = 1e-6
+    iou_per_class  = tp / (tp + fp + fn + eps)
+    dice_per_class = (2 * tp) / (2 * tp + fp + fn + eps)
     mean_iou = torch.nanmean(iou_per_class)
 
-    print(f"  - mIoU: {mean_iou:.4f}")
-    
-    # Devolver el mIoU
+    print("\nÉpoca finalizada:")
+    print(f"  - Dice por clase: {dice_per_class.cpu().numpy()}")
+    print(f"  - IoU por clase : {iou_per_class.cpu().numpy()}")
+    print(f"  - mIoU          : {mean_iou:.4f}")
+
     return mean_iou
 
 def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
@@ -212,9 +214,16 @@ def validate_fn(loader, model, loss_fn, device=Config.DEVICE):
     model.train()
     return avg_loss
 
+def get_scheduler(optimizer):
+    return CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=15,                # número de epochs hasta el primer reinicio
+        T_mult=2,              # factor para aumentar T_0 tras cada reinicio
+        eta_min=Config.MIN_LR  # lr mínimo (ajusta según tu config)
+    )
+
 def main():
     
-
     print(f"Using device: {Config.DEVICE}")
     
     train_transform = A.Compose([
@@ -276,14 +285,7 @@ def main():
     model = torch.compile(model, mode="max-autotune")
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode='min',           # 'min' porque queremos reducir LR cuando val_loss no baje
-        factor=0.3,           # reducción multiplicativa
-        patience=20,          # épocas de paciencia
-        min_lr=1e-7,          # LR mínimo
-        verbose=True          # imprime mensaje cuando baja el LR
-    )
+    scheduler = get_scheduler(optimizer)
     scaler = GradScaler() 
     best_mIoU = -1.0
 
@@ -295,7 +297,7 @@ def main():
         print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
         
         print("Calculando métricas de entrenamiento...")
-        train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
+        train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler, aux_weight=0.4)
 
         val_loss = validate_fn(val_loader, model, loss_fn)
         

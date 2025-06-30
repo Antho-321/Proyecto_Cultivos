@@ -234,76 +234,72 @@ class BoundaryAwareDecoderBlock(nn.Module):
 # 7. ARQUITECTURA PRINCIPAL: CloudDeepLabV3+ (usando EnhancedASPP y BoundaryAwareDecoderBlock)
 # =================================================================================
 class CloudDeepLabV3Plus(nn.Module):
-    def __init__(self, num_classes=1, dropout_rate=0.2):
+    def __init__(self, num_classes=6, dropout_rate=0.2):
         super().__init__()
-        atrous_rates = (2, 6, 12)
         
-        # --- Backbone: EfficientNetV2-S ---
+        # Use larger backbone for better features
         self.backbone = timm.create_model(
-            'tf_efficientnetv2_s.in21k',
+            'tf_efficientnetv2_m.in21k',  # Medium instead of Small
             pretrained=True,
             features_only=True,
             out_indices=(0, 1, 2, 3)
         )
+        
         backbone_channels = self.backbone.feature_info.channels()
         
-        # --- Enhanced ASPP ---
+        # Enhanced ASPP
         self.aspp = EnhancedASPP(
-            in_channels=backbone_channels[3],
-            atrous_rates=atrous_rates,
-            out_channels=256,
+            in_channels=backbone_channels[3], 
+            atrous_rates=(3, 6, 12, 18),  # More rates for better multi-scale
+            out_channels=320,  # Larger feature maps
             dropout_rate=dropout_rate
         )
         
-        # --- Boundary-aware decoder blocks ---
-        decoder_channels = [128, 64, 48]
-        self.decoder_block3 = BoundaryAwareDecoderBlock(
-            in_channels_skip=backbone_channels[2],
-            in_channels_up=256,
-            out_channels=decoder_channels[0],
-            dropout_rate=dropout_rate
+        # Boundary-aware decoder
+        decoder_channels = [160, 96, 64]
+        
+        self.decoder3 = BoundaryAwareDecoderBlock(
+            backbone_channels[2], 320, decoder_channels[0], dropout_rate
         )
-        self.decoder_block2 = BoundaryAwareDecoderBlock(
-            in_channels_skip=backbone_channels[1],
-            in_channels_up=decoder_channels[0],
-            out_channels=decoder_channels[1],
-            dropout_rate=dropout_rate
+        self.decoder2 = BoundaryAwareDecoderBlock(
+            backbone_channels[1], decoder_channels[0], decoder_channels[1], dropout_rate
         )
-        self.decoder_block1 = BoundaryAwareDecoderBlock(
-            in_channels_skip=backbone_channels[0],
-            in_channels_up=decoder_channels[1],
-            out_channels=decoder_channels[2],
-            dropout_rate=dropout_rate
+        self.decoder1 = BoundaryAwareDecoderBlock(
+            backbone_channels[0], decoder_channels[1], decoder_channels[2], dropout_rate
         )
         
-        # --- Segmentation head and auxiliary heads ---
-        self.segmentation_head = nn.Sequential(
-            nn.Conv2d(decoder_channels[2], 32, 3, padding=1, bias=False),
-            nn.BatchNorm2d(32),
+        # Enhanced segmentation head
+        self.seg_head = nn.Sequential(
+            nn.Conv2d(decoder_channels[2], 48, 3, padding=1, bias=False),
+            nn.BatchNorm2d(48),
             nn.ReLU(),
-            nn.Conv2d(32, num_classes, 1)
+            SEBlock(48),
+            nn.Conv2d(48, num_classes, 1)
         )
-        self.aux_head_3 = nn.Conv2d(decoder_channels[0], num_classes, 1)
-        self.aux_head_2 = nn.Conv2d(decoder_channels[1], num_classes, 1)
+        
+        # Deep supervision heads
+        self.aux3 = nn.Conv2d(decoder_channels[0], num_classes, 1)
+        self.aux2 = nn.Conv2d(decoder_channels[1], num_classes, 1)
+        
         self.final_upsample = nn.UpsamplingBilinear2d(scale_factor=2)
-        self.training = True
-
+        
     def forward(self, x):
         features = self.backbone(x)
-        aspp_output = self.aspp(features[3])
         
-        d3 = self.decoder_block3(features[2], aspp_output)
-        d2 = self.decoder_block2(features[1], d3)
-        d1 = self.decoder_block1(features[0], d2)
+        aspp_out = self.aspp(features[3])
         
-        logits = self.segmentation_head(d1)
-        out = self.final_upsample(logits)
+        dec3 = self.decoder3(features[2], aspp_out)
+        dec2 = self.decoder2(features[1], dec3)
+        dec1 = self.decoder1(features[0], dec2)
+        
+        logits = self.seg_head(dec1)
+        final_logits = self.final_upsample(logits)
         
         if self.training:
-            aux3 = F.interpolate(self.aux_head_3(d3),
-                                 size=x.shape[-2:], mode='bilinear', align_corners=False)
-            aux2 = F.interpolate(self.aux_head_2(d2),
-                                 size=x.shape[-2:], mode='bilinear', align_corners=False)
-            return out, aux3, aux2
+            aux3 = F.interpolate(self.aux3(dec3), size=x.shape[-2:], 
+                               mode='bilinear', align_corners=False)
+            aux2 = F.interpolate(self.aux2(dec2), size=x.shape[-2:], 
+                               mode='bilinear', align_corners=False)
+            return final_logits, aux3, aux2
         
-        return out
+        return final_logits
