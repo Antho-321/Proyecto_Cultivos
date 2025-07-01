@@ -68,7 +68,14 @@ def compute_and_plot_confusion_matrix(model, loader, device):
     cm = confusion_matrix(y_true, y_pred, labels=list(range(6)))
     print("Matriz de confusión (absoluta):\n", cm)
 
-    class_names = [f"Clase {i}" for i in range(6)]
+    class_names = [
+        "Fondo",   # índice 0  → (255,255,255)
+        "Lengua de vaca",                # índice 1  → (128,0,0)
+        "Diente de león",          # índice 2  → (0,128,0)
+        "Kikuyo",        # índice 3  → (255,255,0)
+        "Otro",       # índice 4  → (0,0,0)
+        "Papa",    # índice 5  → (128,0,128)
+    ]
     plt.figure(figsize=(7,6))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
                 xticklabels=class_names, yticklabels=class_names)
@@ -95,7 +102,7 @@ def main():
     device = torch.device(Config.DEVICE)
     val_loader = get_val_loader()
 
-    checkpoint_path = r"/content/drive/MyDrive/colab/0.8410.pth.tar"
+    checkpoint_path = r"C:\Users\Administrador\Documents\INGENIERIA_EN_SOFTWARE\BIG_DATA\CÓDIGO\Proyecto_Cultivos\datos_expo\0.8410.pth.tar"
     if not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(f"No se encontró el archivo: {checkpoint_path}")
 

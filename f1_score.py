@@ -1,7 +1,7 @@
 import re
 import matplotlib.pyplot as plt
 
-def calcular_f1_score(texto_log: str) -> list:
+def calcular_f1_score(texto_log: str) -> list[list[float]]:
     """
     Calcula el F1-Score (Dice score) por clase para el conjunto de validación de cada época.
 
@@ -12,44 +12,43 @@ def calcular_f1_score(texto_log: str) -> list:
         Una lista de listas, donde cada sublista contiene los F1-Scores (Dice)
         por clase para el conjunto de validación de una época.
     """
-    # Expresión regular para encontrar las líneas de "Dice por clase" de validación
-    # y capturar la lista de valores numéricos que le siguen.
-    # Se utiliza re.DOTALL para que '.' pueda coincidir también con saltos de línea.
-    patron = re.compile(r"Calculando métricas de validación\.\.\.\n.*?Dice por clase: \[(.*?)\]", re.DOTALL)
-
-    # Buscar todas las coincidencias en el texto
+    patron = re.compile(
+        r"Calculando métricas de validación\.\.\.\n.*?Dice por clase: \[(.*?)\]",
+        re.DOTALL
+    )
     coincidencias = patron.findall(texto_log)
-
-    # Procesar cada coincidencia para convertir los strings en listas de floats
-    f1_scores_por_epoca = []
+    f1_scores_por_epoca: list[list[float]] = []
     for grupo_valores in coincidencias:
-        # Limpiar espacios y dividir por espacios para obtener los valores individuales
         valores_str = grupo_valores.strip().split()
-        # Convertir cada valor a float y guardarlo en una lista
         scores = [float(valor) for valor in valores_str]
         f1_scores_por_epoca.append(scores)
-
     return f1_scores_por_epoca
 
-def generar_grafico_f1_scores(f1_scores_por_epoca: list):
+def generar_grafico_f1_scores(
+    f1_scores_por_epoca: list[list[float]],
+    nombres_clases: list[str] = None
+):
     """
     Genera un gráfico de líneas que muestra la evolución del F1-Score por clase.
 
     Args:
         f1_scores_por_epoca: Una lista de listas con los F1-Scores por época.
+        nombres_clases: Lista opcional de nombres para cada clase.
     """
     if not f1_scores_por_epoca:
         print("No se encontraron datos para graficar.")
         return
 
-    # plt.figure(figsize=(10, 6))
-
-    # Transponer la lista de listas para tener una lista por clase a través de las épocas
     scores_por_clase = list(zip(*f1_scores_por_epoca))
     epocas = range(1, len(f1_scores_por_epoca) + 1)
 
     for i, scores_clase in enumerate(scores_por_clase):
-        plt.plot(epocas, scores_clase, marker='o', linestyle='-', label=f'Clase {i}')
+        label = (
+            nombres_clases[i]
+            if nombres_clases and i < len(nombres_clases)
+            else f'Clase {i}'
+        )
+        plt.plot(epocas, scores_clase, marker='o', linestyle='-', label=label)
 
     plt.title('Evolución del F1-Score (Dice) por Clase en Validación')
     plt.xlabel('Época')
@@ -58,8 +57,6 @@ def generar_grafico_f1_scores(f1_scores_por_epoca: list):
     plt.grid(True)
     plt.xticks(epocas)
     plt.tight_layout()
-    
-    # Guardar la figura en un archivo
     plt.savefig('f1_scores_evolucion.png')
     print("Gráfico guardado como 'f1_scores_evolucion.png'")
 
@@ -1993,11 +1990,13 @@ mIoU macro = 0.8369 | Dice macro = 0.9089
 # --- Bloque de ejecución ---
 if __name__ == "__main__":
     # 1. Extraer los datos del texto
-    f1_scores = calcular_f1_score(texto_log)
-    
-    # Imprimir los scores extraídos para verificación
-    for i, scores in enumerate(f1_scores, 1):
-        print(f"Época {i} (Validación): {scores}")
-
-    # 2. Generar y guardar el gráfico
-    generar_grafico_f1_scores(f1_scores)
+    scores = calcular_f1_score(texto_log)
+    nombres = [
+        "Fondo",   # índice 0  → (255,255,255)
+        "Lengua de vaca",                # índice 1  → (128,0,0)
+        "Diente de león",          # índice 2  → (0,128,0)
+        "Kikuyo",        # índice 3  → (255,255,0)
+        "Otro",       # índice 4  → (0,0,0)
+        "Papa",    # índice 5  → (128,0,128)
+    ]
+    generar_grafico_f1_scores(scores, nombres)
