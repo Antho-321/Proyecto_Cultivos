@@ -1,59 +1,41 @@
+from PIL import Image
 import numpy as np
+import os
+import numpy as np
+from keras.preprocessing.image import load_img, img_to_array
+from sklearn.model_selection import train_test_split
 
 def crop_around_classes(
     image: np.ndarray,
     mask: np.ndarray,
     classes_to_find: list[int] = [1, 2, 3, 4, 5],
-    margin: int = 0
+    margin: int = 10  # <--- AÑADIDO: Un pequeño margen puede ser útil
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Recorta un rectángulo alrededor de todos los píxeles que pertenecen a las
     clases especificadas en la máscara.
-
-    Args:
-        image (H×W×C np.ndarray): Imagen original.
-        mask (H×W×1 np.ndarray): Máscara con valores de clase.
-        classes_to_find (list[int]): Lista de IDs de clase a encontrar.
-        margin (int): Píxeles de margen extra alrededor del bounding box.
-
-    Returns:
-        cropped_image (h×w×C np.ndarray)
-        cropped_mask (h×w×1 np.ndarray)
-
-    Si no se encuentra ningún píxel de las clases, devuelve la imagen y
-    máscara originales.
     """
-    # Crea una máscara booleana donde True son los píxeles de las clases de interés
-    is_class_present = np.isin(mask, classes_to_find)
+    # is_class_present será 2D (H,W) ya que la máscara de entrada es (H,W,1)
+    is_class_present = np.isin(mask.squeeze(), classes_to_find)
 
-    # Encuentra las coordenadas de estos píxeles
-    # El [:,:,0] es para asegurar que la máscara sea 2D si tiene una dimensión de canal
-    ys, xs = np.where(is_class_present[:,:,0])
+    ys, xs = np.where(is_class_present)
 
     if ys.size == 0:
-        # No hay píxeles de las clases de interés: devolvemos original
-        return image, mask
+        return image, mask # Devuelve la máscara original (H,W,1)
 
-    # Calcula los límites del bounding box
     y_min, y_max = ys.min(), ys.max()
     x_min, x_max = xs.min(), xs.max()
 
-    # Aplica el margen sin salirse de los límites de la imagen
     y0 = max(0, y_min - margin)
     y1 = min(mask.shape[0], y_max + margin + 1)
     x0 = max(0, x_min - margin)
     x1 = min(mask.shape[1], x_max + margin + 1)
 
-    # Recorta la imagen y la máscara
     cropped_image = image[y0:y1, x0:x1]
-    cropped_mask = mask[y0:y1, x0:x1]
+    # Se recorta la máscara (H,W,1) y mantiene sus 3 dimensiones
+    cropped_mask = mask[y0:y1, x0:x1, :]
 
     return cropped_image, cropped_mask
-
-import os
-import numpy as np
-from tensorflow.keras.preprocessing.image import load_img, img_to_array
-from sklearn.model_selection import train_test_split
 
 def load_and_crop_dataset(
     image_directory: str,
@@ -93,7 +75,8 @@ def load_and_crop_dataset(
 
             if os.path.exists(mask_path):
                 mask = load_img(mask_path, color_mode='grayscale')
-                mask_array = img_to_array(mask)
+                mask_array = np.array(Image.open(mask_path))            # (H, W)
+                mask_array = mask_array[..., np.newaxis]                # (H, W, 1)
 
                 # --- Recorta la imagen y la máscara ---
                 img_cropped, mask_cropped = crop_around_classes(img_array, mask_array)
