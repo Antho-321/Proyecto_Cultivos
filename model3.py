@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from config import Config
 
 # -------------------------
 # 1) Depthwise separable conv
@@ -191,7 +192,7 @@ class ImprovedDeepLabV3Plus(nn.Module):
         x = self.classifier(x)
         return F.interpolate(
             x,
-            scale_factor=4,
+            size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), 
             mode='bilinear',
             align_corners=False
         )
