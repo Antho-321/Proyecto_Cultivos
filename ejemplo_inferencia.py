@@ -69,9 +69,11 @@ def load_gt(mask_path: Path | None, size: tuple[int,int]) -> Image.Image:
 # ───────────────────────────── 3)  LISTA DE IMÁGENES ──────────────────────────
 BASE_DIR = Path("Balanced/train")
 image_paths = [
-    BASE_DIR / "images/5-113m3_jpg.rf.1a908ea089918e172ac9b1cfbc81b590.jpg",
-    BASE_DIR / "images/101_jpg.rf.2a2a92bdf083fea463b938aa1f3e6bbf.jpg",
-    # añade aquí más rutas si quieres…
+    BASE_DIR / "images/5-113m3_jpg.rf.1a908ea089918e172ac9b1cfbc81b590.jpg",  # Clase 1
+    BASE_DIR / "images/101_jpg.rf.2a2a92bdf083fea463b938aa1f3e6bbf.jpg",      # Clase 2
+    BASE_DIR / "images/101_jpg.rf.2a2a92bdf083fea463b938aa1f3e6bbf.jpg",      # Clase 3
+    BASE_DIR / "images/101_jpg.rf.2a2a92bdf083fea463b938aa1f3e6bbf.jpg",      # Clase 4
+    BASE_DIR / "images/101_jpg.rf.2a2a92bdf083fea463b938aa1f3e6bbf.jpg",      # Clase 5
 ]
 
 # ───────────────────────────── 4)  MODELO Y TFMS ──────────────────────────────
