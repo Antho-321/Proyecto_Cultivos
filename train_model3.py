@@ -135,7 +135,7 @@ for epoch in range(1, num_epochs + 1):
     loop = tqdm(train_loader, desc=f"Epoch {epoch}/{num_epochs}", leave=False)
     for images, masks in loop:
         images, masks = images.to(device), masks.to(device)
-        masks = masks.long()           # <<< add this
+        masks = masks.long()           # Convertir ByteTensor → LongTensor
         optimizer.zero_grad()
         with autocast(device_type=device.type):
             outputs = model(images)
@@ -155,12 +155,13 @@ for epoch in range(1, num_epochs + 1):
     with torch.no_grad():
         for images, masks in val_loader:
             images, masks = images.to(device), masks.to(device)
+            masks = masks.long()       # También aquí en validación
             outputs = model(images)
             loss    = criterion(outputs, masks)
             val_loss += loss.item() * images.size(0)
     val_loss /= len(val_loader.dataset)
     print(f"             Val Loss: {val_loss:.4f}")
 
-    # --- Cálculo e impresión de mIoU y Dice --
+    # --- Cálculo e impresión de mIoU y Dice ---
     miou, dice = check_metrics(val_loader, model, n_classes=6, device=device)
     print(f"             mIoU: {miou:.4f} | Dice: {dice:.4f}\n")
