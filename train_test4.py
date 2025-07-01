@@ -324,7 +324,7 @@ def main():
         print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
         
         print("Calculando métricas de entrenamiento...")
-        train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
+        train_mIoU, _ = train_fn(train_loader, model, optimizer, loss_fn, scaler)
 
         val_loss = validate_fn(val_loader, model, loss_fn)
         
@@ -334,7 +334,7 @@ def main():
         scheduler.step(val_loss)
 
         # --- 4. GUARDAR LAS MÉTRICAS EN EL HISTORIAL ---
-        train_miou_history.append(train_mIoU.item()) # .item() para obtener el valor escalar
+        train_miou_history.append(train_mIoU)
         val_miou_history.append(current_mIoU.item())
 
         if current_mIoU > best_mIoU:
