@@ -335,7 +335,7 @@ def main():
 
         # --- 4. GUARDAR LAS MÉTRICAS EN EL HISTORIAL ---
         train_miou_history.append(train_mIoU)
-        val_miou_history.append(current_mIoU.item())
+        val_miou_history.append(current_mIoU)
 
         if current_mIoU > best_mIoU:
             best_mIoU = current_mIoU
