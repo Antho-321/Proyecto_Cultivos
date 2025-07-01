@@ -23,7 +23,7 @@ def main():
 
     # Paleta de colores definida antes para ser usada por GT y predicción
     palette = [
-        (  255,   255,   255),  # clase 0: negro
+        (  255,   255,   255),  # clase 0: blanco
         (128,   0,   0),  # clase 1: marrón
         (  0, 128,   0),  # clase 2: verde
         (128, 128,   0),  # clase 3: oliva
