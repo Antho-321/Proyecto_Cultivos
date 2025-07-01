@@ -27,7 +27,8 @@ learning_rate = 0.001     # tasa de aprendizaje fija
 train_transform = A.Compose([
     A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
     A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=15, val_shift_limit=10, p=0.5),
-    A.Flip(p=0.5),
+    A.HorizontalFlip(p=0.5),
+    A.VerticalFlip(p=0.5),
     A.Rotate(limit=360, p=0.5),
     A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
     A.Normalize(mean=[0.0,0.0,0.0], std=[1.0,1.0,1.0], max_pixel_value=255.0),
