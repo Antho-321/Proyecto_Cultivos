@@ -10,7 +10,7 @@ from train_test4 import CloudDeepLabV3Plus                 # cámbiala si vive e
 # ─────────────────────────── 1) PALETA Y FUNCIONES AUXILIARES ─────────────────────
 PALETTE = [
     (255,255,255), (128,0,0), (0,128,0),
-    (128,128,0),   (0,0,128), (128,0,128)
+    (0,0,0),   (0,0,128), (128,0,128)
 ]
 FLAT_PAL = [c for rgb in PALETTE for c in rgb]
 
