@@ -15,6 +15,7 @@ import numpy as np
 from model import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
 from config import Config
+from sklearn.metrics import matthews_corrcoef
 torch.backends.cuda.matmul.allow_tf32 = True      # kernels TF32 en Ampere+
 torch.backends.cudnn.benchmark = True             # ya lo tienes ✔
 torch.set_float32_matmul_precision("high")        # PyTorch 2.3+
@@ -77,7 +78,7 @@ class CloudDataset(torch.utils.data.Dataset):
 # ... (El resto de tu código: train_fn, check_metrics)
 # =================================================================================
 def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
-    """Procesa una época de entrenamiento con cálculo de IoU y Dice por clase."""
+    """Procesa una época de entrenamiento con cálculo de IoU, Dice y MCC."""
     loop = tqdm(loader, leave=True)
     model.train()
 
@@ -86,11 +87,15 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
     fp = torch.zeros(num_classes, device=Config.DEVICE)
     fn = torch.zeros(num_classes, device=Config.DEVICE)
 
+    # Para MCC: acumulamos todas las predicciones y etiquetas
+    preds_all = []
+    trues_all = []
+
     for batch_idx, (data, targets) in enumerate(loop):
         data = data.to(Config.DEVICE, non_blocking=True)
         targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
-        with autocast(device_type=Config.DEVICE, dtype=torch.float16):
+        with autocast(device_type="cuda", dtype=torch.float16):
             output = model(data)
             predictions = output[0] if isinstance(output, tuple) else output
             loss = loss_fn(predictions, targets)
@@ -103,51 +108,53 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
         # Convertir las predicciones a etiquetas de clase
         _, predicted_classes = torch.max(predictions, dim=1)
 
-        # Para cada clase, contar TP, FP y FN
+        # Acumular para MCC
+        preds_all.append(predicted_classes.view(-1).cpu())
+        trues_all.append(targets.view(-1).cpu())
+
+        # Contar TP, FP y FN por clase
         for c in range(num_classes):
-            true_positives = (predicted_classes == c) & (targets == c)
-            false_positives = (predicted_classes == c) & (targets != c)
-            false_negatives = (predicted_classes != c) & (targets == c)
+            tp[c] += ((predicted_classes == c) & (targets == c)).sum()
+            fp[c] += ((predicted_classes == c) & (targets != c)).sum()
+            fn[c] += ((predicted_classes != c) & (targets == c)).sum()
 
-            tp[c] += true_positives.sum()
-            fp[c] += false_positives.sum()
-            fn[c] += false_negatives.sum()
-
-        # Actualizar el loop con la pérdida
         loop.set_postfix(loss=loss.item())
 
-    # --- INICIO DE LAS MODIFICACIONES ---
-
-    # Para evitar división por cero, añadimos un pequeño epsilon
+    # Evitar división por cero
     epsilon = 1e-6
 
-    # 1. Calcular el IoU para cada clase
+    # IoU por clase
     iou_per_class = tp / (tp + fp + fn + epsilon)
-    
-    # 2. Calcular el Dice para cada clase (<--- MODIFICACIÓN 1: CALCULAR DICE)
+    # Dice por clase
     dice_per_class = (2 * tp) / (2 * tp + fp + fn + epsilon)
 
-    # 3. Imprimir el Dice por clase (<--- MODIFICACIÓN 2: IMPRIMIR DICE)
-    print(f"\nÉpoca de entrenamiento finalizada:")
-    # .cpu().numpy() es para imprimirlo de forma más limpia si estás en GPU
+    print("\nÉpoca de entrenamiento finalizada:")
     print(f"  - Dice por clase: {dice_per_class.cpu().numpy()}")
-    print(f"  - IoU por clase: {iou_per_class.cpu().numpy()}")
+    print(f"  - IoU por clase : {iou_per_class.cpu().numpy()}")
 
-    # 4. Calcular el Mean IoU (<--- MODIFICACIÓN 3: CALCULAR mIoU Y CAMBIAR RETURN)
-    mean_iou = torch.nanmean(iou_per_class)
-
+    # Mean IoU
+    mean_iou = torch.nanmean(iou_per_class).item()
     print(f"  - mIoU: {mean_iou:.4f}")
-    
-    # Devolver el mIoU
-    return mean_iou
+
+    # Calcular Matthews Correlation Coefficient
+    y_pred_all = torch.cat(preds_all).numpy()
+    y_true_all = torch.cat(trues_all).numpy()
+    mcc = matthews_corrcoef(y_true_all, y_pred_all)
+    print(f"  - MCC: {mcc:.4f}")
+
+    return mean_iou, mcc
 
 def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
     """
-    Calcula métricas macro-promedio (mIoU y Dice) *sin* bucle por clase,
+    Calcula métricas macro-promedio (mIoU, Dice y MCC) *sin* bucle por clase,
     usando una matriz de confusión acumulada en GPU.
     """
     eps = 1e-8
     conf_mat = torch.zeros((n_classes, n_classes), dtype=torch.float64, device=device)
+
+    # Para MCC: acumulamos predicciones y etiquetas
+    preds_all = []
+    trues_all = []
 
     model.eval()
     with torch.no_grad():
@@ -157,20 +164,23 @@ def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
 
             logits = model(x)
             logits = logits[0] if isinstance(logits, tuple) else logits
-            preds  = torch.argmax(logits, dim=1)
+            preds = torch.argmax(logits, dim=1)
 
-            # ── Sustituimos el bucle TP/FP/FN por una matriz de confusión en GPU ──
+            # Guardamos a CPU para MCC
+            preds_all.append(preds.view(-1).cpu())
+            trues_all.append(y.view(-1).cpu())
+
+            # ── Matriz de confusión en GPU ──
             flattened = (preds * n_classes + y).view(-1).float()
-            conf      = torch.histc(
+            conf = torch.histc(
                 flattened,
                 bins = n_classes * n_classes,
                 min  = 0,
                 max  = n_classes * n_classes - 1
             ).view(n_classes, n_classes)
-
             conf_mat += conf
-    # ─────────────────────────────────────────────────────────────────────────────
 
+    # Métricas a partir de conf_mat
     intersection = torch.diag(conf_mat)                  # TP por clase
     pred_sum     = conf_mat.sum(dim=1)                   # TP + FP
     true_sum     = conf_mat.sum(dim=0)                   # TP + FN
@@ -179,12 +189,18 @@ def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
     iou_per_class  = (intersection + eps) / (union + eps)
     dice_per_class = (2 * intersection + eps) / (pred_sum + true_sum + eps)
 
-    miou_macro  = iou_per_class.mean()
-    dice_macro  = dice_per_class.mean()
+    miou_macro  = iou_per_class.mean().item()
+    dice_macro  = dice_per_class.mean().item()
 
     print("IoU por clase :", iou_per_class.cpu().numpy())
     print("Dice por clase:", dice_per_class.cpu().numpy())
     print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
+
+    # Cálculo de MCC sobre todo el dataset
+    y_pred_all = torch.cat(preds_all).numpy()
+    y_true_all = torch.cat(trues_all).numpy()
+    mcc = matthews_corrcoef(y_true_all, y_pred_all)
+    print(f"Matthews Correlation Coefficient (MCC) = {mcc:.4f}")
 
     model.train()
     return miou_macro, dice_macro
