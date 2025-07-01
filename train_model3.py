@@ -135,6 +135,7 @@ for epoch in range(1, num_epochs + 1):
     loop = tqdm(train_loader, desc=f"Epoch {epoch}/{num_epochs}", leave=False)
     for images, masks in loop:
         images, masks = images.to(device), masks.to(device)
+        masks = masks.long()           # <<< add this
         optimizer.zero_grad()
         with autocast(device_type=device.type):
             outputs = model(images)
