@@ -127,3 +127,51 @@ def save_performance_plot(train_history, val_history, save_path):
     plt.savefig(save_path, dpi=150) # Guardar con buena resolución
     plt.close(fig) # Liberar memoria
     print(f"📈 Gráfico de rendimiento guardado en '{save_path}'")
+
+def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
+    """
+    Calcula métricas macro-promedio (mIoU y Dice) *sin* bucle por clase,
+    usando una matriz de confusión acumulada en GPU.
+    """
+    eps = 1e-8
+    conf_mat = torch.zeros((n_classes, n_classes), dtype=torch.float64, device=device)
+
+    model.eval()
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True).long()
+
+            logits = model(x)
+            logits = logits[0] if isinstance(logits, tuple) else logits
+            preds  = torch.argmax(logits, dim=1)
+
+            # ── Sustituimos el bucle TP/FP/FN por una matriz de confusión en GPU ──
+            flattened = (preds * n_classes + y).view(-1).float()
+            conf      = torch.histc(
+                flattened,
+                bins = n_classes * n_classes,
+                min  = 0,
+                max  = n_classes * n_classes - 1
+            ).view(n_classes, n_classes)
+
+            conf_mat += conf
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    intersection = torch.diag(conf_mat)                  # TP por clase
+    pred_sum     = conf_mat.sum(dim=1)                   # TP + FP
+    true_sum     = conf_mat.sum(dim=0)                   # TP + FN
+    union        = pred_sum + true_sum - intersection    # TP + FP + FN
+
+    iou_per_class  = (intersection + eps) / (union + eps)
+    dice_per_class = (2 * intersection + eps) / (pred_sum + true_sum + eps)
+
+    miou_macro  = iou_per_class.mean()
+    dice_macro  = dice_per_class.mean()
+
+    print("IoU por clase :", iou_per_class.cpu().numpy())
+    print("Dice por clase:", dice_per_class.cpu().numpy())
+    print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
+
+    model.train()
+    return miou_macro, dice_macro
