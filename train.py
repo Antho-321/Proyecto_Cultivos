@@ -268,7 +268,9 @@ def main():
         batch_size=Config.BATCH_SIZE,
         num_workers=Config.NUM_WORKERS,
         pin_memory=Config.PIN_MEMORY,
-        shuffle=True
+        shuffle=True,
+        persistent_workers=True,      # keep workers alive across epochs
+        prefetch_factor=2,            # have each worker pre-load 2 batches
     )
 
     val_dataset = CloudDataset(
@@ -290,6 +292,7 @@ def main():
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
     torch._inductor.config.triton.unique_kernel_names = True
+    torch._inductor.config.triton.cudagraphs = True
     torch._inductor.config.epilogue_fusion           = "max"
     model = torch.compile(
         model, 
