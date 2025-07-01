@@ -54,11 +54,11 @@ def load_gt(mask_path: Path | None, size: tuple[int,int]) -> Image.Image:
 # ─────────────────────────── 3) LISTA DE IMÁGENES ──────────────────────────────
 BASE_DIR = Path("Balanced/train")
 image_paths = [
-    BASE_DIR / "images/5-113m3_jpg.rf.1a908ea089918e172ac9b1cfbc81b590.jpg",  # Clase 1
-    BASE_DIR / "images/101_jpg.rf.2a2a92bdf083fea463b938aa1f3e6bbf.jpg",      # Clase 2
-    BASE_DIR / "images/101_jpg.rf.2a2a92bdf083fea463b938aa1f3e6bbf.jpg",      # Clase 3
-    BASE_DIR / "images/101_jpg.rf.2a2a92bdf083fea463b938aa1f3e6bbf.jpg",      # Clase 4
-    BASE_DIR / "images/101_jpg.rf.2a2a92bdf083fea463b938aa1f3e6bbf.jpg",      # Clase 5
+    BASE_DIR / "images/5-113m3_jpg.rf.1a908ea089918e172ac9b1cfbc81b590.jpg",   # Clase 1
+    BASE_DIR / "images/101_jpg.rf.2a2a92bdf083fea463b938aa1f3e6bbf.jpg",       # Clase 2
+    BASE_DIR / "images/118_jpg.rf.eceeb04c2e33998be1c3ded4e4bd0fdd.jpg",       # Clase 3
+    BASE_DIR / "images/137_jpg.rf.6980a8e200cb1d6a3471c93debb03d04.jpg",       # Clase 4
+    BASE_DIR / "images/140_jpg.rf.acc9ebd1bcbec570378efdb820cd6cda.jpg",       # Clase 5
 ]
 
 # ─────────────────────────── 4) MODELO Y TRANSFORMACIÓN ───────────────────────

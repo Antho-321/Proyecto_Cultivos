@@ -9,14 +9,11 @@ from sklearn.model_selection import train_test_split
 # Utilidades
 # =========================================================================
 def ensure_channel_dim(arr: np.ndarray) -> np.ndarray:
-    """Añade un canal extra si la imagen es 2-D (H, W → H, W, 1)."""
-    if arr.ndim == 2:
-        return arr[..., np.newaxis]
-    return arr
+    return arr[..., np.newaxis] if arr.ndim == 2 else arr
 
 
 # =========================================================================
-# 1. Recorte alrededor de las clases de interés
+# 1. Recorte alrededor de las clases
 # =========================================================================
 def crop_around_classes(
     image: np.ndarray,
@@ -24,11 +21,11 @@ def crop_around_classes(
     classes_to_find: list[int] = [1, 2, 3, 4, 5],
     margin: int = 10,
 ) -> tuple[np.ndarray, np.ndarray]:
-    mask = ensure_channel_dim(mask)                     # (H, W, 1)
+    mask = ensure_channel_dim(mask)
     is_class_present = np.isin(mask.squeeze(), classes_to_find)
 
     ys, xs = np.where(is_class_present)
-    if ys.size == 0:                                    # no hay clases → sin recorte
+    if ys.size == 0:
         return image, mask
 
     y_min, y_max = ys.min(), ys.max()
@@ -39,9 +36,7 @@ def crop_around_classes(
     x0 = max(0, x_min - margin)
     x1 = min(mask.shape[1], x_max + margin + 1)
 
-    cropped_image = image[y0:y1, x0:x1]
-    cropped_mask  = mask[y0:y1, x0:x1, :]
-    return cropped_image, cropped_mask
+    return image[y0:y1, x0:x1], mask[y0:y1, x0:x1, :]
 
 
 # =========================================================================
@@ -52,7 +47,7 @@ def load_and_crop_dataset(
     mask_directory: str,
     test_size: float = 0.2,
     random_state: int = 42,
-) -> tuple:
+):
     images_processed, masks_processed = [], []
 
     for image_filename in sorted(os.listdir(image_directory)):
@@ -83,102 +78,15 @@ def load_and_crop_dataset(
 
 
 # =========================================================================
-# 3. Conteo de máscaras sin recorte
+# 3. Conteo de máscaras sin recorte (sin cambios)
 # =========================================================================
 def load_img_to_array(path: str) -> np.ndarray:
-    """Devuelve la imagen con forma (H, W, C)."""
     return ensure_channel_dim(np.array(Image.open(path)))
 
 
-def count_uncropped(
-    image_directory: str,
-    mask_directory: str,
-    classes_to_find: list[int] = [1, 2, 3, 4, 5],
-    margin: int = 10,
-) -> int:
-    no_crop = 0
-
-    for img_name in sorted(os.listdir(image_directory)):
-        if not img_name.lower().endswith((".jpg", ".png")):
-            continue
-
-        img_path  = os.path.join(image_directory, img_name)
-        mask_name = os.path.splitext(img_name)[0] + "_mask.png"
-        mask_path = os.path.join(mask_directory, mask_name)
-        if not os.path.exists(mask_path):
-            continue
-
-        img  = load_img_to_array(img_path)   # (H, W, C)
-        mask = load_img_to_array(mask_path)  # (H, W, 1)
-
-        _, cropped_mask = crop_around_classes(
-            image=img,
-            mask=mask,
-            classes_to_find=classes_to_find,
-            margin=margin,
-        )
-
-        if cropped_mask.shape == mask.shape:
-            no_crop += 1
-
-    return no_crop
-
-
-def conteo_clases_en_sin_recorte(
-    image_directory: str,
-    mask_directory: str,
-    classes_to_find: list[int] = [1, 2, 3, 4, 5],
-    margin: int = 10,
-) -> dict[int, int]:
-    """
-    Devuelve (y muestra por pantalla) cuántas imágenes sin recorte contienen
-    al menos un píxel de cada clase indicada.
-
-    Ej. salida ⇒ {1: 32, 2: 18, 3: 10, 4: 5, 5: 0}
-    """
-    # Inicializa contador por clase
-    clases_contador = {c: 0 for c in classes_to_find}
-
-    for img_name in sorted(os.listdir(image_directory)):
-        if not img_name.lower().endswith((".jpg", ".png")):
-            continue
-
-        img_path  = os.path.join(image_directory, img_name)
-        mask_name = os.path.splitext(img_name)[0] + "_mask.png"
-        mask_path = os.path.join(mask_directory, mask_name)
-        if not os.path.exists(mask_path):
-            continue
-
-        # Carga imágenes
-        img  = load_img_to_array(img_path)   # (H, W, C)
-        mask = load_img_to_array(mask_path)  # (H, W, 1)
-
-        # Comprueba si la máscara se recortaría
-        _, cropped_mask = crop_around_classes(
-            image=img,
-            mask=mask,
-            classes_to_find=classes_to_find,
-            margin=margin,
-        )
-
-        # Solo analiza las que NO se recortan
-        if cropped_mask.shape == mask.shape:
-            # Elimina la dimensión canal para buscar clases
-            mask_2d = mask.squeeze()
-
-            # Marca presencia de cada clase
-            for c in classes_to_find:
-                if (mask_2d == c).any():
-                    clases_contador[c] += 1
-
-    # Muestra resultados
-    print("Imágenes sin recorte por clase:")
-    for c in classes_to_find:
-        print(f"  Clase {c}: {clases_contador[c]} imágenes")
-
-    return clases_contador
-
-
+# =========================================================================
+# 4. Ejemplos únicos por clase sin recorte  (FUNCIÓN ACTUALIZADA)
+# =========================================================================
 def ejemplos_clase_sin_recorte(
     image_directory: str,
     mask_directory: str,
@@ -186,54 +94,49 @@ def ejemplos_clase_sin_recorte(
     margin: int = 10,
 ) -> dict[int, str | None]:
     """
-    Para cada clase indicada, imprime y devuelve la ruta de la primera imagen
-    sin recorte que contenga al menos un píxel de dicha clase.
-
-    Retorna un diccionario {clase: ruta_imagen_primera | None}.
+    Devuelve, para cada clase, la ruta de la primera imagen SIN recorte que
+    contenga esa clase y que no haya sido usada ya para otra clase.
     """
-    # --- contadores y primeras rutas ---
-    contador_clase  = {c: 0     for c in classes_to_find}
-    primera_ruta    = {c: None  for c in classes_to_find}
+    primera_ruta = {c: None for c in classes_to_find}
+    usadas: set[str] = set()
 
     for img_name in sorted(os.listdir(image_directory)):
         if not img_name.lower().endswith((".jpg", ".png")):
             continue
 
         img_path  = os.path.join(image_directory, img_name)
-        mask_name = os.path.splitext(img_name)[0] + "_mask.png"
-        mask_path = os.path.join(mask_directory, mask_name)
+        mask_path = os.path.join(
+            mask_directory, os.path.splitext(img_name)[0] + "_mask.png"
+        )
         if not os.path.exists(mask_path):
             continue
 
-        img  = load_img_to_array(img_path)   # (H, W, C)
-        mask = load_img_to_array(mask_path)  # (H, W, 1)
+        img  = load_img_to_array(img_path)
+        mask = load_img_to_array(mask_path)
 
-        _, cropped_mask = crop_around_classes(
-            image=img,
-            mask=mask,
-            classes_to_find=classes_to_find,
-            margin=margin,
-        )
+        _, cropped_mask = crop_around_classes(img, mask, classes_to_find, margin)
 
-        # Solo analizamos las que NO se recortan
-        if cropped_mask.shape == mask.shape:
-            mask_2d = mask.squeeze()
+        # solo consideramos las que NO se recortan
+        if cropped_mask.shape != mask.shape:
+            continue
 
-            for c in classes_to_find:
-                if (mask_2d == c).any():
-                    contador_clase[c] += 1
-                    if primera_ruta[c] is None:             # guarda solo la primera
-                        primera_ruta[c] = img_path
+        mask_2d = mask.squeeze()
 
-        # Terminamos antes si ya tenemos ejemplo para todas las clases
-        if all(r is not None for r in primera_ruta.values()):
+        # intenta asignar esta imagen a la primera clase que la necesite
+        for c in classes_to_find:
+            if primera_ruta[c] is None and (mask_2d == c).any() and img_path not in usadas:
+                primera_ruta[c] = img_path
+                usadas.add(img_path)          # marca como usada
+                break                         # no se asigna a más clases
+
+        # terminamos si ya tenemos un ejemplo para cada clase
+        if all(primera_ruta[c] is not None for c in classes_to_find):
             break
 
-    # --- salida por pantalla ---
-    print("Imágenes sin recorte por clase y su primer ejemplo:")
+    # salida resumen
+    print("Imágenes sin recorte por clase y su primer ejemplo único:")
     for c in classes_to_find:
-        print(f"  Clase {c}: {contador_clase[c]} imágenes"
-              f" | primer ejemplo: {primera_ruta[c]}")
+        print(f"  Clase {c} | ejemplo: {primera_ruta[c]}")
 
     return primera_ruta
 
@@ -244,5 +147,4 @@ def ejemplos_clase_sin_recorte(
 if __name__ == "__main__":
     IMAGE_DIR = "Balanced/train/images"
     MASK_DIR  = "Balanced/train/masks"
-
     rutas_ejemplo = ejemplos_clase_sin_recorte(IMAGE_DIR, MASK_DIR)
