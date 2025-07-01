@@ -100,14 +100,32 @@ for i, (orig, gt, pred) in enumerate(results):
         ax.set_title(title, fontsize=12)
         ax.axis("off")
 
-# ─────────────── 6) LEYENDA DE COLORES POR CLASE (CUADRADOS PEQUEÑOS) ───────────
+# 0 ───── LISTA DE NOMBRES DE CLASE  ───────────────────────────────────────────
+# Ajusta estos nombres al orden exacto de tu PALETTE
+CLASS_NAMES = [
+    "Fondo",   # índice 0  → (255,255,255)
+    "Lengua de vaca",                # índice 1  → (128,0,0)
+    "Diente de león",          # índice 2  → (0,128,0)
+    "Kikuyo",        # índice 3  → (255,255,0)
+    "Otro",       # índice 4  → (0,0,0)
+    "Papa",    # índice 5  → (128,0,128)
+]
+# Comprueba que len(CLASS_NAMES) == len(PALETTE)
+assert len(CLASS_NAMES) == len(PALETTE), "‽ Mismos elementos en PALETTE y CLASS_NAMES"
+
+# … (todo tu código previo sin cambios) …
+
+# 6 ───── LEYENDA DE COLORES POR CLASE (CUADRADOS PEQUEÑOS)  ──────────────────
 handles = [
-    Patch(facecolor=np.array(rgb)/255.0, edgecolor='black', label=f"Clase {i}")
+    Patch(facecolor=np.array(rgb)/255.0,
+          edgecolor="black",
+          label=CLASS_NAMES[i])          # ← ahora usa el nombre descriptivo
     for i, rgb in enumerate(PALETTE)
 ]
+
 fig.legend(
     handles=handles,
-    loc="upper center",          # debajo de la parte superior de la figura
+    loc="upper center",
     bbox_to_anchor=(0.5, 1.02),
     ncol=len(PALETTE),
     frameon=False,
