@@ -4,9 +4,9 @@ from PIL import Image
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from config import Config
-from train_test4 import CloudDeepLabV3Plus   # cámbiala si vive en otro módulo
+from train_test4 import CloudDeepLabV3Plus   # Cámbiala si vive en otro módulo
 
-# ─────────────────────────────── 1)  PALETA Y UTILIDADES ──────────────────────
+# ─────────────────────────── 1) PALETA Y FUNCIONES AUXILIARES ─────────────────────
 PALETTE = [
     (255,255,255), (128,0,0), (0,128,0),
     (128,128,0),   (0,0,128), (128,0,128)
@@ -14,24 +14,14 @@ PALETTE = [
 FLAT_PAL = [c for rgb in PALETTE for c in rgb]
 
 def rgb_to_idx(rgb_arr: np.ndarray, palette: list[tuple[int,int,int]]) -> np.ndarray:
-    """
-    Convierte una máscara RGB (H,W,3) con los mismos colores de `palette`
-    a índices 0-len(palette)-1.  Si aparece un color desconocido → 0.
-    """
     idx = np.zeros(rgb_arr.shape[:2], dtype=np.uint8)
     for i, color in enumerate(palette):
         mask = np.all(rgb_arr == color, axis=-1)
         idx[mask] = i
     return idx
 
-# ───────────────────────── 2)  ENCONTRAR LA RUTA DE LA GT ─────────────────────
+# ─────────────────────────── 2) BÚSQUEDA DE MÁSCARA GT ─────────────────────────
 def find_mask(img_path: Path) -> Path | None:
-    """
-    Busca la máscara correspondiente probando patrones típicos:
-        foo.jpg   -> foo_mask.png   (labels/, masks/, misma carpeta…)
-        foo.jpeg  -> foo.png
-    Devuelve None si no encuentra nada.
-    """
     base = re.sub(r"\.(jpg|jpeg)$", "", img_path.name, flags=re.I)
     candidates = [
         img_path.with_name(f"{base}_mask.png"),
@@ -46,27 +36,22 @@ def find_mask(img_path: Path) -> Path | None:
             return c
     return None
 
+
 def load_gt(mask_path: Path | None, size: tuple[int,int]) -> Image.Image:
-    """
-    Carga la máscara GT como RGB con la paleta.  
-    Si `mask_path` es None → retorna una imagen negra del tamaño `size`.
-    """
     if mask_path is None:
         return Image.new("RGB", size, (0,0,0))
-
     m = Image.open(mask_path)
-    if m.mode == "P":                      # ya está paletizada → índices ok
+    if m.mode == "P":
         idx = np.array(m, dtype=np.uint8)
-    elif m.mode in ("L", "I"):             # escala de grises (índices)
+    elif m.mode in ("L", "I"):
         idx = np.array(m, dtype=np.uint8)
-    else:                                  # RGB → mapear colores a índices
+    else:
         idx = rgb_to_idx(np.array(m.convert("RGB")), PALETTE)
-
     gt = Image.fromarray(idx, mode="P")
     gt.putpalette(FLAT_PAL)
     return gt.convert("RGB").resize(size, Image.NEAREST)
 
-# ───────────────────────────── 3)  LISTA DE IMÁGENES ──────────────────────────
+# ─────────────────────────── 3) LISTA DE IMÁGENES ──────────────────────────────
 BASE_DIR = Path("Balanced/train")
 image_paths = [
     BASE_DIR / "images/5-113m3_jpg.rf.1a908ea089918e172ac9b1cfbc81b590.jpg",  # Clase 1
@@ -76,7 +61,7 @@ image_paths = [
     BASE_DIR / "images/101_jpg.rf.2a2a92bdf083fea463b938aa1f3e6bbf.jpg",      # Clase 5
 ]
 
-# ───────────────────────────── 4)  MODELO Y TFMS ──────────────────────────────
+# ─────────────────────────── 4) MODELO Y TRANSFORMACIÓN ───────────────────────
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model  = torch.load(
     "/content/drive/MyDrive/colab/cultivos_deeplab_final.pt",
@@ -90,33 +75,45 @@ tfm = A.Compose([
     ToTensorV2(),
 ])
 
-# ───────────────────────────── 5)  BUCLE PRINCIPAL ────────────────────────────
-for idx, img_path in enumerate(image_paths, 1):
+# ─────────────────────────── 5) INFERENCIAS Y VISUALIZACIÓN ───────────────────
+# Primero, computamos todas las tripletas (original, GT, predicción)
+results = []
+for img_path in image_paths:
     original = Image.open(img_path).convert("RGB")
     gt_mask  = load_gt(find_mask(img_path), original.size)
 
-    # Pre-procesado + inferencia
     tensor = tfm(image=np.array(original))["image"].unsqueeze(0).to(device)
     with torch.no_grad():
         logits = model(tensor)
         logits = logits[0] if isinstance(logits, tuple) else logits
         pred   = torch.argmax(logits, 1).squeeze().cpu().numpy()
 
-    pred_rgb = Image.fromarray(pred.astype(np.uint8), mode="P")
-    pred_rgb.putpalette(FLAT_PAL)
-    pred_rgb = pred_rgb.convert("RGB").resize(original.size, Image.NEAREST)
+    pred_img = Image.fromarray(pred.astype(np.uint8), mode="P")
+    pred_img.putpalette(FLAT_PAL)
+    pred_rgb = pred_img.convert("RGB").resize(original.size, Image.NEAREST)
 
-    # Plot & guardar
-    fig, ax = plt.subplots(1, 3, figsize=(18, 6), constrained_layout=True)
-    for a, im, t in zip(
-        ax, [original, gt_mask, pred_rgb],
-        ["Imagen original", "Máscara GT", "Predicción"]):
-        a.imshow(im); a.set_title(t); a.axis("off")
+    results.append((original, gt_mask, pred_rgb))
 
-    out_name = f"pred_{idx:02d}_{img_path.stem}.png"
-    plt.savefig(out_name, dpi=300, bbox_inches="tight");  plt.close(fig)
-    print(f"✔️  Guardado {out_name}")
+# Ahora generamos una sola figura con N filas y 3 columnas
+n = len(results)
+fig, axs = plt.subplots(n, 3, figsize=(15, 5*n), constrained_layout=True)
+for i, (orig, gt, pred) in enumerate(results):
+    row = axs[i] if n > 1 else axs
+    row[0].imshow(orig)
+    row[0].set_title("Imagen original")
+    row[0].axis("off")
 
-# ──────────────────────────────────────────────────────────────────────────────
+    row[1].imshow(gt)
+    row[1].set_title("Máscara GT")
+    row[1].axis("off")
+
+    row[2].imshow(pred)
+    row[2].set_title("Predicción")
+    row[2].axis("off")
+
+# Guardar y mostrar
+plt.savefig("all_predictions_grid.png", dpi=300, bbox_inches='tight')
+plt.show()
+
 if __name__ == "__main__":
-    pass
+    pass  # todo ya ejecutado arriba
