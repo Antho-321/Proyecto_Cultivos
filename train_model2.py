@@ -164,8 +164,8 @@ def main():
                               num_workers=Config.NUM_WORKERS,
                               pin_memory=Config.PIN_MEMORY, shuffle=False)
 
-    imprimir_distribucion_clases_post_augmentation(train_loader, num_classes=6,
-        title="Distribución post-aug en train")
+    imprimir_distribucion_clases_post_augmentation(train_loader, 6,
+        "Distribución de clases en ENTRENAMIENTO (post-aug)")
 
     model = DeepLabV3Plus_EfficientNetV2S(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
