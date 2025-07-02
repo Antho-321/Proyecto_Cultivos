@@ -158,7 +158,8 @@ class CloudDeepLabV3Plus(nn.Module):
         chans = self.backbone.feature_info.channels()  # [24, 48, 64, 160, 256]
 
         # ASPP con tasas más finas
-        self.aspp = ASPP(in_channels=chans[3], atrous_rates=(1, 2, 4, 8), out_channels=256)
+        # deep = feats[-1] tiene chans[-1] canales, no chans[3]
+        self.aspp = ASPP(in_channels=chans[-1], atrous_rates=(1,2,4,8), out_channels=256)
 
         # bloques de decodificador
         dec_ch = [128, 64, 48]
