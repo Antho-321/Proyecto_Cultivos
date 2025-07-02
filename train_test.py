@@ -12,59 +12,30 @@ import os
 from PIL import Image
 import numpy as np
 # Importa la arquitectura del otro archivo
-from model import CloudDeepLabV3Plus
+from model4 import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
 from config import Config
-import cv2
+torch.backends.cuda.matmul.allow_tf32 = True      # kernels TF32 en Ampere+
+torch.backends.cudnn.benchmark = True             # ya lo tienes ✔
+torch.set_float32_matmul_precision("high")        # PyTorch 2.3+
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
 # =================================================================================
-def mascara_contiene_solo_0_y_4(mask: np.ndarray) -> bool: # <-- Ponemos la función aquí para que sea accesible
-    """
-    Verifica si una máscara contiene únicamente píxeles con valor 0 y 4.
-    """
-    return set(np.unique(mask)) == {0, 4}
-
 class CloudDataset(torch.utils.data.Dataset):
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
-    # <-- MODIFICADO: __init__ ahora acepta un pipeline de transformación especial
-    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None, special_transform: A.Compose | None = None):
+    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
         self.transform = transform
-        self.special_transform = special_transform  # <-- NUEVO: Guardar el pipeline de aumentación especial
-        
-        self.samples = []  # <-- NUEVO: Esta será nuestra lista principal de muestras
-
-        print("Inicializando dataset y buscando imágenes para aumentación especial...")
-        all_images = [
+        self.images = [
             f for f in os.listdir(image_dir)
             if f.lower().endswith(self._IMG_EXTENSIONS)
         ]
 
-        # <-- NUEVO: Lógica para construir la lista de muestras expandida
-        for img_filename in tqdm(all_images, desc="Procesando imágenes iniciales"):
-            # Siempre añadimos la muestra original (usará la transformación normal)
-            self.samples.append({"image_filename": img_filename, "apply_special_aug": False})
-
-            # Si se proporciona una transformación especial, verificamos la condición
-            if self.special_transform:
-                mask_path = self._mask_path_from_image_name(img_filename)
-                if os.path.exists(mask_path):
-                    mask = np.array(Image.open(mask_path).convert("L"))
-                    
-                    # Si la máscara cumple la condición, añadimos N copias "virtuales"
-                    if mascara_contiene_solo_0_y_4(mask):
-                        for _ in range(Config.NUM_SPECIAL_AUGMENTATIONS):
-                            self.samples.append({"image_filename": img_filename, "apply_special_aug": True})
-        
-        print(f"Dataset inicializado. Tamaño original: {len(all_images)}, Tamaño con aumentación: {len(self.samples)}")
-
     def __len__(self) -> int:
-        # <-- MODIFICADO: La longitud ahora es el tamaño de nuestra lista de muestras expandida
-        return len(self.samples)
+        return len(self.images)
 
     def _mask_path_from_image_name(self, image_filename: str) -> str:
         name_without_ext = image_filename.rsplit('.', 1)[0]
@@ -72,11 +43,7 @@ class CloudDataset(torch.utils.data.Dataset):
         return os.path.join(self.mask_dir, mask_filename)
 
     def __getitem__(self, idx: int):
-        # <-- MODIFICADO: Obtenemos la información de la muestra de nuestra nueva lista
-        sample_info = self.samples[idx]
-        img_filename = sample_info["image_filename"]
-        apply_special_aug = sample_info["apply_special_aug"]
-
+        img_filename = self.images[idx]
         img_path = os.path.join(self.image_dir, img_filename)
         mask_path = self._mask_path_from_image_name(img_filename)
         
@@ -86,24 +53,22 @@ class CloudDataset(torch.utils.data.Dataset):
         image = np.array(Image.open(img_path).convert("RGB"))
         mask = np.array(Image.open(mask_path).convert("L"))
 
-        # Tu lógica de recorte permanece igual
+        # --- MODIFICACIÓN CLAVE: Aplicar recorte ANTES de las transformaciones ---
+        # 1. Añadir una dimensión de canal a la máscara para que sea (H, W, 1)
         mask_3d = np.expand_dims(mask, axis=-1)
-        image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
-        mask_cropped = mask_cropped_3d.squeeze()
         
-        # <-- MODIFICADO: Aplicamos la transformación condicionalmente
-        if apply_special_aug and self.special_transform:
-            # Esta es una muestra que cumplió la condición y debe ser aumentada especialmente
-            augmented = self.special_transform(image=image_cropped, mask=mask_cropped)
-        elif self.transform:
-            # Esta es una muestra normal
-            augmented = self.transform(image=image_cropped, mask=mask_cropped)
-        else:
-            # Si no hay transformaciones
-            augmented = {"image": image_cropped, "mask": mask_cropped}
+        # 2. Aplicar la función de recorte
+        image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
 
-        image = augmented["image"]
-        mask = augmented["mask"]
+        # 3. Quitar la dimensión del canal de la máscara para Albumentations
+        mask_cropped = mask_cropped_3d.squeeze()
+        # ------------------------------------------------------------------------
+
+        if self.transform:
+            # Pasa los arrays RECORTADOS a las transformaciones
+            augmented = self.transform(image=image_cropped, mask=mask_cropped)
+            image = augmented["image"]
+            mask = augmented["mask"]
 
         return image, mask
 
@@ -176,43 +141,46 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
     # Devolver el mIoU
     return mean_iou
 
-def check_metrics(loader, model, n_classes=6, device="cuda"):
-    """Devuelve mIoU macro y Dice macro."""
+def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
+    """
+    Calcula métricas macro-promedio (mIoU y Dice) *sin* bucle por clase,
+    usando una matriz de confusión acumulada en GPU.
+    """
     eps = 1e-8
-    intersection_sum = torch.zeros(n_classes, dtype=torch.float64, device=device)
-    union_sum        = torch.zeros_like(intersection_sum)
-    dice_num_sum     = torch.zeros_like(intersection_sum)
-    dice_den_sum     = torch.zeros_like(intersection_sum)
+    conf_mat = torch.zeros((n_classes, n_classes), dtype=torch.float64, device=device)
 
     model.eval()
-
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()
 
-            output = model(x)
-            logits = output[0] if isinstance(output, tuple) else output # <-- ¡ESTA ES LA CORRECCIÓN CLAVE!
+            logits = model(x)
+            logits = logits[0] if isinstance(logits, tuple) else logits
             preds  = torch.argmax(logits, dim=1)
 
-            for cls in range(n_classes):
-                pred_c   = (preds == cls)
-                true_c   = (y == cls)
-                inter    = (pred_c & true_c).sum().double()
-                pred_sum = pred_c.sum().double()
-                true_sum = true_c.sum().double()
-                union    = pred_sum + true_sum - inter
+            # ── Sustituimos el bucle TP/FP/FN por una matriz de confusión en GPU ──
+            flattened = (preds * n_classes + y).view(-1).float()
+            conf      = torch.histc(
+                flattened,
+                bins = n_classes * n_classes,
+                min  = 0,
+                max  = n_classes * n_classes - 1
+            ).view(n_classes, n_classes)
 
-                intersection_sum[cls] += inter
-                union_sum[cls]        += union
-                dice_num_sum[cls]     += 2 * inter
-                dice_den_sum[cls]     += pred_sum + true_sum
+            conf_mat += conf
+    # ─────────────────────────────────────────────────────────────────────────────
 
-    iou_per_class  = (intersection_sum + eps) / (union_sum + eps)
-    dice_per_class = (dice_num_sum   + eps) / (dice_den_sum + eps)
+    intersection = torch.diag(conf_mat)                  # TP por clase
+    pred_sum     = conf_mat.sum(dim=1)                   # TP + FP
+    true_sum     = conf_mat.sum(dim=0)                   # TP + FN
+    union        = pred_sum + true_sum - intersection    # TP + FP + FN
 
-    miou_macro = iou_per_class.mean()
-    dice_macro = dice_per_class.mean()
+    iou_per_class  = (intersection + eps) / (union + eps)
+    dice_per_class = (2 * intersection + eps) / (pred_sum + true_sum + eps)
+
+    miou_macro  = iou_per_class.mean()
+    dice_macro  = dice_per_class.mean()
 
     print("IoU por clase :", iou_per_class.cpu().numpy())
     print("Dice por clase:", dice_per_class.cpu().numpy())
@@ -224,7 +192,6 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
 # =================================================================================
-torch.backends.cudnn.benchmark = True
 
 def main():
     
@@ -244,71 +211,6 @@ def main():
         ToTensorV2(),
     ])
 
-    special_aug_transform = A.Compose([
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH,
-                interpolation=cv2.INTER_LINEAR),
-
-        A.SomeOf([
-            # Geometric
-            A.HorizontalFlip(p=1),
-            A.VerticalFlip(p=1),
-            A.RandomRotate90(p=1),
-            A.Rotate(limit=45, border_mode=cv2.BORDER_CONSTANT, fill=0, p=1),
-            A.Affine(scale=(0.9,1.1), translate_percent=(-.1,.1),
-                    rotate=(-10,10), shear=(-10,10), fill=0, p=1),
-            A.Perspective(scale=(.05,.1), keep_size=True, fill=0, p=1),
-            A.ElasticTransform(alpha=120, sigma=120*0.05, affine_alpha=120*0.03,
-                            border_mode=cv2.BORDER_CONSTANT, fill=0, p=1),
-            A.GridDistortion(border_mode=cv2.BORDER_CONSTANT, fill=0, p=1),
-            A.OpticalDistortion(distort_limit=.5, shift_limit_x=.5, shift_limit_y=.5,
-                                border_mode=cv2.BORDER_CONSTANT, fill=0, p=1),
-            A.RandomResizedCrop(size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
-                                scale=(0.8,1.0), p=1),
-
-            # Color / brightness
-            A.RandomBrightnessContrast(.2, .2, p=1),
-            A.ColorJitter(.2, .2, .2, .2, p=1),
-            A.HueSaturationValue(20, 30, 20, p=1),
-            A.RGBShift(20, 20, 20, p=1),
-            A.CLAHE(clip_limit=4.0, tile_grid_size=(8,8), p=1),
-            A.RandomGamma((80,120), p=1),
-            A.ToGray(p=1), A.ToSepia(p=1), A.InvertImg(p=1),
-            A.Solarize(p=1), A.Equalize(p=1), A.ChannelShuffle(p=1),
-
-            # Blur
-            A.Blur(blur_limit=7, p=1),
-            A.GaussianBlur(blur_limit=(3,7), p=1),
-            A.MedianBlur(blur_limit=5, p=1),
-            A.MotionBlur(blur_limit=(3,7), p=1),
-
-            # Noise  (⇣ aquí el cambio)
-            A.GaussNoise(std_range=(10/255.0, 50/255.0), p=1),
-            A.ISONoise(color_shift=(0.01,0.05), intensity=(0.1,0.5), p=1),
-            A.MultiplicativeNoise(multiplier=(0.9,1.1), p=1),
-
-            # Dropout
-            A.CoarseDropout(
-                num_holes_range=(1, 8),        # 1-8 agujeros por imagen
-                hole_height_range=(1, 8),      # altura de cada hueco en píxeles
-                hole_width_range=(1, 8),       # anchura de cada hueco en píxeles
-                fill=0,                        # píxeles negros en los huecos
-                p=1
-            ),
-
-            # Weather
-            A.RandomFog(fog_coef_range=(0.3,0.5), alpha_coef=0.1, p=1),
-            A.RandomRain(p=1), A.RandomSnow(p=1),
-            A.RandomSunFlare(p=1), A.RandomShadow(p=1),
-
-            # Other
-            A.Downscale(scale_range=(0.25,0.25), p=1),
-            A.Emboss(p=1), A.Sharpen(p=1), A.Posterize(p=1), A.FancyPCA(alpha=.1, p=1),
-        ], n=Config.NUM_SPECIAL_AUGMENTATIONS, p=1.0),
-
-        A.Normalize(mean=[0,0,0], std=[1,1,1], max_pixel_value=255.0),
-        ToTensorV2(),
-    ])
-
     val_transform = A.Compose([
         A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH), # <-- MUY IMPORTANTE
         A.Normalize(
@@ -322,10 +224,8 @@ def main():
     train_dataset = CloudDataset(
         image_dir=Config.TRAIN_IMG_DIR,
         mask_dir=Config.TRAIN_MASK_DIR,
-        transform=train_transform,
-        special_transform=special_aug_transform  # <-- Pasamos el nuevo pipeline
+        transform=train_transform
     )
-
     train_loader = DataLoader(
         train_dataset,
         batch_size=Config.BATCH_SIZE,
@@ -352,6 +252,8 @@ def main():
 
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
+    torch._inductor.config.triton.unique_kernel_names = True
+    torch._inductor.config.epilogue_fusion           = "max"
     model = torch.compile(model, mode="max-autotune")
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
