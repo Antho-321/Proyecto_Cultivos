@@ -163,9 +163,9 @@ class CloudDeepLabV3Plus(nn.Module):
 
         # bloques de decodificador
         dec_ch = [128, 64, 48]
-        self.decoder_block3 = DecoderBlock(chans[2], 256, dec_ch[0])
-        self.decoder_block2 = DecoderBlock(chans[1], dec_ch[0], dec_ch[1])
-        self.decoder_block1 = DecoderBlock(chans[0], dec_ch[1], dec_ch[2])
+        self.decoder_block3 = DecoderBlock(chans[3], 256, dec_ch[0])
+        self.decoder_block2 = DecoderBlock(chans[2], dec_ch[0], dec_ch[1])
+        self.decoder_block1 = DecoderBlock(chans[1], dec_ch[1], dec_ch[2])
 
         # cabezal de segmentación principal
         self.segmentation_head = nn.Sequential(
