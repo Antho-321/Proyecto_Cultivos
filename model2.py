@@ -182,8 +182,9 @@ class CloudDeepLabV3Plus(nn.Module):
         self.final_upsample = nn.UpsamplingBilinear2d(scale_factor=2)
 
         # detección de objetos pequeños
+        in_small = chans[0] + 16
         self.small_object_head = nn.Sequential(
-            nn.Conv2d(chans[0], 64, 3, padding=1, bias=False),
+            nn.Conv2d(in_small, 64, 3, padding=1, bias=False),
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Conv2d(64, 32, 3, padding=1, bias=False),
