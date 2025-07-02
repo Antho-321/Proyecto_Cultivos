@@ -12,7 +12,7 @@ class Config:
 
     LEARNING_RATE  = 1e-2       # 0.01 según PDF
     BATCH_SIZE     = 32         # batch=32
-    NUM_EPOCHS     = 60         # 60 épocas
+    NUM_EPOCHS     = 200         # 60 épocas
     NUM_WORKERS    = 2
     PIN_MEMORY     = True
 

@@ -180,7 +180,7 @@ def main():
                                   factor=0.1, patience=5,
                                   min_lr=1e-6, verbose=True)
     scaler    = GradScaler()
-    best_loss = float('inf')
+    best_miou = float('inf')
 
     train_losses, val_losses = [], []
 
@@ -194,15 +194,16 @@ def main():
         val_losses.append(val_loss)
 
         print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val mIoU: {val_miou:.4f}")
-
-        if val_loss < best_loss:
-            best_loss = val_loss
-            print(f"🔹 Nuevo mejor val_loss: {best_loss:.4f}, guardando modelo…")
+        if epoch == 0:
+            best_miou = val_miou
+        if val_miou < best_miou:
+            best_miou = val_miou
+            print(f"🔹 Nuevo mejor val_miou: {best_miou:.4f}, guardando modelo…")
             torch.save({
                 'epoch': epoch,
                 'model_state': model.state_dict(),
                 'opt_state': optimizer.state_dict(),
-                'best_loss': best_loss
+                'best_miou': best_miou
             }, Config.MODEL_SAVE_PATH)
 
     save_performance_plot(train_losses, val_losses, save_path=Config.PERFORMANCE_PATH)
