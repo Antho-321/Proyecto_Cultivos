@@ -250,7 +250,7 @@ def main():
     imprimir_distribucion_clases_post_augmentation(train_loader, 6,
         "Distribución de clases en ENTRENAMIENTO (post-aug)")
 
-    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
+    model = CloudDeepLabV3Plus(n_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
     torch._inductor.config.triton.unique_kernel_names = True
     torch._inductor.config.epilogue_fusion           = "max"
