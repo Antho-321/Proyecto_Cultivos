@@ -218,7 +218,7 @@ class CloudDeepLabV3Plus(nn.Module):
 
         # segmentación principal
         seg_logits = self.segmentation_head(d1)
-        main_up = self.final_upsample(seg_logits)
+        main_up = seg_logits
 
         # combinación ponderada
         combined = main_up + 0.3 * small_logits
