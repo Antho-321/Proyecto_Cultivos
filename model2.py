@@ -99,8 +99,8 @@ class DeepLabV3Plus_EfficientNetV2S(nn.Module):
             out_indices=(1, 2, 3, 4)  # stages: low-level at idx 1, high-level at idx 4
         )
         backbone_channels = self.backbone.feature_info.channels()
-        low_level_ch = backbone_channels[1]
-        high_level_ch = backbone_channels[4]
+        low_level_ch     = backbone_channels[0]    # corresponde a out_indices[0] == 1
+        high_level_ch    = backbone_channels[-1]   # corresponde a out_indices[-1] == 4
 
         # ASPP y Decoder
         self.aspp = ASPP(in_channels=high_level_ch, out_channels=256, atrous_rates=(6,12,18))
@@ -108,8 +108,8 @@ class DeepLabV3Plus_EfficientNetV2S(nn.Module):
 
     def forward(self, x):
         feats = self.backbone(x)
-        low_level_feat = feats[1]
-        high_level_feat = feats[4]
+        low_level_feat   = feats[0]
+        high_level_feat  = feats[-1]
 
         x = self.aspp(high_level_feat)
         x = self.decoder(low_level_feat, x)
