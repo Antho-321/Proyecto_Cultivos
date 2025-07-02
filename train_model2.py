@@ -136,6 +136,27 @@ def validate_fn(loader, model, loss_fn, num_classes):
     mean_iou_epoch = torch.stack(iou_scores).mean().item()
     return avg_loss, mean_iou_epoch
 
+class CombinedLoss(nn.Module):
+    def __init__(self, num_classes, weight_ce: float = 1.0, weight_iou: float = 1.0):
+        super().__init__()
+        self.ce = nn.CrossEntropyLoss()
+        self.weight_ce = weight_ce
+        self.weight_iou = weight_iou
+        self.num_classes = num_classes
+
+    def forward(self, preds: torch.Tensor, targets: torch.Tensor):
+        # 1) Pérdida CE
+        ce_loss = self.ce(preds, targets)
+
+        # 2) Calculamos IoU a partir de las predicciones
+        probs  = torch.softmax(preds, dim=1)
+        labels = probs.argmax(dim=1)
+        iou    = mean_iou(labels, targets, self.num_classes)  # tu función mean_iou
+        iou_loss = 1 - iou
+
+        # 3) Combinamos
+        return self.weight_ce * ce_loss + self.weight_iou * iou_loss
+
 # ================================
 # 3. MAIN
 # ================================
@@ -174,7 +195,7 @@ def main():
     torch._inductor.config.triton.unique_kernel_names = True
     torch._inductor.config.epilogue_fusion           = "max"
     model = torch.compile(model, mode="max-autotune")
-    loss_fn   = nn.CrossEntropyLoss()
+    loss_fn   = CombinedLoss(num_classes=6, weight_ce=1.0, weight_iou=0.5)
     optimizer = optim.Adam(model.parameters(), lr=Config.LEARNING_RATE)
     scheduler = ReduceLROnPlateau(optimizer, mode='min',
                                   factor=0.1, patience=5,
@@ -194,7 +215,9 @@ def main():
         val_losses.append(val_loss)
 
         print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val mIoU: {val_miou:.4f}")
-        if epoch == 0:
+        if epoch > 0 and val_miou <= best_miou:
+            loss_fn.weight_iou = min(loss_fn.weight_iou + 0.1, 1.0)
+        else:
             best_miou = val_miou
         if val_miou < best_miou:
             best_miou = val_miou
