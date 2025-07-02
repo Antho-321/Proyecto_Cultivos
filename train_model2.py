@@ -76,9 +76,9 @@ class CitrusDataset(Dataset):
 
 train_transform = A.Compose([
     A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
-    A.RandomHorizontalFlip(p=0.5),
-    A.RandomVerticalFlip(p=0.5),
-    A.RandomRotate90(p=0.5),
+    A.HorizontalFlip(p=0.5),      # ← use HorizontalFlip
+    A.VerticalFlip(p=0.5),        # ← use VerticalFlip
+    A.RandomRotate90(p=0.5),      # ← already correct
     A.Normalize(mean=(0,0,0), std=(1,1,1), max_pixel_value=255.0),
     ToTensorV2(),
 ])
