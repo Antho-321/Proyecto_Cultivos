@@ -12,7 +12,12 @@ class ImprovedEfficientNetV2(nn.Module):
     def __init__(self, in_channels=4, variant='efficientnetv2_s', out_indices=(0,1,2,3,4)):
         super().__init__()
         # load a pretrained EfficientNet-V2 and adapt first conv for 4-channel input
-        self.backbone = timm.create_model(variant, pretrained=True, features_only=True, out_indices=out_indices)
+        self.backbone = timm.create_model(
+            'efficientnetv2_s',
+            pretrained=False,    # ← no pretrained weights
+            features_only=True,
+            out_indices=out_indices
+        )
         # patch first conv weight to accept 4 channels
         conv0 = self.backbone.conv_stem
         self.backbone.conv_stem = nn.Conv2d(in_channels, conv0.out_channels,
