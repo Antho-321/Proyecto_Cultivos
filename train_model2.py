@@ -1,198 +1,205 @@
-import os
-import random
-from glob import glob
+# train.py
 
-import numpy as np
 import torch
-import torch.nn.functional as F
-from torch import optim
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-from PIL import Image
+import torch.nn as nn
+import torch.optim as optim
+from torch.amp import GradScaler, autocast
+from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+import os
+from PIL import Image
+import numpy as np
 
-from model2 import ParallelFusionNet
-from utils import crop_around_classes
-from config import Config
+from model2 import DeepLabV3Plus_EfficientNetV2S
+from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
+from config2 import Config
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 1. Configuración general
-# ────────────────────────────────────────────────────────────────────────────────
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-random.seed(42)
-torch.manual_seed(42)
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.benchmark      = True
+torch.set_float32_matmul_precision("high")
 
-INIT_LR      = 1e-3
-POWER        = 0.9
-BATCH_SIZE   = 16
-NUM_EPOCHS   = 100
-WEIGHT_DECAY = 1e-4
-BETAS        = (0.9, 0.999)
+# ================================
+# 1. DATASET PERSONALIZADO
+# ================================
+class CloudDataset(torch.utils.data.Dataset):
+    _IMG_EXTENSIONS = ('.jpg', '.png')
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 2. Dataset personalizado
-# ────────────────────────────────────────────────────────────────────────────────
-class CitrusDataset(Dataset):
-    def __init__(self, img_paths, mask_paths, transform=None):
-        self.img_paths  = img_paths
-        self.mask_paths = mask_paths
-        self.transform  = transform
+    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
+        self.image_dir = image_dir
+        self.mask_dir  = mask_dir
+        self.transform = transform
+        self.images    = [f for f in os.listdir(image_dir)
+                          if f.lower().endswith(self._IMG_EXTENSIONS)]
 
-    def __len__(self):
-        return len(self.img_paths)
+    def __len__(self) -> int:
+        return len(self.images)
 
-    def __getitem__(self, idx):
-        # 1) cargar como numpy
-        img_np  = np.array(Image.open(self.img_paths[idx]).convert("RGB"))
-        mask_np = np.array(Image.open(self.mask_paths[idx]).convert("L"))
+    def _mask_path_from_image_name(self, image_filename: str) -> str:
+        name = image_filename.rsplit('.', 1)[0]
+        return os.path.join(self.mask_dir, f"{name}_mask.png")
 
-        # 2) recorte alrededor de clases
-        mask_3d           = np.expand_dims(mask_np, axis=-1)
-        img_crop, msk_3d  = crop_around_classes(img_np, mask_3d)
-        mask_crop         = msk_3d.squeeze()
+    def __getitem__(self, idx: int):
+        img_name  = self.images[idx]
+        img_path  = os.path.join(self.image_dir, img_name)
+        mask_path = self._mask_path_from_image_name(img_name)
+        if not os.path.exists(mask_path):
+            raise FileNotFoundError(f"Máscara no encontrada para {img_name}")
 
-        # 3) pasar a PIL para Albumentations
-        img_pil  = Image.fromarray(img_crop)
-        msk_pil  = Image.fromarray(mask_crop.astype(np.uint8))
+        image = np.array(Image.open(img_path).convert("RGB"))
+        mask  = np.array(Image.open(mask_path).convert("L"))
+        mask_3d = np.expand_dims(mask, -1)
+        image_c, mask_c_3d = crop_around_classes(image, mask_3d)
+        mask_c = mask_c_3d.squeeze()
 
-        # 4) aplicar transformaciones
         if self.transform:
-            aug = self.transform(image=img_crop, mask=mask_crop)
-            img_tensor = aug["image"]
-            msk_tensor = aug["mask"]
-        else:
-            img_tensor = transforms.ToTensor()(img_pil)
-            msk_tensor = transforms.ToTensor()(msk_pil)
+            aug = self.transform(image=image_c, mask=mask_c)
+            image, mask = aug["image"], aug["mask"]
 
-        # 5) binarizar máscara
-        msk_tensor = (msk_tensor > 0).float()
-        return img_tensor, msk_tensor
+        return image, mask
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 3. Albumentations para imagen y máscara
-# ────────────────────────────────────────────────────────────────────────────────
-
-train_transform = A.Compose([
-    A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
-    A.HorizontalFlip(p=0.5),      # ← use HorizontalFlip
-    A.VerticalFlip(p=0.5),        # ← use VerticalFlip
-    A.RandomRotate90(p=0.5),      # ← already correct
-    A.Normalize(mean=(0,0,0), std=(1,1,1), max_pixel_value=255.0),
-    ToTensorV2(),
-])
-
-val_transform = A.Compose([
-    A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
-    A.Normalize(mean=(0,0,0), std=(1,1,1), max_pixel_value=255.0),
-    ToTensorV2(),
-])
-
-# ────────────────────────────────────────────────────────────────────────────────
-# 4. Rutas y DataLoaders
-# ────────────────────────────────────────────────────────────────────────────────
-train_imgs  = sorted(glob(os.path.join(Config.TRAIN_IMG_DIR, "*.jpg")))
-train_masks = sorted(glob(os.path.join(Config.TRAIN_MASK_DIR, "*.png")))
-
-val_imgs    = sorted(glob(os.path.join(Config.VAL_IMG_DIR,   "*.jpg")))
-val_masks   = sorted(glob(os.path.join(Config.VAL_MASK_DIR,  "*.png")))
-
-train_ds = CitrusDataset(train_imgs, train_masks, transform=train_transform)
-val_ds   = CitrusDataset(val_imgs,  val_masks,   transform=val_transform)
-
-train_loader = DataLoader(train_ds,
-                          batch_size=Config.BATCH_SIZE,
-                          shuffle=True,
-                          num_workers=Config.NUM_WORKERS,
-                          pin_memory=Config.PIN_MEMORY)
-val_loader   = DataLoader(val_ds,
-                          batch_size=Config.BATCH_SIZE,
-                          shuffle=False,
-                          num_workers=Config.NUM_WORKERS,
-                          pin_memory=Config.PIN_MEMORY)
-
-# ────────────────────────────────────────────────────────────────────────────────
-# 5. Modelo, optimizador y scheduler
-# ────────────────────────────────────────────────────────────────────────────────
-model = ParallelFusionNet(num_classes=1).to(DEVICE)
-optimizer = optim.AdamW(model.parameters(),
-                        lr=INIT_LR,
-                        betas=BETAS,
-                        weight_decay=WEIGHT_DECAY)
-
-max_iter = NUM_EPOCHS * (len(train_ds) // BATCH_SIZE)
-def poly_lr(opt, init_lr, curr_iter, max_iter, power=POWER):
-    lr = init_lr * (1 - curr_iter/max_iter)**power
-    for pg in opt.param_groups:
-        pg['lr'] = lr
-
-# ────────────────────────────────────────────────────────────────────────────────
-# 6. Entrenamiento
-# ────────────────────────────────────────────────────────────────────────────────
-global_iter, best_val = 0, float('inf')
-for epoch in range(1, NUM_EPOCHS+1):
+# ================================
+# 2. TRAIN & VALID FUNCTIONS
+# ================================
+def train_fn(loader, model, optimizer, loss_fn, scaler):
+    loop = tqdm(loader, leave=True)
     model.train()
-    pbar, train_loss = tqdm(train_loader, desc=f"Epoch {epoch}/{NUM_EPOCHS}"), 0
-    for imgs, masks in pbar:
-        imgs, masks = imgs.to(DEVICE), masks.to(DEVICE)
+    epoch_loss = 0.0
+
+    for data, targets in loop:
+        data, targets = data.to(Config.DEVICE), targets.to(Config.DEVICE)
+        with autocast(device_type=Config.DEVICE, dtype=torch.float16):
+            outputs = model(data)
+            preds   = outputs[0] if isinstance(outputs, tuple) else outputs
+            loss    = loss_fn(preds, targets)
+
         optimizer.zero_grad()
-        preds = model(imgs)
-        loss  = F.binary_cross_entropy_with_logits(preds, masks)
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
-        global_iter += 1
-        poly_lr(optimizer, INIT_LR, global_iter, max_iter)
+        epoch_loss += loss.item() * data.size(0)
+        loop.set_postfix(train_loss=loss.item())
 
-        train_loss += loss.item() * imgs.size(0)
-        pbar.set_postfix(loss=loss.item())
-    train_loss /= len(train_ds)
+    return epoch_loss / len(loader.dataset)
 
-    # ――― validación ―――
+def mean_iou(preds: torch.Tensor, targets: torch.Tensor, num_classes: int) -> torch.Tensor:
+    """
+    preds: Tensor de forma (B,H,W) con etiquetas predichas (0…num_classes-1)
+    targets: Tensor de forma (B,H,W) con etiquetas reales
+    """
+    ious = []
+    for cls in range(num_classes):
+        pred_inds   = (preds == cls)
+        target_inds = (targets == cls)
+        intersection = (pred_inds & target_inds).sum().float()
+        union        = (pred_inds | target_inds).sum().float()
+        if union == 0:
+            # Si no hay pixeles de esta clase en GT ni predicción, lo ignoramos
+            continue
+        ious.append(intersection / union)
+    if not ious:
+        return torch.tensor(0.0, device=preds.device)
+    return torch.stack(ious).mean()
+
+# ---------------------------------------------------
+# 2) Modifica validate_fn para devolver también el mIoU
+# ---------------------------------------------------
+def validate_fn(loader, model, loss_fn, num_classes):
     model.eval()
     val_loss = 0.0
+    iou_scores = []
     with torch.no_grad():
-        for imgs, masks in val_loader:
-            imgs, masks = imgs.to(DEVICE), masks.to(DEVICE)
-            preds = model(imgs)
-            val_loss += F.binary_cross_entropy_with_logits(preds, masks).item() * imgs.size(0)
-    val_loss /= len(val_ds)
+        for data, targets in loader:
+            data, targets = data.to(Config.DEVICE), targets.to(Config.DEVICE)
+            outputs = model(data)
+            preds   = outputs[0] if isinstance(outputs, tuple) else outputs
 
-    # ───> AQUÍ agregamos el cálculo e impresión de mIoU en validación
-    def compute_iou(pred, target, eps=1e-6):
-        pred  = (pred > 0).float()
-        inter = (pred * target).sum()
-        union = pred.sum() + target.sum() - inter
-        return (inter + eps) / (union + eps)
+            # 2.1 Calculamos pérdida
+            loss = loss_fn(preds, targets)
+            val_loss += loss.item() * data.size(0)
 
-    miou_val = 0.0
-    with torch.no_grad():
-        for imgs, masks in val_loader:
-            imgs   = imgs.to(DEVICE)
-            logits = model(imgs)
-            miou_val += compute_iou(torch.sigmoid(logits), masks.to(DEVICE)).item() * imgs.size(0)
-    miou_val /= len(val_ds)
-    print(f"  Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val mIoU: {miou_val:.4f}")
+            # 2.2 Convertimos predicción a etiquetas
+            # Si tu salida es multi‐clase con logits por canal:
+            probs  = torch.softmax(preds, dim=1)              # (B, C, H, W)
+            labels = probs.argmax(dim=1)                       # (B, H, W)
 
-    # guardar si mejora
-    if val_loss < best_val:
-        best_val = val_loss
-        torch.save(model.state_dict(), "best_model.pth")
+            # Asegúrate de que targets venga como (B,H,W) con etiquetas 0…C-1
+            iou_batch = mean_iou(labels, targets, num_classes)
+            iou_scores.append(iou_batch)
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 7. Test mIoU
-# ────────────────────────────────────────────────────────────────────────────────
-def compute_iou(pred, target, eps=1e-6):
-    pred  = (pred > 0).float()
-    inter = (pred*target).sum()
-    union = pred.sum()+target.sum()-inter
-    return (inter+eps)/(union+eps)
+    avg_loss = val_loss / len(loader.dataset)
+    mean_iou_epoch = torch.stack(iou_scores).mean().item()
+    return avg_loss, mean_iou_epoch
 
-model.load_state_dict(torch.load("best_model.pth"))
-model.eval()
-miou = sum(
-    compute_iou(torch.sigmoid(model(imgs.to(DEVICE))), masks.to(DEVICE)).item() * imgs.size(0)
-    for imgs, masks in val_loader
-) / len(val_ds)
-print(f"Validation mIoU: {miou:.4f}")
+# ================================
+# 3. MAIN
+# ================================
+def main():
+    print(f"Device: {Config.DEVICE}")
+
+    train_tf = A.Compose([
+        A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
+        A.Rotate(limit=35, p=0.7),
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.3),
+        A.Normalize(mean=[0,0,0], std=[1,1,1], max_pixel_value=255.0),
+        ToTensorV2(),
+    ])
+    val_tf = A.Compose([
+        A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
+        A.Normalize(mean=[0,0,0], std=[1,1,1], max_pixel_value=255.0),
+        ToTensorV2(),
+    ])
+
+    train_ds = CloudDataset(Config.TRAIN_IMG_DIR, Config.TRAIN_MASK_DIR, transform=train_tf)
+    val_ds   = CloudDataset(Config.VAL_IMG_DIR,   Config.VAL_MASK_DIR,   transform=val_tf)
+
+    train_loader = DataLoader(train_ds, batch_size=Config.BATCH_SIZE,
+                              num_workers=Config.NUM_WORKERS,
+                              pin_memory=Config.PIN_MEMORY, shuffle=True)
+    val_loader   = DataLoader(val_ds,   batch_size=Config.BATCH_SIZE,
+                              num_workers=Config.NUM_WORKERS,
+                              pin_memory=Config.PIN_MEMORY, shuffle=False)
+
+    imprimir_distribucion_clases_post_augmentation(train_loader, num_classes=6,
+        title="Distribución post-aug en train")
+
+    model = DeepLabV3Plus_EfficientNetV2S(num_classes=6).to(Config.DEVICE)
+    loss_fn   = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(model.parameters(), lr=Config.LEARNING_RATE)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min',
+                                  factor=0.1, patience=5,
+                                  min_lr=1e-6, verbose=True)
+    scaler    = GradScaler()
+    best_loss = float('inf')
+
+    train_losses, val_losses = [], []
+
+    for epoch in range(Config.NUM_EPOCHS):
+        print(f"\n--- Epoch {epoch+1}/{Config.NUM_EPOCHS} ---")
+        train_loss = train_fn(train_loader, model, optimizer, loss_fn, scaler)
+        val_loss, val_miou = validate_fn(val_loader, model, loss_fn, num_classes=6)
+        scheduler.step(val_loss)
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+
+        print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val mIoU: {val_miou:.4f}")
+
+        if val_loss < best_loss:
+            best_loss = val_loss
+            print(f"🔹 Nuevo mejor val_loss: {best_loss:.4f}, guardando modelo…")
+            torch.save({
+                'epoch': epoch,
+                'model_state': model.state_dict(),
+                'opt_state': optimizer.state_dict(),
+                'best_loss': best_loss
+            }, Config.MODEL_SAVE_PATH)
+
+    save_performance_plot(train_losses, val_losses, save_path=Config.PERFORMANCE_PATH)
+
+if __name__ == "__main__":
+    main()
