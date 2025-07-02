@@ -195,14 +195,22 @@ class CloudDeepLabV3Plus(nn.Module):
         shallow = self.shallow_conv(x)
 
         feats = self.backbone(x)
-        aspp_out = self.aspp(feats[3])
-
-        d3 = self.decoder_block3(feats[2], aspp_out)
-        d2 = self.decoder_block2(feats[1], d3)
-        d1 = self.decoder_block1(feats[0], d2)
+        # feats = [stride2, stride4, stride8, stride8, stride8]
+        # choose the *last* one for ASPP:
+        deep = feats[-1]                # H/8 × W/8
+        aspp_out = self.aspp(deep)      # H/8 × W/8
+        # Now decoder3 should fuse with feats[-2], which is also H/8×W/8:
+        d3 = self.decoder_block3(feats[-2], aspp_out)
+        # That up-samples to H/4×W/4 and then fuses with feats[-3], which *must* be H/4×W/4, etc.
+        d2 = self.decoder_block2(feats[-3], d3)
+        d1 = self.decoder_block1(feats[-4], d2)
 
         # cabezal de pequeños objetos
-        small_logits = self.small_object_head(feats[0])
+        skip0   = feats[0]                              # (B, C0, H/2, W/2)
+        # Redimensionamos shallow a H/2×W/2 y lo juntamos
+        shallow_ds = F.interpolate(shallow, skip0.shape[-2:], mode='bilinear', align_corners=False)
+        merged0   = torch.cat([skip0, shallow_ds], dim=1)  # (B, C0+16, H/2, W/2)
+        small_logits = self.small_object_head(merged0)
         small_logits = F.interpolate(small_logits, size=x.shape[-2:], mode='bilinear', align_corners=False)
 
         # segmentación principal
