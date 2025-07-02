@@ -168,6 +168,10 @@ def main():
         title="Distribución post-aug en train")
 
     model = DeepLabV3Plus_EfficientNetV2S(num_classes=6).to(Config.DEVICE)
+    print("Compiling the model... (this may take a minute)")
+    torch._inductor.config.triton.unique_kernel_names = True
+    torch._inductor.config.epilogue_fusion           = "max"
+    model = torch.compile(model, mode="max-autotune")
     loss_fn   = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=Config.LEARNING_RATE)
     scheduler = ReduceLROnPlateau(optimizer, mode='min',
