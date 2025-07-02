@@ -41,7 +41,12 @@ class CSWinBackbone(nn.Module):
     def __init__(self, variant='cswin_tiny_224', in_channels=4, out_indices=(1,2,3,4)):
         super().__init__()
         # CSwin typically expects 3-channel input; embed 4-channel similarly
-        self.backbone = timm.create_model(variant, pretrained=True, features_only=True, out_indices=out_indices)
+        self.backbone = timm.create_model(
+            'cswin_tiny_224_in22k',    # use correct registry name
+            pretrained=True,
+            features_only=True,
+            out_indices=out_indices
+        )
         # replace patch embedding to accept 4 channels
         pe = self.backbone.patch_embed.proj
         self.backbone.patch_embed.proj = nn.Conv2d(in_channels, pe.out_channels,
