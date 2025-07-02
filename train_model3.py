@@ -15,14 +15,28 @@ from model3 import ImprovedDeepLabV3Plus  # Asegúrate de que este apunta al mó
 from utils import crop_around_classes, check_metrics  # Agregamos check_metrics
 
 # ==========================
+# 0) OPTIMIZACIONES GPU
+# ==========================
+# Permitir TF32 en Ampere+ para matmul
+torch.backends.cuda.matmul.allow_tf32 = True
+# Activar autotune de cuDNN
+torch.backends.cudnn.benchmark = True
+# Máxima precisión para matmul en PyTorch 2.3+
+torch.set_float32_matmul_precision("high")
+# Configuración de torch.compile (inductor/triton)
+torch._inductor.config.triton.unique_kernel_names = True
+torch._inductor.config.epilogue_fusion = "max"
+
+# ==========================
 # 1) Hiperparámetros
 # ==========================
-batch_size    = 8         # tamaño de lote por iteración
-num_epochs    = 200       # número de épocas
-learning_rate = 0.001     # tasa de aprendizaje fija
+batch_size    = Config.BATCH_SIZE
+num_epochs    = Config.NUM_EPOCHS
+learning_rate = Config.LEARNING_RATE
+weight_decay  = getattr(Config, "WEIGHT_DECAY", 0.0)
 
 # =================================================================================
-# 2. TRANSFORMACIONES (PDF: brillo, color, contraste, flips, rotaciones aleatorias)
+# 2. TRANSFORMACIONES
 # =================================================================================
 train_transform = A.Compose([
     A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
@@ -105,25 +119,27 @@ train_loader = DataLoader(
     train_dataset,
     batch_size=batch_size,
     shuffle=True,
-    num_workers=4,
-    pin_memory=True
+    num_workers=Config.NUM_WORKERS,
+    pin_memory=Config.PIN_MEMORY
 )
 val_loader = DataLoader(
     val_dataset,
     batch_size=batch_size,
     shuffle=False,
-    num_workers=4,
-    pin_memory=True
+    num_workers=Config.NUM_WORKERS,
+    pin_memory=Config.PIN_MEMORY
 )
 
 # =================================================================================
 # 5. MODELO, SCALER, PÉRDIDA Y OPTIMIZADOR
 # =================================================================================
-device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device    = Config.DEVICE
 model     = ImprovedDeepLabV3Plus(n_classes=6).to(device)
+# Compilar modelo para triton/autotune
+model     = torch.compile(model, mode="max-autotune")
 scaler    = GradScaler()
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
 # =================================================================================
 # 6. BUCLE DE ENTRENAMIENTO
@@ -134,15 +150,18 @@ for epoch in range(1, num_epochs + 1):
     running_loss = 0.0
     loop = tqdm(train_loader, desc=f"Epoch {epoch}/{num_epochs}", leave=False)
     for images, masks in loop:
-        images, masks = images.to(device), masks.to(device)
-        masks = masks.long()           # Convertir ByteTensor → LongTensor
+        images = images.to(device, non_blocking=True)
+        masks  = masks.to(device, non_blocking=True).long()
+
         optimizer.zero_grad()
-        with autocast(device_type=device.type):
+        with autocast(device_type=device, dtype=torch.float16):
             outputs = model(images)
             loss    = criterion(outputs, masks)
+
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+
         running_loss += loss.item() * images.size(0)
         loop.set_postfix(loss=loss.item())
 
@@ -154,8 +173,8 @@ for epoch in range(1, num_epochs + 1):
     val_loss = 0.0
     with torch.no_grad():
         for images, masks in val_loader:
-            images, masks = images.to(device), masks.to(device)
-            masks = masks.long()       # También aquí en validación
+            images = images.to(device, non_blocking=True)
+            masks  = masks.to(device, non_blocking=True).long()
             outputs = model(images)
             loss    = criterion(outputs, masks)
             val_loss += loss.item() * images.size(0)
