@@ -57,6 +57,8 @@ class CloudDataset(torch.utils.data.Dataset):
         if self.transform:
             aug = self.transform(image=image_c, mask=mask_c)
             image, mask = aug["image"], aug["mask"]
+        
+        mask = mask.long()
 
         return image, mask
 
