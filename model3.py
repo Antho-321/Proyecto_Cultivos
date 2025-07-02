@@ -177,7 +177,7 @@ class GAU(nn.Module):
 # -------------------------
 # 5) Improved DeepLabV3+ completo
 # -------------------------
-class ImprovedDeepLabV3Plus(nn.Module):
+class CloudDeepLabV3Plus(nn.Module):
     def __init__(self, n_classes):
         super().__init__()
         self.backbone  = XceptionLite()
