@@ -126,8 +126,9 @@ class DecoderBlock(nn.Module):
         self.relu = nn.ReLU()
 
     def forward(self, x_skip, x_up):
-        x = self.upsample(x_up)
-        skip = self.att(x_skip) if self.att else x_skip
+        x = self.upsample(x_up)  
+        skip = self.att(x_skip)  
+        skip = F.interpolate(skip, size=x.shape[-2:], mode='bilinear', align_corners=False)  
         cat = torch.cat([x, skip], dim=1)
         fused = self.fuse(cat)
         res = self.align(x_skip)
