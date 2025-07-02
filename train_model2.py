@@ -1,309 +1,179 @@
-# train.py
+import os
+import random
+from glob import glob
 
+import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
+from torch import optim
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from PIL import Image
 from tqdm import tqdm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-import os
-from PIL import Image
-import numpy as np
-# Importa la arquitectura del otro archivo
-from model2 import LiteDeepLabFPN
-from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
+
+from model2 import ParallelFusionNet
+from utils import crop_around_classes
 from config import Config
-torch.backends.cuda.matmul.allow_tf32 = True      # kernels TF32 en Ampere+
-torch.backends.cudnn.benchmark = True             # ya lo tienes ✔
-torch.set_float32_matmul_precision("high")        # PyTorch 2.3+
 
-# =================================================================================
-# 2. DATASET PERSONALIZADO (MODIFICADO)
-# =================================================================================
-class CloudDataset(torch.utils.data.Dataset):
-    _IMG_EXTENSIONS = ('.jpg', '.png')
+# ────────────────────────────────────────────────────────────────────────────────
+# 1. Configuración general
+# ────────────────────────────────────────────────────────────────────────────────
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+random.seed(42)
+torch.manual_seed(42)
 
-    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
-        self.image_dir = image_dir
-        self.mask_dir = mask_dir
-        self.transform = transform
-        self.images = [
-            f for f in os.listdir(image_dir)
-            if f.lower().endswith(self._IMG_EXTENSIONS)
-        ]
+INIT_LR      = 1e-3
+POWER        = 0.9
+BATCH_SIZE   = 16
+NUM_EPOCHS   = 100
+WEIGHT_DECAY = 1e-4
+BETAS        = (0.9, 0.999)
 
-    def __len__(self) -> int:
-        return len(self.images)
+# ────────────────────────────────────────────────────────────────────────────────
+# 2. Dataset personalizado
+# ────────────────────────────────────────────────────────────────────────────────
+class CitrusDataset(Dataset):
+    def __init__(self, img_paths, mask_paths, transform=None):
+        self.img_paths  = img_paths
+        self.mask_paths = mask_paths
+        self.transform  = transform
 
-    def _mask_path_from_image_name(self, image_filename: str) -> str:
-        name_without_ext = image_filename.rsplit('.', 1)[0]
-        mask_filename = f"{name_without_ext}_mask.png"
-        return os.path.join(self.mask_dir, mask_filename)
+    def __len__(self):
+        return len(self.img_paths)
 
-    def __getitem__(self, idx: int):
-        img_filename = self.images[idx]
-        img_path = os.path.join(self.image_dir, img_filename)
-        mask_path = self._mask_path_from_image_name(img_filename)
-        
-        if not os.path.exists(mask_path):
-            raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
+    def __getitem__(self, idx):
+        # 1) cargar como numpy
+        img_np  = np.array(Image.open(self.img_paths[idx]).convert("RGB"))
+        mask_np = np.array(Image.open(self.mask_paths[idx]).convert("L"))
 
-        image = np.array(Image.open(img_path).convert("RGB"))
-        mask = np.array(Image.open(mask_path).convert("L"))
+        # 2) recorte alrededor de clases
+        mask_3d           = np.expand_dims(mask_np, axis=-1)
+        img_crop, msk_3d  = crop_around_classes(img_np, mask_3d)
+        mask_crop         = msk_3d.squeeze()
 
-        # --- MODIFICACIÓN CLAVE: Aplicar recorte ANTES de las transformaciones ---
-        # 1. Añadir una dimensión de canal a la máscara para que sea (H, W, 1)
-        mask_3d = np.expand_dims(mask, axis=-1)
-        
-        # 2. Aplicar la función de recorte
-        image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
+        # 3) pasar a PIL para Albumentations
+        img_pil  = Image.fromarray(img_crop)
+        msk_pil  = Image.fromarray(mask_crop.astype(np.uint8))
 
-        # 3. Quitar la dimensión del canal de la máscara para Albumentations
-        mask_cropped = mask_cropped_3d.squeeze()
-        # ------------------------------------------------------------------------
-
+        # 4) aplicar transformaciones
         if self.transform:
-            # Pasa los arrays RECORTADOS a las transformaciones
-            augmented = self.transform(image=image_cropped, mask=mask_cropped)
-            image = augmented["image"]
-            mask = augmented["mask"]
+            aug = self.transform(image=img_crop, mask=mask_crop)
+            img_tensor = aug["image"]
+            msk_tensor = aug["mask"]
+        else:
+            img_tensor = transforms.ToTensor()(img_pil)
+            msk_tensor = transforms.ToTensor()(msk_pil)
 
-        return image, mask
+        # 5) binarizar máscara
+        msk_tensor = (msk_tensor > 0).float()
+        return img_tensor, msk_tensor
 
-# =================================================================================
-# 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
-# ... (El resto de tu código: train_fn, check_metrics)
-# =================================================================================
-def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
-    """Procesa una época de entrenamiento con cálculo de IoU y Dice por clase."""
-    loop = tqdm(loader, leave=True)
+# ────────────────────────────────────────────────────────────────────────────────
+# 3. Albumentations para imagen y máscara
+# ────────────────────────────────────────────────────────────────────────────────
+
+train_transform = A.Compose([
+    A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
+    A.RandomHorizontalFlip(p=0.5),
+    A.RandomVerticalFlip(p=0.5),
+    A.RandomRotate90(p=0.5),
+    A.Normalize(mean=(0,0,0), std=(1,1,1), max_pixel_value=255.0),
+    ToTensorV2(),
+])
+
+val_transform = A.Compose([
+    A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
+    A.Normalize(mean=(0,0,0), std=(1,1,1), max_pixel_value=255.0),
+    ToTensorV2(),
+])
+
+# ────────────────────────────────────────────────────────────────────────────────
+# 4. Rutas y DataLoaders
+# ────────────────────────────────────────────────────────────────────────────────
+train_imgs  = sorted(glob(os.path.join(Config.TRAIN_IMG_DIR, "*.jpg")))
+train_masks = sorted(glob(os.path.join(Config.TRAIN_MASK_DIR, "*.png")))
+
+val_imgs    = sorted(glob(os.path.join(Config.VAL_IMG_DIR,   "*.jpg")))
+val_masks   = sorted(glob(os.path.join(Config.VAL_MASK_DIR,  "*.png")))
+
+train_ds = CitrusDataset(train_imgs, train_masks, transform=train_transform)
+val_ds   = CitrusDataset(val_imgs,  val_masks,   transform=val_transform)
+
+train_loader = DataLoader(train_ds,
+                          batch_size=Config.BATCH_SIZE,
+                          shuffle=True,
+                          num_workers=Config.NUM_WORKERS,
+                          pin_memory=Config.PIN_MEMORY)
+val_loader   = DataLoader(val_ds,
+                          batch_size=Config.BATCH_SIZE,
+                          shuffle=False,
+                          num_workers=Config.NUM_WORKERS,
+                          pin_memory=Config.PIN_MEMORY)
+
+# ────────────────────────────────────────────────────────────────────────────────
+# 5. Modelo, optimizador y scheduler
+# ────────────────────────────────────────────────────────────────────────────────
+model = ParallelFusionNet(num_classes=1).to(DEVICE)
+optimizer = optim.AdamW(model.parameters(),
+                        lr=INIT_LR,
+                        betas=BETAS,
+                        weight_decay=WEIGHT_DECAY)
+
+max_iter = NUM_EPOCHS * (len(train_ds) // BATCH_SIZE)
+def poly_lr(opt, init_lr, curr_iter, max_iter, power=POWER):
+    lr = init_lr * (1 - curr_iter/max_iter)**power
+    for pg in opt.param_groups:
+        pg['lr'] = lr
+
+# ────────────────────────────────────────────────────────────────────────────────
+# 6. Entrenamiento
+# ────────────────────────────────────────────────────────────────────────────────
+global_iter, best_val = 0, float('inf')
+for epoch in range(1, NUM_EPOCHS+1):
     model.train()
-
-    # Inicializamos los contadores para cada clase
-    tp = torch.zeros(num_classes, device=Config.DEVICE)
-    fp = torch.zeros(num_classes, device=Config.DEVICE)
-    fn = torch.zeros(num_classes, device=Config.DEVICE)
-
-    for batch_idx, (data, targets) in enumerate(loop):
-        data = data.to(Config.DEVICE, non_blocking=True)
-        targets = targets.to(Config.DEVICE, non_blocking=True).long()
-
-        with autocast(device_type=Config.DEVICE, dtype=torch.float16):
-            output = model(data)
-            predictions = output[0] if isinstance(output, tuple) else output
-            loss = loss_fn(predictions, targets)
-
+    pbar, train_loss = tqdm(train_loader, desc=f"Epoch {epoch}/{NUM_EPOCHS}"), 0
+    for imgs, masks in pbar:
+        imgs, masks = imgs.to(DEVICE), masks.to(DEVICE)
         optimizer.zero_grad()
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        preds = model(imgs)
+        loss  = F.binary_cross_entropy_with_logits(preds, masks)
+        loss.backward()
+        optimizer.step()
 
-        # Convertir las predicciones a etiquetas de clase
-        _, predicted_classes = torch.max(predictions, dim=1)
+        global_iter += 1
+        poly_lr(optimizer, INIT_LR, global_iter, max_iter)
 
-        # Para cada clase, contar TP, FP y FN
-        for c in range(num_classes):
-            true_positives = (predicted_classes == c) & (targets == c)
-            false_positives = (predicted_classes == c) & (targets != c)
-            false_negatives = (predicted_classes != c) & (targets == c)
+        train_loss += loss.item() * imgs.size(0)
+        pbar.set_postfix(loss=loss.item())
+    train_loss /= len(train_ds)
 
-            tp[c] += true_positives.sum()
-            fp[c] += false_positives.sum()
-            fn[c] += false_negatives.sum()
-
-        # Actualizar el loop con la pérdida
-        loop.set_postfix(loss=loss.item())
-
-    # --- INICIO DE LAS MODIFICACIONES ---
-
-    # Para evitar división por cero, añadimos un pequeño epsilon
-    epsilon = 1e-6
-
-    # 1. Calcular el IoU para cada clase
-    iou_per_class = tp / (tp + fp + fn + epsilon)
-    
-    # 2. Calcular el Dice para cada clase (<--- MODIFICACIÓN 1: CALCULAR DICE)
-    dice_per_class = (2 * tp) / (2 * tp + fp + fn + epsilon)
-
-    # 3. Imprimir el Dice por clase (<--- MODIFICACIÓN 2: IMPRIMIR DICE)
-    print(f"\nÉpoca de entrenamiento finalizada:")
-    # .cpu().numpy() es para imprimirlo de forma más limpia si estás en GPU
-    print(f"  - Dice por clase: {dice_per_class.cpu().numpy()}")
-    print(f"  - IoU por clase: {iou_per_class.cpu().numpy()}")
-
-    # 4. Calcular el Mean IoU (<--- MODIFICACIÓN 3: CALCULAR mIoU Y CAMBIAR RETURN)
-    mean_iou = torch.nanmean(iou_per_class)
-
-    print(f"  - mIoU: {mean_iou:.4f}")
-    
-    # Devolver el mIoU
-    return mean_iou
-
-def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
-    """
-    Calcula métricas macro-promedio (mIoU y Dice) *sin* bucle por clase,
-    usando una matriz de confusión acumulada en GPU.
-    """
-    eps = 1e-8
-    conf_mat = torch.zeros((n_classes, n_classes), dtype=torch.float64, device=device)
-
+    # validación
     model.eval()
-    with torch.no_grad():
-        for x, y in loader:
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True).long()
+    val_loss = sum(
+        F.binary_cross_entropy_with_logits(model(imgs.to(DEVICE)), masks.to(DEVICE)).item() * imgs.size(0)
+        for imgs, masks in val_loader
+    ) / len(val_ds)
 
-            logits = model(x)
-            logits = logits[0] if isinstance(logits, tuple) else logits
-            preds  = torch.argmax(logits, dim=1)
+    print(f"  Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+    if val_loss < best_val:
+        best_val = val_loss
+        torch.save(model.state_dict(), "best_model.pth")
 
-            # ── Sustituimos el bucle TP/FP/FN por una matriz de confusión en GPU ──
-            flattened = (preds * n_classes + y).view(-1).float()
-            conf      = torch.histc(
-                flattened,
-                bins = n_classes * n_classes,
-                min  = 0,
-                max  = n_classes * n_classes - 1
-            ).view(n_classes, n_classes)
+# ────────────────────────────────────────────────────────────────────────────────
+# 7. Test mIoU
+# ────────────────────────────────────────────────────────────────────────────────
+def compute_iou(pred, target, eps=1e-6):
+    pred  = (pred > 0).float()
+    inter = (pred*target).sum()
+    union = pred.sum()+target.sum()-inter
+    return (inter+eps)/(union+eps)
 
-            conf_mat += conf
-    # ─────────────────────────────────────────────────────────────────────────────
-
-    intersection = torch.diag(conf_mat)                  # TP por clase
-    pred_sum     = conf_mat.sum(dim=1)                   # TP + FP
-    true_sum     = conf_mat.sum(dim=0)                   # TP + FN
-    union        = pred_sum + true_sum - intersection    # TP + FP + FN
-
-    iou_per_class  = (intersection + eps) / (union + eps)
-    dice_per_class = (2 * intersection + eps) / (pred_sum + true_sum + eps)
-
-    miou_macro  = iou_per_class.mean()
-    dice_macro  = dice_per_class.mean()
-
-    print("IoU por clase :", iou_per_class.cpu().numpy())
-    print("Dice por clase:", dice_per_class.cpu().numpy())
-    print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
-
-    model.train()
-    return miou_macro, dice_macro
-
-# =================================================================================
-# 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
-# =================================================================================
-
-def main():
-    
-
-    print(f"Using device: {Config.DEVICE}")
-    
-    train_transform = A.Compose([
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH), # <-- MUY IMPORTANTE
-        A.Rotate(limit=35, p=0.7),
-        A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.3),
-        A.Normalize(
-            mean=[0.0, 0.0, 0.0],
-            std=[1.0, 1.0, 1.0],
-            max_pixel_value=255.0,
-        ),
-        ToTensorV2(),
-    ])
-
-    val_transform = A.Compose([
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH), # <-- MUY IMPORTANTE
-        A.Normalize(
-            mean=[0.0, 0.0, 0.0],
-            std=[1.0, 1.0, 1.0],
-            max_pixel_value=255.0,
-        ),
-        ToTensorV2(),
-    ])
-
-    train_dataset = CloudDataset(
-        image_dir=Config.TRAIN_IMG_DIR,
-        mask_dir=Config.TRAIN_MASK_DIR,
-        transform=train_transform
-    )
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=Config.BATCH_SIZE,
-        num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY,
-        shuffle=True
-    )
-
-    val_dataset = CloudDataset(
-        image_dir=Config.VAL_IMG_DIR,
-        mask_dir=Config.VAL_MASK_DIR,
-        transform=val_transform
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=Config.BATCH_SIZE,
-        num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY,
-        shuffle=False
-    )
-
-    imprimir_distribucion_clases_post_augmentation(train_loader, 6,
-        "Distribución de clases en ENTRENAMIENTO (post-aug)")
-
-    model = LiteDeepLabFPN(num_classes=6).to(Config.DEVICE)
-    print("Compiling the model... (this may take a minute)")
-    torch._inductor.config.triton.unique_kernel_names = True
-    torch._inductor.config.epilogue_fusion           = "max"
-    model = torch.compile(model, mode="max-autotune")
-    loss_fn = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
-    scaler = GradScaler() 
-    best_mIoU = -1.0
-
-    # --- 2. INICIALIZAR LISTAS PARA EL HISTORIAL ---
-    train_miou_history = []
-    val_miou_history = []
-
-    for epoch in range(Config.NUM_EPOCHS):
-        print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
-        
-        print("Calculando métricas de entrenamiento...")
-        train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
-        
-        print("Calculando métricas de validación...")
-        current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
-
-        # --- 4. GUARDAR LAS MÉTRICAS EN EL HISTORIAL ---
-        train_miou_history.append(train_mIoU.item()) # .item() para obtener el valor escalar
-        val_miou_history.append(current_mIoU.item())
-
-        if current_mIoU > best_mIoU:
-            best_mIoU = current_mIoU
-            print(f"🔹 Nuevo mejor mIoU: {best_mIoU:.4f} | Dice: {current_dice:.4f}  →  guardando modelo…")
-            checkpoint = {
-                "epoch":      epoch,
-                "state_dict": model.state_dict(),
-                "optimizer":  optimizer.state_dict(),
-                "best_mIoU":  best_mIoU,
-            }
-            torch.save(checkpoint, Config.MODEL_SAVE_PATH)
-
-    # --- 5. LLAMAR A LA FUNCIÓN DE GRAFICADO AL FINALIZAR ---
-    save_performance_plot(
-        train_history=train_miou_history,
-        val_history=val_miou_history,
-        save_path="/content/drive/MyDrive/colab/rendimiento_miou.png"
-    )
-
-    print("\nEvaluando el modelo con mejor mIoU guardado…")
-
-    # --- Cargar el checkpoint del mejor modelo ---
-    # Añadir map_location para asegurar compatibilidad entre CPU/GPU
-    best_model_checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
-    model.load_state_dict(best_model_checkpoint['state_dict'])
-
-    # Ahora que el mejor modelo está cargado, se ejecuta la evaluación
-    best_mIoU, best_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
-    print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
-if __name__ == "__main__":
-    main()
+model.load_state_dict(torch.load("best_model.pth"))
+model.eval()
+miou = sum(
+    compute_iou(torch.sigmoid(model(imgs.to(DEVICE))), masks.to(DEVICE)).item() * imgs.size(0)
+    for imgs, masks in val_loader
+) / len(val_ds)
+print(f"Validation mIoU: {miou:.4f}")
