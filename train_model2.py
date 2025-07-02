@@ -149,14 +149,33 @@ for epoch in range(1, NUM_EPOCHS+1):
         pbar.set_postfix(loss=loss.item())
     train_loss /= len(train_ds)
 
-    # validación
+    # ――― validación ―――
     model.eval()
-    val_loss = sum(
-        F.binary_cross_entropy_with_logits(model(imgs.to(DEVICE)), masks.to(DEVICE)).item() * imgs.size(0)
-        for imgs, masks in val_loader
-    ) / len(val_ds)
+    val_loss = 0.0
+    with torch.no_grad():
+        for imgs, masks in val_loader:
+            imgs, masks = imgs.to(DEVICE), masks.to(DEVICE)
+            preds = model(imgs)
+            val_loss += F.binary_cross_entropy_with_logits(preds, masks).item() * imgs.size(0)
+    val_loss /= len(val_ds)
 
-    print(f"  Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+    # ───> AQUÍ agregamos el cálculo e impresión de mIoU en validación
+    def compute_iou(pred, target, eps=1e-6):
+        pred  = (pred > 0).float()
+        inter = (pred * target).sum()
+        union = pred.sum() + target.sum() - inter
+        return (inter + eps) / (union + eps)
+
+    miou_val = 0.0
+    with torch.no_grad():
+        for imgs, masks in val_loader:
+            imgs   = imgs.to(DEVICE)
+            logits = model(imgs)
+            miou_val += compute_iou(torch.sigmoid(logits), masks.to(DEVICE)).item() * imgs.size(0)
+    miou_val /= len(val_ds)
+    print(f"  Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val mIoU: {miou_val:.4f}")
+
+    # guardar si mejora
     if val_loss < best_val:
         best_val = val_loss
         torch.save(model.state_dict(), "best_model.pth")
