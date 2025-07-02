@@ -18,6 +18,7 @@ from config import Config
 torch.backends.cuda.matmul.allow_tf32 = True      # kernels TF32 en Ampere+
 torch.backends.cudnn.benchmark = True             # ya lo tienes ✔
 torch.set_float32_matmul_precision("high")        # PyTorch 2.3+
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -95,7 +96,7 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
             predictions = output[0] if isinstance(output, tuple) else output
             loss = loss_fn(predictions, targets)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -193,8 +194,34 @@ def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
 # =================================================================================
 
+def validate_fn(loader, model, loss_fn, device=Config.DEVICE):
+    model.eval()
+    total_loss = 0.0
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True).long()
+
+            logits = model(x)
+            logits = logits[0] if isinstance(logits, tuple) else logits
+            loss = loss_fn(logits, y)
+
+            total_loss += loss.item() * x.size(0)
+
+    avg_loss = total_loss / len(loader.dataset)
+    model.train()
+    return avg_loss
+
 def main():
     
+    # Enable memory pool for faster allocations
+    torch.cuda.empty_cache()
+    torch.cuda.set_per_process_memory_fraction(0.95)  # Use 95% of GPU memory
+    
+    # Set optimal memory format
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True  # ← NEW: Enable TF32 for cuDNN
 
     print(f"Using device: {Config.DEVICE}")
     
@@ -231,7 +258,9 @@ def main():
         batch_size=Config.BATCH_SIZE,
         num_workers=Config.NUM_WORKERS,
         pin_memory=Config.PIN_MEMORY,
-        shuffle=True
+        shuffle=True,
+        persistent_workers=True,      # keep workers alive across epochs
+        prefetch_factor=2,            # have each worker pre-load 2 batches
     )
 
     val_dataset = CloudDataset(
@@ -254,9 +283,23 @@ def main():
     print("Compiling the model... (this may take a minute)")
     torch._inductor.config.triton.unique_kernel_names = True
     torch._inductor.config.epilogue_fusion           = "max"
-    model = torch.compile(model, mode="max-autotune")
+    torch._inductor.config.triton.cudagraphs = True
+    model = torch.compile(
+        model, 
+        mode="max-autotune",
+        dynamic=False,           # ← NEW: Disable dynamic shapes for better optimization
+        fullgraph=True          # ← NEW: Compile entire model as one graph
+    )
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='min',           # 'min' porque queremos reducir LR cuando val_loss no baje
+        factor=0.3,           # reducción multiplicativa
+        patience=20,          # épocas de paciencia
+        min_lr=1e-7,          # LR mínimo
+        verbose=True          # imprime mensaje cuando baja el LR
+    )
     scaler = GradScaler() 
     best_mIoU = -1.0
 
@@ -269,9 +312,13 @@ def main():
         
         print("Calculando métricas de entrenamiento...")
         train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
+
+        val_loss = validate_fn(val_loader, model, loss_fn)
         
         print("Calculando métricas de validación...")
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
+
+        scheduler.step(val_loss)
 
         # --- 4. GUARDAR LAS MÉTRICAS EN EL HISTORIAL ---
         train_miou_history.append(train_mIoU.item()) # .item() para obtener el valor escalar
