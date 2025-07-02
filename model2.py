@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import timm
-from coordinate_attention import CoordAtt  # pip install coordinate-attention-pytorch
+from coordatt import CoordAtt  # pip install coordinate-attention-pytorch
 
 class ImprovedEfficientNetV2(nn.Module):
     """
