@@ -163,7 +163,6 @@ def validate_fn(loader, model, loss_fn, device=Config.DEVICE):
 # =================================================================================
 def main():
     torch.cuda.empty_cache()
-    torch.cuda.set_per_process_memory_fraction(0.95)
 
     print(f"Dispositivo: {Config.DEVICE}")
 
@@ -207,7 +206,7 @@ def main():
     model = torch.compile(model, mode="max-autotune", dynamic=False, fullgraph=True)
 
     loss_fn   = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
+    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY, fused=True)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.3, patience=20, min_lr=1e-7, verbose=True)
     scaler = GradScaler()
 
