@@ -193,8 +193,10 @@ def main():
         "Distribución de clases en ENTRENAMIENTO (post-aug)")
 
     # ─── Modelo sin checkpointing ──────────────────────────────────────────────
-    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
-    model = model.to(Config.DEVICE, memory_format=torch.channels_last).half()
+    model = CloudDeepLabV3Plus(num_classes=6).to(
+        Config.DEVICE,
+        memory_format=torch.channels_last   # NHWC optimizado
+    )
 
     print("Compilando modelo…")
     torch._inductor.config.triton.unique_kernel_names = True
