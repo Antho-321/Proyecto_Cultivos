@@ -43,13 +43,12 @@ from config import Config
 class CheckpointedCloudDeepLabV3Plus(nn.Module):
     def __init__(self, base_model: nn.Module, segments: int):
         super().__init__()
-        # descompone el modelo en sub-módulos ordenados
-        self.functions = list(base_model.children())
-        self.segments  = segments
+        self.base_model = base_model          # queda registrado
+        self.segments   = segments
 
     def forward(self, x):
-        # pasa la entrada a través de los segmentos con checkpointing
-        return checkpoint_sequential(self.functions, self.segments, x)
+        funcs = list(self.base_model.children())
+        return checkpoint_sequential(funcs, self.segments, x)
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
