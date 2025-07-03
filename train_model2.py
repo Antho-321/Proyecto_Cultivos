@@ -1,6 +1,10 @@
-# train.py
+# train_model2.py
 
 import os
+# ─── CPU-side thread tuning ─────────────────────────────────────────────────────
+os.environ["OMP_NUM_THREADS"]   = "4"
+os.environ["MKL_NUM_THREADS"]   = "4"
+
 import torch
 # pin PyTorch threads to avoid oversubscription
 torch.set_num_threads(4)
@@ -16,6 +20,14 @@ from albumentations.pytorch import ToTensorV2
 from PIL import Image
 import numpy as np
 
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.checkpoint import checkpoint_sequential
+
+# ─── Enable TF32 on Ampere+ GPUs ────────────────────────────────────────────────
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.benchmark      = True
+torch.set_float32_matmul_precision("high")
+
 # tu arquitectura y utilidades
 from model2 import CloudDeepLabV3Plus
 from utils import (
@@ -24,13 +36,20 @@ from utils import (
     save_performance_plot
 )
 from config import Config
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.checkpoint import checkpoint_sequential
 
-# ─── Enable TF32 on Ampere+ GPUs ────────────────────────────────────────────────
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.benchmark      = True
-torch.set_float32_matmul_precision("high")
+# =================================================================================
+# 1. WRAPPER PARA CHECKPOINT SEQUENTIAL
+# =================================================================================
+class CheckpointedCloudDeepLabV3Plus(nn.Module):
+    def __init__(self, base_model: nn.Module, segments: int):
+        super().__init__()
+        # descompone el modelo en sub-módulos ordenados
+        self.functions = list(base_model.children())
+        self.segments  = segments
+
+    def forward(self, x):
+        # pasa la entrada a través de los segmentos con checkpointing
+        return checkpoint_sequential(self.functions, self.segments, x)
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -236,20 +255,24 @@ def main():
         shuffle=False
     )
 
-    imprimir_distribucion_clases_post_augmentation(train_loader, 6,
-        "Distribución de clases en ENTRENAMIENTO (post-aug)")
+    imprimir_distribucion_clases_post_augmentation(
+        train_loader, 6,
+        "Distribución de clases en ENTRENAMIENTO (post-aug)"
+    )
 
-    # ─── Modelo: channels_last + half + checkpointing ────────────────────────────
-    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
+    # ─── Modelo base
+    base_model = CloudDeepLabV3Plus(num_classes=6)
+    # ─── Wrap con checkpointing
+    model = CheckpointedCloudDeepLabV3Plus(
+        base_model=base_model,
+        segments=4
+    ).to(Config.DEVICE)
+
+    # ─── NHWC + full float16
     model = model.to(
         Config.DEVICE,
         memory_format=torch.channels_last
     ).half()
-
-    # dividir en 4 segmentos para checkpointing
-    segments = 4
-    modules  = list(model.children())
-    model    = checkpoint_sequential(modules, segments)
 
     print("Compiling the model… (this may take a minute)")
     torch._inductor.config.triton.unique_kernel_names = True
@@ -284,7 +307,11 @@ def main():
         print(f"\n--- Epoch {epoch+1}/{Config.NUM_EPOCHS} ---")
         train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
         val_loss   = validate_fn(val_loader, model, loss_fn)
-        current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
+        current_mIoU, current_dice = check_metrics(
+            val_loader, model,
+            n_classes=6,
+            device=Config.DEVICE
+        )
         scheduler.step(val_loss)
 
         train_history.append(train_mIoU.item())
@@ -309,7 +336,11 @@ def main():
     print("\nEvaluando el mejor modelo guardado…")
     checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
     model.load_state_dict(checkpoint['state_dict'])
-    best_mIoU, best_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
+    best_mIoU, best_dice = check_metrics(
+        val_loader, model,
+        n_classes=6,
+        device=Config.DEVICE
+    )
     print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
 
 if __name__ == "__main__":
