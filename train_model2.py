@@ -29,9 +29,6 @@ from utils import (
 )
 from config import Config
 
-# ─── DataLoader2 (torchdata) ───────────────────────────────────────────────────
-from torchdata.dataloader2 import DataLoader2, MultiProcessingReadingService
-
 # =================================================================================
 # 1. DATASET PERSONALIZADO
 # =================================================================================
@@ -183,17 +180,27 @@ def main():
     train_ds = CloudDataset(Config.TRAIN_IMG_DIR, Config.TRAIN_MASK_DIR, train_tf)
     val_ds   = CloudDataset(Config.VAL_IMG_DIR,   Config.VAL_MASK_DIR,   val_tf)
 
-    # ─── DataLoader2 para entrenamiento ───────────────────────────────────────
-    rs        = MultiProcessingReadingService(num_workers=Config.NUM_WORKERS, pin_memory=True)
-    train_ld  = DataLoader2(train_ds, reading_service=rs)
+    # ─── DataLoader optimizado para entrenamiento ───────────────────────────────
+    train_ld = DataLoader(
+        train_ds,
+        batch_size=Config.BATCH_SIZE,
+        shuffle=True,
+        num_workers=Config.NUM_WORKERS,
+        pin_memory=True,
+        pin_memory_device="cuda",
+        persistent_workers=True,
+        prefetch_factor=2,
+    )
 
     # ─── DataLoader tradicional para validación ───────────────────────────────
-    val_ld = DataLoader(val_ds,
-                        batch_size=Config.BATCH_SIZE,
-                        shuffle=False,
-                        num_workers=Config.NUM_WORKERS,
-                        pin_memory=Config.PIN_MEMORY,
-                        pin_memory_device="cuda")
+    val_ld = DataLoader(
+        val_ds,
+        batch_size=Config.BATCH_SIZE,
+        shuffle=False,
+        num_workers=Config.NUM_WORKERS,
+        pin_memory=Config.PIN_MEMORY,
+        pin_memory_device="cuda"
+    )
 
     imprimir_distribucion_clases_post_augmentation(
         train_ld, 6, "Distribución de clases en ENTRENAMIENTO (post-aug)"
