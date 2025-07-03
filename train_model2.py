@@ -30,6 +30,7 @@ from utils import (
     save_performance_plot
 )
 from config import Config
+import cv2
 
 # =================================================================================
 # 1. DATASET PERSONALIZADO
@@ -58,8 +59,8 @@ class CloudDataset(torch.utils.data.Dataset):
         if not os.path.exists(mask_path):
             raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
 
-        image = np.array(Image.open(img_path).convert("RGB"))
-        mask  = np.array(Image.open(mask_path).convert("L"))
+        image = cv2.imread(img_path, cv2.IMREAD_COLOR)[:,:,::-1]    # RGB order
+        mask  = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
 
         # Recorte previo
         mask_3d                  = np.expand_dims(mask, axis=-1)
