@@ -143,6 +143,7 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.train()
     print("IoU :", iou.cpu().numpy())
     print("Dice:", dice.cpu().numpy())
+    print("mIoU:", iou.mean().item())
     return iou.mean(), dice.mean()
 
 def validate_fn(loader, model, loss_fn, device=Config.DEVICE):
