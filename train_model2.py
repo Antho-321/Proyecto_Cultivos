@@ -1,6 +1,6 @@
 # train_model2.py
 import os
-
+import cv2
 import torch
 torch.set_num_threads(4)
 torch.set_num_interop_threads(2)
@@ -12,9 +12,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from PIL import Image
 import numpy as np
-
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 # ─── TF32 en GPUs Ampere+ ──────────────────────────────────────────────────────
@@ -30,7 +28,9 @@ from utils import (
     save_performance_plot
 )
 from config import Config
-import cv2
+
+# ─── DataLoader2 (torchdata) ───────────────────────────────────────────────────
+from torchdata.dataloader2 import DataLoader2, MultiProcessingReadingService
 
 # =================================================================================
 # 1. DATASET PERSONALIZADO
@@ -59,7 +59,7 @@ class CloudDataset(torch.utils.data.Dataset):
         if not os.path.exists(mask_path):
             raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
 
-        image = cv2.imread(img_path, cv2.IMREAD_COLOR)[:,:,::-1]    # RGB order
+        image = cv2.imread(img_path, cv2.IMREAD_COLOR)[:, :, ::-1]   # BGR → RGB
         mask  = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
 
         # Recorte previo
@@ -86,7 +86,7 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
     fn = torch.zeros(num_classes, device=Config.DEVICE)
 
     for data, targets in loop:
-        data = data.to(Config.DEVICE, non_blocking=True, memory_format=torch.channels_last)
+        data    = data.to(Config.DEVICE, non_blocking=True, memory_format=torch.channels_last)
         targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
         with autocast(device_type=Config.DEVICE, dtype=torch.float16):
@@ -164,7 +164,6 @@ def validate_fn(loader, model, loss_fn, device=Config.DEVICE):
 # =================================================================================
 def main():
     torch.cuda.empty_cache()
-
     print(f"Dispositivo: {Config.DEVICE}")
 
     train_tf = A.Compose([
@@ -172,51 +171,66 @@ def main():
         A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
-        A.Normalize([0,0,0], [1,1,1], max_pixel_value=255.0),
+        A.Normalize([0, 0, 0], [1, 1, 1], max_pixel_value=255.0),
         ToTensorV2(),
     ])
     val_tf = A.Compose([
         A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
-        A.Normalize([0,0,0], [1,1,1], max_pixel_value=255.0),
+        A.Normalize([0, 0, 0], [1, 1, 1], max_pixel_value=255.0),
         ToTensorV2(),
     ])
 
     train_ds = CloudDataset(Config.TRAIN_IMG_DIR, Config.TRAIN_MASK_DIR, train_tf)
     val_ds   = CloudDataset(Config.VAL_IMG_DIR,   Config.VAL_MASK_DIR,   val_tf)
 
-    train_ld = DataLoader(train_ds, batch_size=Config.BATCH_SIZE, shuffle=True,
-                          num_workers=Config.NUM_WORKERS, pin_memory=Config.PIN_MEMORY,
-                          persistent_workers=True, prefetch_factor=2)
-    val_ld   = DataLoader(val_ds,   batch_size=Config.BATCH_SIZE, shuffle=False,
-                          num_workers=Config.NUM_WORKERS, pin_memory=Config.PIN_MEMORY)
+    # ─── DataLoader2 para entrenamiento ───────────────────────────────────────
+    rs        = MultiProcessingReadingService(num_workers=Config.NUM_WORKERS, pin_memory=True)
+    train_ld  = DataLoader2(train_ds, reading_service=rs)
 
-    imprimir_distribucion_clases_post_augmentation(train_ld, 6,
-        "Distribución de clases en ENTRENAMIENTO (post-aug)")
+    # ─── DataLoader tradicional para validación ───────────────────────────────
+    val_ld = DataLoader(val_ds,
+                        batch_size=Config.BATCH_SIZE,
+                        shuffle=False,
+                        num_workers=Config.NUM_WORKERS,
+                        pin_memory=Config.PIN_MEMORY,
+                        pin_memory_device="cuda")
 
-    # ─── Modelo sin checkpointing ──────────────────────────────────────────────
+    imprimir_distribucion_clases_post_augmentation(
+        train_ld, 6, "Distribución de clases en ENTRENAMIENTO (post-aug)"
+    )
+
+    # ─── Modelo ───────────────────────────────────────────────────────────────
     model = CloudDeepLabV3Plus(num_classes=6).to(
         Config.DEVICE,
-        memory_format=torch.channels_last   # NHWC optimizado
+        memory_format=torch.channels_last  # NHWC optimizado
     )
 
     print("Compilando modelo…")
     torch._inductor.config.triton.unique_kernel_names = True
-    torch._inductor.config.epilogue_fusion           = "max"
-    torch._inductor.config.triton.cudagraphs         = True
+    torch._inductor.config.epilogue_fusion            = "max"
+    torch._inductor.config.triton.cudagraphs          = True
 
     model = torch.compile(model, mode="max-autotune", dynamic=False, fullgraph=True)
 
     loss_fn   = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY, fused=True)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.3, patience=20, min_lr=1e-7, verbose=True)
+    optimizer = optim.AdamW(model.parameters(),
+                            lr=Config.LEARNING_RATE,
+                            weight_decay=Config.WEIGHT_DECAY,
+                            fused=True)
+    scheduler = ReduceLROnPlateau(optimizer,
+                                  mode='min',
+                                  factor=0.3,
+                                  patience=20,
+                                  min_lr=1e-7,
+                                  verbose=True)
     scaler = GradScaler()
 
     best_miou = -1.0
     tr_hist, val_hist = [], []
 
     for epoch in range(Config.NUM_EPOCHS):
-        print(f"\n— Epoch {epoch+1}/{Config.NUM_EPOCHS} —")
-        tr_miou = train_fn(train_ld, model, optimizer, loss_fn, scaler)
+        print(f"\n— Epoch {epoch + 1}/{Config.NUM_EPOCHS} —")
+        tr_miou  = train_fn(train_ld, model, optimizer, loss_fn, scaler)
         val_loss = validate_fn(val_ld, model, loss_fn)
         cur_miou, cur_dice = check_metrics(val_ld, model, 6, Config.DEVICE)
         scheduler.step(val_loss)
@@ -228,19 +242,23 @@ def main():
             best_miou = cur_miou
             print(f"🔹 Nuevo mejor mIoU: {best_miou:.4f} | Dice: {cur_dice:.4f} → guardando…")
             torch.save({
-                "epoch": epoch,
+                "epoch":     epoch,
                 "state_dict": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "best_mIoU": best_miou,
             }, Config.MODEL_SAVE_PATH)
 
-    save_performance_plot(tr_hist, val_hist, "/content/drive/MyDrive/colab/rendimiento_miou.png")
+    save_performance_plot(
+        tr_hist, val_hist,
+        "/content/drive/MyDrive/colab/rendimiento_miou.png"
+    )
 
     print("\nEvaluando mejor modelo guardado…")
     ckpt = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
     model.load_state_dict(ckpt["state_dict"])
     best_miou, best_dice = check_metrics(val_ld, model, 6, Config.DEVICE)
     print(f"mIoU final: {best_miou:.4f} | Dice final: {best_dice:.4f}")
+
 
 if __name__ == "__main__":
     main()
