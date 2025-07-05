@@ -98,7 +98,7 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
     batch_count = 0
 
     for batch_idx, (data, targets) in enumerate(loop):
-        data = data.to(Config.DEVICE, non_blocking=True)
+        data = data.to(Config.DEVICE, non_blocking=True, memory_format=torch.channels_last)
         targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
         # Forward pass with mixed precision
@@ -244,7 +244,7 @@ def main():
         pin_memory=True,
         shuffle=True,
         persistent_workers=True,  # Keep workers alive between epochs
-        prefetch_factor=2,       # Prefetch batches
+        prefetch_factor=4,       # Prefetch batches
         drop_last=True          # Ensure consistent batch sizes
     )
 
@@ -270,9 +270,10 @@ def main():
     # imprimir_distribucion_clases_post_augmentation(train_loader, 6, "...")
 
     # Model initialization
-    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model...")
-    model = torch.compile(model, mode='reduce-overhead')  # Better for Tesla T4
+    model = CloudDeepLabV3Plus(num_classes=6)
+    model = model.to(Config.DEVICE, memory_format=torch.channels_last)            # ❶
+    model = torch.compile(model, mode='reduce-overhead')
 
     # Optimized loss and optimizer
     loss_fn = nn.CrossEntropyLoss()
@@ -280,7 +281,8 @@ def main():
         model.parameters(), 
         lr=Config.LEARNING_RATE,
         weight_decay=1e-4,
-        eps=1e-4  # Slightly larger epsilon for stability
+        eps=1e-4,
+        fused=True  # Enable fused AdamW for better performance
     )
     
     # Initialize scaler for mixed precision
