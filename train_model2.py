@@ -2,9 +2,6 @@
 import os
 import cv2
 import torch
-torch.set_num_threads(4)
-torch.set_num_interop_threads(2)
-
 import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
@@ -14,6 +11,17 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import numpy as np
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+# ─── Global perf switches (place right after the imports) ───────────
+os.environ["OMP_NUM_THREADS"] = "4"     # keep OpenMP from oversubscribing
+os.environ["MKL_NUM_THREADS"] = "4"     # idem for MKL / OpenBLAS
+cv2.setNumThreads(0)                    # do *not* let OpenCV spawn extra pools
+cv2.ocl.setUseOpenCL(False)             # avoid hidden OpenCL contexts
+
+# If your dataloader & augmentations still run on CPU:
+torch.set_flush_denormal(True)          # >2× speed-ups on some CPUs when
+                                        # denormals show up :contentReference[oaicite:0]{index=0}
+torch.set_num_threads(4)
+torch.set_num_interop_threads(2)
 
 # ─── TF32 en GPUs Ampere+ ──────────────────────────────────────────────────────
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -66,8 +74,8 @@ class CloudDataset(torch.utils.data.Dataset):
 
         if self.transform:
             augmented = self.transform(image=image_cropped, mask=mask_cropped)
-            image     = augmented["image"]
-            mask      = augmented["mask"]
+            image     = augmented["image"].contiguous(memory_format=torch.channels_last)
+            mask      = augmented["mask"].contiguous(memory_format=torch.channels_last)
 
         return image, mask
 
