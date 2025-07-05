@@ -242,8 +242,10 @@ def main():
     # MINIMAL augmentations for maximum speed
     train_transform = A.Compose([
         A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH, 
-                 interpolation=1),  # Use faster interpolation
+                 interpolation=1),
+        A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),  # Only keep essential augmentations
+        A.VerticalFlip(p=0.3),
         A.Normalize(
             mean=[0.0, 0.0, 0.0],
             std=[1.0, 1.0, 1.0],
