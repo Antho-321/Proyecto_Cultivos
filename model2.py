@@ -117,10 +117,8 @@ class WASPModule(nn.Module):
             )
 
         # Proyección tras concatenar
-        total_branches = 1 + len(dil) + (len(dil) if ag else 0) + (1 if gp else 0)
-        self.project = conv_block(total_branches * out_channels,
-                                  out_channels,
-                                  1)
+        branch_count = 1 + len(dil) + (1 if gp else 0)  # → 6
+        self.project = conv_block(branch_count * out_channels, out_channels, 1)
 
         # SE (squeeze-and-excitation) opcional
         if att:
