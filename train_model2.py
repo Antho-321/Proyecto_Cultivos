@@ -226,7 +226,7 @@ def main():
     torch._inductor.config.triton.cudagraphs          = True
     torch._inductor.config.coordinate_descent_tuning = True   # extra kernel auto-tuning
 
-    model = torch.compile(model, mode="max-autotune", dynamic=False, fullgraph=True, cudagraphs=True)
+    model = torch.compile(model, mode="max-autotune", dynamic=False, fullgraph=True)
 
     loss_fn   = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(),
