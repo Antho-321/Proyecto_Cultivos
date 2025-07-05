@@ -1,4 +1,4 @@
-# train_model2.py
+# train_model2.py  –  Tesla T4-tuned
 import os
 import cv2
 import torch
@@ -11,22 +11,18 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import numpy as np
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-# ─── Global perf switches (place right after the imports) ───────────
-os.environ["OMP_NUM_THREADS"] = "4"     # keep OpenMP from oversubscribing
-os.environ["MKL_NUM_THREADS"] = "4"     # idem for MKL / OpenBLAS
-cv2.setNumThreads(0)                    # do *not* let OpenCV spawn extra pools
-cv2.ocl.setUseOpenCL(False)             # avoid hidden OpenCL contexts
 
-# If your dataloader & augmentations still run on CPU:
-torch.set_flush_denormal(True)          # >2× speed-ups on some CPUs when
-                                        # denormals show up :contentReference[oaicite:0]{index=0}
+# ─── Global perf switches ──────────────────────────────────────────────────────
+os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["MKL_NUM_THREADS"] = "4"
+cv2.setNumThreads(0)
+cv2.ocl.setUseOpenCL(False)
+
+torch.set_flush_denormal(True)
 torch.set_num_threads(4)
 torch.set_num_interop_threads(2)
-
-# ─── TF32 en GPUs Ampere+ ──────────────────────────────────────────────────────
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.benchmark       = True
-torch.set_float32_matmul_precision("high")
+torch.backends.cudnn.benchmark = True         # keeps fastest conv algo
+torch.backends.cudnn.workspace_limit = 512 * 1024 * 1024   # 512 MB
 
 # ─── Tu arquitectura y utilidades ──────────────────────────────────────────────
 from model2 import CloudDeepLabV3Plus
@@ -67,7 +63,6 @@ class CloudDataset(torch.utils.data.Dataset):
         image = cv2.imread(img_path, cv2.IMREAD_COLOR)[:, :, ::-1]   # BGR → RGB
         mask  = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
 
-        # Recorte previo
         mask_3d                  = np.expand_dims(mask, axis=-1)
         image_cropped, mask_3d_c = crop_around_classes(image, mask_3d)
         mask_cropped             = mask_3d_c.squeeze()
@@ -91,10 +86,10 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
     fn = torch.zeros(num_classes, device=Config.DEVICE)
 
     for data, targets in loop:
-        data    = data.to(Config.DEVICE, non_blocking=True, memory_format=torch.channels_last)
+        data    = data.to(Config.DEVICE, non_blocking=True, memory_format=torch.channels_last).half()
         targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
-        with autocast(device_type=Config.DEVICE, dtype=torch.float16):
+        with autocast(device_type="cuda", dtype=torch.float16):
             preds = model(data)
             preds = preds[0] if isinstance(preds, tuple) else preds
             loss  = loss_fn(preds, targets)
@@ -130,7 +125,7 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.eval()
     with torch.no_grad():
         for x, y in loader:
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True).long()
+            x, y = x.to(device, non_blocking=True).half(), y.to(device, non_blocking=True).long()
             logits = model(x)
             logits = logits[0] if isinstance(logits, tuple) else logits
             preds  = torch.argmax(logits, dim=1)
@@ -157,7 +152,7 @@ def validate_fn(loader, model, loss_fn, device=Config.DEVICE):
     total = 0.0
     with torch.no_grad():
         for x, y in loader:
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True).long()
+            x, y = x.to(device, non_blocking=True).half(), y.to(device, non_blocking=True).long()
             logits = model(x)
             logits = logits[0] if isinstance(logits, tuple) else logits
             total += loss_fn(logits, y).item() * x.size(0)
@@ -188,7 +183,7 @@ def main():
     train_ds = CloudDataset(Config.TRAIN_IMG_DIR, Config.TRAIN_MASK_DIR, train_tf)
     val_ds   = CloudDataset(Config.VAL_IMG_DIR,   Config.VAL_MASK_DIR,   val_tf)
 
-    # ─── DataLoader optimizado para entrenamiento ───────────────────────────────
+    # ─── DataLoader optimizado ─────────────────────────────────────────────────
     train_ld = DataLoader(
         train_ds,
         batch_size=Config.BATCH_SIZE,
@@ -197,17 +192,18 @@ def main():
         pin_memory=True,
         pin_memory_device="cuda",
         persistent_workers=True,
-        prefetch_factor=2,
+        prefetch_factor=4,
     )
 
-    # ─── DataLoader tradicional para validación ───────────────────────────────
     val_ld = DataLoader(
         val_ds,
         batch_size=Config.BATCH_SIZE,
         shuffle=False,
         num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY,
-        pin_memory_device="cuda"
+        pin_memory=True,
+        pin_memory_device="cuda",
+        persistent_workers=True,
+        prefetch_factor=4,
     )
 
     imprimir_distribucion_clases_post_augmentation(
@@ -217,29 +213,29 @@ def main():
     # ─── Modelo ───────────────────────────────────────────────────────────────
     model = CloudDeepLabV3Plus(num_classes=6).to(
         Config.DEVICE,
-        memory_format=torch.channels_last  # NHWC optimizado
+        memory_format=torch.channels_last
     )
 
     print("Compilando modelo…")
-    torch._inductor.config.triton.unique_kernel_names = True
-    torch._inductor.config.epilogue_fusion            = "max"
-    torch._inductor.config.triton.cudagraphs          = True
-    torch._inductor.config.coordinate_descent_tuning = True   # extra kernel auto-tuning
-
-    model = torch.compile(model, mode="max-autotune", dynamic=False, fullgraph=True)
+    model = torch.compile(model, backend="inductor", mode="default", fullgraph=False)
 
     loss_fn   = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(),
-                            lr=Config.LEARNING_RATE,
-                            weight_decay=Config.WEIGHT_DECAY,
-                            fused=True,
-                            capturable=True)
-    scheduler = ReduceLROnPlateau(optimizer,
-                                  mode='min',
-                                  factor=0.3,
-                                  patience=20,
-                                  min_lr=1e-7,
-                                  verbose=True)
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=Config.LEARNING_RATE,
+        weight_decay=Config.WEIGHT_DECAY,
+        fused=True,
+        capturable=True,
+        foreach=True
+    )
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.3,
+        patience=20,
+        min_lr=1e-7,
+        verbose=True
+    )
     scaler = GradScaler()
 
     best_miou = -1.0
