@@ -40,6 +40,7 @@ class ValDataset(Dataset):
 
         return img_tensor, mask_tensor
 
+# rutas de validación
 val_imgs = sorted([
     os.path.join(Config.VAL_IMG_DIR, f)
     for f in os.listdir(Config.VAL_IMG_DIR)
@@ -63,7 +64,6 @@ val_loader = DataLoader(
 
 # ───────────── 2) MAJORITY FILTER EN GPU ──────────────────────
 def majority_filter_batch(preds: torch.Tensor, k: int = 7) -> torch.Tensor:
-    # preds: (B, H, W) integer class indices
     B, H, W = preds.shape
     pad = k // 2
     x = preds.unsqueeze(1).float()  # (B,1,H,W)
@@ -113,14 +113,13 @@ with torch.no_grad():
         ).view(num_classes, num_classes)
         conf_matrix += cm
 
-# calcular IoU por clase y mean IoU
-diag = conf_matrix.diag().float()
-union = (
-    conf_matrix.sum(dim=0)
-  + conf_matrix.sum(dim=1)
-  - diag
-)
-iou_per_class = diag / union
+# calcular IoU por clase y mean IoU, evitando divisiones 0/0
+diag  = conf_matrix.diag().float()
+union = conf_matrix.sum(dim=0) + conf_matrix.sum(dim=1) - diag
+
+# solo clases con union>0
+valid = union > 0
+iou_per_class = diag[valid] / union[valid]
 mean_iou = iou_per_class.mean().item()
 
 print(f"Mean IoU sobre validación: {mean_iou:.4f}")
