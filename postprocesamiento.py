@@ -18,7 +18,7 @@ def majority_filter(label_map: np.ndarray, window_size: int = 7) -> np.ndarray:
 
 # ───────────── 2) CARGA MODELO ──────────────────────
 device = torch.device(Config.DEVICE)
-model = torch.load(Config.MODEL_SAVE_PATH, map_location=device, weights_only=False)
+model = torch.load("/content/drive/MyDrive/colab/cultivos_deeplab_final.pt", map_location=device, weights_only=False)
 model.eval()
 
 # ───────────── 3) LISTAS DE ARCHIVOS ──────────────────────
