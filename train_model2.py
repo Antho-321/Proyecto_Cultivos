@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -40,14 +40,17 @@ from config import Config
 # =================================================================================
 # 1. DATASET PERSONALIZADO
 # =================================================================================
-class CloudDataset(torch.utils.data.Dataset):
+class CloudDataset(Dataset):
     _IMG_EXTENSIONS = ('.jpg', '.png')
 
-    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
+    def __init__(self, image_dir: str, mask_dir: str, transform=None):
         self.image_dir = image_dir
-        self.mask_dir  = mask_dir
+        self.mask_dir = mask_dir
         self.transform = transform
-        self.images    = [f for f in os.listdir(image_dir) if f.lower().endswith(self._IMG_EXTENSIONS)]
+        self.images = [
+            f for f in os.listdir(image_dir)
+            if f.lower().endswith(self._IMG_EXTENSIONS)
+        ]
 
     def __len__(self):
         return len(self.images)
@@ -58,24 +61,30 @@ class CloudDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int):
         img_filename = self.images[idx]
-        img_path     = os.path.join(self.image_dir, img_filename)
-        mask_path    = self._mask_path_from_image_name(img_filename)
+        img_path = os.path.join(self.image_dir, img_filename)
+        mask_path = self._mask_path_from_image_name(img_filename)
 
         if not os.path.exists(mask_path):
             raise FileNotFoundError(f"Máscara no encontrada para {img_filename} en {mask_path}")
 
-        image = cv2.imread(img_path, cv2.IMREAD_COLOR)[:, :, ::-1]   # BGR → RGB
-        mask  = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        # Carga y conversión a RGB / escala de grises
+        image = cv2.cvtColor(cv2.imread(img_path, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
 
-        # Recorte previo
-        mask_3d                  = np.expand_dims(mask, axis=-1)
+        # Recorte alrededor de las clases
+        mask_3d = np.expand_dims(mask, axis=-1)
         image_cropped, mask_3d_c = crop_around_classes(image, mask_3d)
-        mask_cropped             = mask_3d_c.squeeze()
+        mask_cropped = mask_3d_c.squeeze()
 
+        # Pasa a tensores CHW
+        image = torch.from_numpy(image_cropped).permute(2, 0, 1)  # HWC → CHW
+        mask = torch.from_numpy(mask_cropped)
+
+        # Transformaciones en GPU (Kornia / torchvision.transforms.v2)
         if self.transform:
-            augmented = self.transform(image=image_cropped, mask=mask_cropped)
-            image     = augmented["image"].unsqueeze(0).contiguous(memory_format=torch.channels_last).squeeze(0)
-            mask      = augmented["mask"].contiguous()
+            image, mask = self.transform(image, mask)
+            image = image.unsqueeze(0).contiguous(memory_format=torch.channels_last).squeeze(0)
+            mask = mask.contiguous()
 
         return image, mask
 
@@ -168,8 +177,7 @@ def validate_fn(loader, model, loss_fn, device=Config.DEVICE):
 # 3. FUNCIÓN PRINCIPAL
 # =================================================================================
 def main():
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
+
     print(f"Dispositivo: {Config.DEVICE}")
 
     train_tf = A.Compose([
@@ -227,13 +235,14 @@ def main():
     torch._inductor.config.triton.cudagraphs          = True
     torch._inductor.config.coordinate_descent_tuning = True   # extra kernel auto-tuning
 
-    model = torch.compile(model, mode="max-autotune", dynamic=False, fullgraph=True)
+    model = torch.compile(model, mode="max-autotune", dynamic=False, fullgraph=True, cudagraphs=True)
 
     loss_fn   = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(),
                             lr=Config.LEARNING_RATE,
                             weight_decay=Config.WEIGHT_DECAY,
-                            fused=True)
+                            fused=True,
+                            capturable=True)
     scheduler = ReduceLROnPlateau(optimizer,
                                   mode='min',
                                   factor=0.3,
