@@ -12,7 +12,7 @@ import os
 from PIL import Image
 import numpy as np
 from model2 import CloudDeepLabV3Plus
-from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
+from utils import crop_around_classes, save_performance_plot
 from config import Config
 
 # =================================================================================
