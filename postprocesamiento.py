@@ -24,8 +24,9 @@ model = CloudDeepLabV3Plus(num_classes=6)  # reemplaza 6 por tu número real de 
 
 # 2) Load weights
 checkpoint = torch.load(
-    "/content/drive/MyDrive/colab/cultivos_deeplab_final.pt",
-    map_location=device
+    "/content/drive/.../cultivos_deeplab_final.pt",
+    map_location=device,
+    weights_only=False    # ← explicit override
 )
 # Si guardaste sólo state_dict:
 model.load_state_dict(checkpoint['state_dict'])
