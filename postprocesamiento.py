@@ -8,6 +8,13 @@ from tqdm import tqdm
 from scipy.ndimage import generic_filter
 from config import Config
 
+def find_mask(img_path: str) -> str:
+    base = os.path.splitext(os.path.basename(img_path))[0]
+    candidate = os.path.join(Config.VAL_MASK_DIR, base + '_mask.png')
+    if os.path.isfile(candidate):
+        return candidate
+    raise FileNotFoundError(f"No mask found for {img_path}")
+
 # ───────────── 1) FUNCIÓN DE FILTRO DE MAYORÍA ──────────────────────
 def majority_filter(label_map: np.ndarray, window_size: int = 7) -> np.ndarray:
     def _vote(window: np.ndarray) -> int:
@@ -30,13 +37,9 @@ val_imgs = sorted([
     for f in os.listdir(Config.VAL_IMG_DIR)
     if re.search(r'\.(jpg|png|jpeg)$', f, re.I)
 ])
-val_masks = [
-    os.path.join(
-        Config.VAL_MASK_DIR,
-        os.path.splitext(os.path.basename(p))[0] + '.png'
-    )
-    for p in val_imgs
-]
+
+
+val_masks = [find_mask(p) for p in val_imgs]
 
 # ───────────── 4) CÁLCULO DE IoU POR CLASE ──────────────────────
 def compute_iou(gt: np.ndarray, pred: np.ndarray, num_classes: int) -> float:
