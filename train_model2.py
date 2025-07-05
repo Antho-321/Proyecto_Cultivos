@@ -293,28 +293,24 @@ def main():
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
         
-        # Training
+        print("Calculando métricas de entrenamiento...")
         train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
         
-        # Validation (less frequent for speed)
-        if epoch % 2 == 0 or epoch == Config.NUM_EPOCHS - 1:  # Every 2 epochs
-            print("Calculando métricas de validación...")
-            current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
-        else:
-            current_mIoU = train_mIoU  # Use training mIoU as approximation
-            current_dice = 0.0
+        print("Calculando métricas de validación...")
+        current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
 
-        train_miou_history.append(train_mIoU.item())
+        # --- 4. GUARDAR LAS MÉTRICAS EN EL HISTORIAL ---
+        train_miou_history.append(train_mIoU.item()) # .item() para obtener el valor escalar
         val_miou_history.append(current_mIoU.item())
 
         if current_mIoU > best_mIoU:
             best_mIoU = current_mIoU
-            print(f"🔹 Nuevo mejor mIoU: {best_mIoU:.4f} | Dice: {current_dice:.4f} → guardando modelo…")
+            print(f"🔹 Nuevo mejor mIoU: {best_mIoU:.4f} | Dice: {current_dice:.4f}  →  guardando modelo…")
             checkpoint = {
-                "epoch": epoch,
+                "epoch":      epoch,
                 "state_dict": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "best_mIoU": best_mIoU,
+                "optimizer":  optimizer.state_dict(),
+                "best_mIoU":  best_mIoU,
             }
             torch.save(checkpoint, Config.MODEL_SAVE_PATH)
 
