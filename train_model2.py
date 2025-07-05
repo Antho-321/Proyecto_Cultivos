@@ -74,8 +74,12 @@ class CloudDataset(torch.utils.data.Dataset):
 
         if self.transform:
             augmented = self.transform(image=image_cropped, mask=mask_cropped)
-            image     = augmented["image"].contiguous(memory_format=torch.channels_last)
-            mask      = augmented["mask"].contiguous(memory_format=torch.channels_last)
+            image = augmented["image"].unsqueeze(0) \
+                          .contiguous(memory_format=torch.channels_last) \
+                          .squeeze(0)
+            mask      = augmented["mask"].unsqueeze(0) \
+                          .contiguous(memory_format=torch.channels_last) \
+                          .squeeze(0)
 
         return image, mask
 
