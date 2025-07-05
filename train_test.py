@@ -104,17 +104,22 @@ class CloudDataset(torch.utils.data.Dataset):
 # ULTRA-FAST TRAINING FUNCTION
 # =================================================================================
 def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
-    """Ultra-fast training function with minimal metric computation."""
+    """Optimized training function with reduced metric computation."""
+    loop = tqdm(loader, leave=True)
     model.train()
+
+    # Compute metrics less frequently for speed
+    compute_metrics_every = max(1, len(loader) // 10)  # Compute every 10% of batches
     
-    # Compute metrics only at the end for maximum speed
+    # Initialize counters
+    tp = torch.zeros(num_classes, device=Config.DEVICE)
+    fp = torch.zeros(num_classes, device=Config.DEVICE)
+    fn = torch.zeros(num_classes, device=Config.DEVICE)
+    
     total_loss = 0.0
     batch_count = 0
-    
-    # Simple progress bar
-    loop = tqdm(loader, leave=False, desc="Training")
 
-    for data, targets in loop:
+    for batch_idx, (data, targets) in enumerate(loop):
         data = data.to(Config.DEVICE, non_blocking=True)
         targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
@@ -133,14 +138,36 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
         total_loss += loss.item()
         batch_count += 1
 
-        # Minimal progress update
-        if batch_count % 10 == 0:
-            loop.set_postfix(loss=f"{loss.item():.4f}")
+        # Compute metrics less frequently
+        if batch_idx % compute_metrics_every == 0:
+            with torch.no_grad():
+                _, predicted_classes = torch.max(predictions, dim=1)
+                
+                for c in range(num_classes):
+                    true_positives = (predicted_classes == c) & (targets == c)
+                    false_positives = (predicted_classes == c) & (targets != c)
+                    false_negatives = (predicted_classes != c) & (targets == c)
 
-    avg_loss = total_loss / batch_count
-    print(f"Training Loss: {avg_loss:.4f}")
+                    tp[c] += true_positives.sum()
+                    fp[c] += false_positives.sum()
+                    fn[c] += false_negatives.sum()
+
+        # Update progress bar
+        loop.set_postfix(loss=loss.item())
+
+    # Calculate final metrics
+    epsilon = 1e-6
+    iou_per_class = tp / (tp + fp + fn + epsilon)
+    dice_per_class = (2 * tp) / (2 * tp + fp + fn + epsilon)
+    mean_iou = torch.nanmean(iou_per_class)
+
+    print(f"\nÉpoca de entrenamiento finalizada:")
+    print(f"  - Loss promedio: {total_loss / batch_count:.4f}")
+    print(f"  - Dice por clase: {dice_per_class.cpu().numpy()}")
+    print(f"  - IoU por clase: {iou_per_class.cpu().numpy()}")
+    print(f"  - mIoU: {mean_iou:.4f}")
     
-    return avg_loss
+    return mean_iou
 
 def check_metrics_fast(loader, model, n_classes: int = 6, device: str = "cuda"):
     """Lightning-fast validation function."""
