@@ -125,8 +125,9 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.eval()
     with torch.no_grad():
         for x, y in loader:
-            x, y = x.to(device, non_blocking=True).half(), y.to(device, non_blocking=True).long()
-            logits = model(x)
+            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True).long()
+            with autocast(device_type="cuda", dtype=torch.float16):
+                logits = model(x)
             logits = logits[0] if isinstance(logits, tuple) else logits
             preds  = torch.argmax(logits, dim=1)
 
@@ -152,8 +153,9 @@ def validate_fn(loader, model, loss_fn, device=Config.DEVICE):
     total = 0.0
     with torch.no_grad():
         for x, y in loader:
-            x, y = x.to(device, non_blocking=True).half(), y.to(device, non_blocking=True).long()
-            logits = model(x)
+            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True).long()
+            with autocast(device_type="cuda", dtype=torch.float16):
+                logits = model(x)
             logits = logits[0] if isinstance(logits, tuple) else logits
             total += loss_fn(logits, y).item() * x.size(0)
     model.train()
