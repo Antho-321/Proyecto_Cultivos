@@ -4,11 +4,11 @@ from collections import OrderedDict # Importa OrderedDict
 
 # ======================= ZONA DE CONFIGURACIÓN =======================
 # --- 1. Importa la clase de tu modelo desde el archivo model.py ---
-from model import CloudDeepLabV3Plus
+from model2 import CloudDeepLabV3Plus
 
 # --- 2. Define las rutas de tus archivos ---
-RUTA_CHECKPOINT_ENTRADA = r'C:\Users\Administrador\Documents\INGENIERIA_EN_SOFTWARE\BIG_DATA\CÓDIGO\Proyecto_Cultivos\checkpoints\0.8410.pth.tar' 
-RUTA_MODELO_SALIDA_PT = 'cultivos_deeplab_final.pt'
+RUTA_CHECKPOINT_ENTRADA = '/content/drive/MyDrive/colab/checkpoints/0.8488miou.pth.tar' 
+RUTA_MODELO_SALIDA_PT = "/content/drive/MyDrive/colab/cultivos_deeplab_final.pt"
 
 # --- 3. Define los parámetros de tu modelo ---
 NUM_CLASES = 6
