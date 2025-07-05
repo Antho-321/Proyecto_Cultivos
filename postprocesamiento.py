@@ -5,7 +5,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from tqdm import tqdm
 
 from config import Config
