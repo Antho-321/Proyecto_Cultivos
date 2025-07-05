@@ -225,8 +225,7 @@ def main():
         lr=Config.LEARNING_RATE,
         weight_decay=Config.WEIGHT_DECAY,
         fused=True,
-        capturable=True,
-        foreach=True
+        capturable=True
     )
     scheduler = ReduceLROnPlateau(
         optimizer,
