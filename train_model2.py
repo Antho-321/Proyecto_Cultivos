@@ -169,6 +169,7 @@ def validate_fn(loader, model, loss_fn, device=Config.DEVICE):
 # =================================================================================
 def main():
     torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
     print(f"Dispositivo: {Config.DEVICE}")
 
     train_tf = A.Compose([
@@ -224,6 +225,7 @@ def main():
     torch._inductor.config.triton.unique_kernel_names = True
     torch._inductor.config.epilogue_fusion            = "max"
     torch._inductor.config.triton.cudagraphs          = True
+    torch._inductor.config.coordinate_descent_tuning = True   # extra kernel auto-tuning
 
     model = torch.compile(model, mode="max-autotune", dynamic=False, fullgraph=True)
 
