@@ -7,7 +7,7 @@
 import os, re, cv2, torch, numpy as np
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from tqdm import tqdm
 from config import Config            # ← asegúrate de tener IMAGE_WIDTH, IMAGE_HEIGHT, DEVICE, etc.
 
