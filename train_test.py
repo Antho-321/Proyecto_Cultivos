@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
@@ -105,10 +106,10 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
 
 def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.eval()
-    # Confusion matrix en GPU
-    conf_mat = torch.zeros((n_classes, n_classes),
-                           device=device,
-                           dtype=torch.long)
+    # inicializa contadores en GPU
+    tp = torch.zeros(n_classes, device=device, dtype=torch.long)
+    fp = torch.zeros(n_classes, device=device, dtype=torch.long)
+    fn = torch.zeros(n_classes, device=device, dtype=torch.long)
 
     with torch.inference_mode():
         for x, y in loader:
@@ -117,34 +118,29 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
             y = y.to(device, non_blocking=True).long()
 
             # inferencia y predicción
-            out   = model(x)
+            out    = model(x)
             logits = out[0] if isinstance(out, tuple) else out
-            preds = logits.argmax(dim=1)
+            preds  = logits.argmax(dim=1)
 
-            # combina pred y verdad en un solo índice
-            flat = (preds * n_classes + y).view(-1)
+            # vectoriza métricas con one-hot
+            ph = F.one_hot(preds, num_classes=n_classes).view(-1, n_classes)
+            yh = F.one_hot(y,     num_classes=n_classes).view(-1, n_classes)
 
-            # conteo GPU de cada par (pred, target)
-            # torch.bincount funciona en CUDA si flat está en CUDA
-            hist = torch.bincount(
-                flat,
-                minlength=n_classes * n_classes
-            )
+            tp += (ph & yh).sum(dim=0)
+            fp += (ph & ~yh).sum(dim=0)
+            fn += (~ph & yh).sum(dim=0)
 
-            # acumula en la confusion matrix
-            conf_mat += hist.view(n_classes, n_classes)
+    # Cálculo de IoU y Dice en GPU
+    inter      = tp.float()
+    sum_pred   = (tp + fp).float()
+    sum_truth  = (tp + fn).float()
+    union      = sum_pred + sum_truth - inter
 
-    # Cálculo de métricas en GPU
-    inter     = conf_mat.diag().float()
-    sum_pred  = conf_mat.sum(1).float()
-    sum_truth = conf_mat.sum(0).float()
-    union     = sum_pred + sum_truth - inter
-
-    iou_per_class  = inter / (union     + 1e-6)
+    iou_per_class  = inter / (union + 1e-6)
     dice_per_class = (2 * inter) / (sum_pred + sum_truth + 1e-6)
 
-    miou_macro  = iou_per_class.mean()
-    dice_macro  = dice_per_class.mean()
+    miou_macro = iou_per_class.mean()
+    dice_macro = dice_per_class.mean()
 
     print("IoU por clase:", iou_per_class)
     print("Dice por clase:", dice_per_class)
