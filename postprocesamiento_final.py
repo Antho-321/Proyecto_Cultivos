@@ -30,7 +30,6 @@ class ValDataset(Dataset):
         return len(self.images)
 
     def __getitem__(self, idx: int):
-        # cargar imagen y máscara
         img_name  = self.images[idx]
         img_path  = os.path.join(self.image_dir, img_name)
         mask_name = os.path.splitext(img_name)[0] + "_mask.png"
@@ -41,12 +40,10 @@ class ValDataset(Dataset):
         if mask.ndim == 3:
             mask = mask[..., 0]
 
-        # resize fijo
         size = (Config.IMAGE_WIDTH, Config.IMAGE_HEIGHT)
         image = cv2.resize(image, size, interpolation=cv2.INTER_NEAREST)
         mask  = cv2.resize(mask,  size, interpolation=cv2.INTER_NEAREST)
 
-        # normalizar y convertir a tensor
         img_t  = torch.from_numpy(image.astype(np.float32) / 255.0).permute(2, 0, 1)
         mask_t = torch.from_numpy(mask.astype(np.int64))
 
@@ -65,24 +62,19 @@ def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
             logits = model(x)
             logits = logits[0] if isinstance(logits, (tuple, list)) else logits
 
-            # 1) obtener predicciones crudas
-            preds = logits.argmax(dim=1)  # shape (B, H, W)
+            preds = logits.argmax(dim=1)
 
-            # 2) aplicar majority_filter
-            preds_cpu = preds.cpu().numpy()               # (B, H, W)
+            preds_cpu = preds.cpu().numpy()
             filtered = [majority_filter(p, window_size=5) for p in preds_cpu]
-            filtered = np.stack(filtered, axis=0)         # (B, H, W)
-
-            # 3) volver a tensor y al dispositivo
+            filtered = np.stack(filtered, axis=0)
             preds = torch.from_numpy(filtered).to(device)
 
-            # 4) construir la matriz de confusión
             flat = (preds * n_classes + y).view(-1).float()
             conf = torch.histc(
                 flat,
-                bins=n_classes * n_classes,
+                bins=n_classes*n_classes,
                 min=0,
-                max=n_classes * n_classes - 1
+                max=n_classes*n_classes-1
             ).view(n_classes, n_classes)
             conf_mat += conf
 
@@ -94,12 +86,14 @@ def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
     iou_per_class  = (intersection + eps) / (union + eps)
     dice_per_class = (2 * intersection + eps) / (pred_sum + true_sum + eps)
 
-    miou_macro = iou_per_class.mean().item()
-    dice_macro = dice_per_class.mean().item()
+    # Filtrar sólo clases con union > 0 (clases presentes)
+    valid = union > eps
+    miou_macro = iou_per_class[valid].mean().item()
+    dice_macro = dice_per_class[valid].mean().item()
 
     print("IoU por clase :", iou_per_class.cpu().numpy())
     print("Dice por clase:", dice_per_class.cpu().numpy())
-    print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
+    print(f"mIoU macro (clases presentes) = {miou_macro:.4f} | Dice macro (clases presentes) = {dice_macro:.4f}")
 
     return miou_macro, dice_macro
 
@@ -108,7 +102,6 @@ def main():
     device = torch.device(Config.DEVICE)
     print(f"Usando dispositivo: {device}")
 
-    # rutas de validación
     val_imgs = sorted([
         os.path.join(Config.VAL_IMG_DIR, f)
         for f in os.listdir(Config.VAL_IMG_DIR)
@@ -123,28 +116,22 @@ def main():
     ]
 
     val_loader = DataLoader(
-        ValDataset(
-            image_dir=Config.VAL_IMG_DIR,
-            mask_dir=Config.VAL_MASK_DIR
-        ),
+        ValDataset(image_dir=Config.VAL_IMG_DIR, mask_dir=Config.VAL_MASK_DIR),
         batch_size=Config.BATCH_SIZE,
         num_workers=Config.NUM_WORKERS,
         pin_memory=Config.PIN_MEMORY,
         shuffle=False,
     )
 
-    # cargar modelo
     model = torch.jit.load(
         "/content/drive/MyDrive/colab/cultivos_deeplab_final.pt",
         map_location=device
     ).eval()
 
-    # inferir número de clases
     state = model.state_dict()
     final_w = next(k for k in state if k.endswith('weight'))
     num_classes = state[final_w].shape[0]
 
-    # ejecutar validación
     check_metrics(val_loader, model, n_classes=num_classes, device=Config.DEVICE)
 
 if __name__ == "__main__":
