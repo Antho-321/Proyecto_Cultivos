@@ -108,42 +108,47 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.to(device)
     model.eval()
 
+    # free up as much GPU memory as possible before metric computation
+    torch.cuda.empty_cache()
+
     all_preds   = []
     all_targets = []
 
     with torch.inference_mode():
         for x, y in loader:
-            x = x.to(device,   non_blocking=True)
-            y = y.to(device,   non_blocking=True).long()
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True).long()
+
             logits = model(x)
-            if isinstance(logits, tuple):
-                logits = logits[0]
-            preds = torch.argmax(logits, dim=1)
-            all_preds.append(preds)
-            all_targets.append(y)
+            logits = logits[0] if isinstance(logits, tuple) else logits
+            preds  = torch.argmax(logits, dim=1)
 
-    preds   = torch.cat(all_preds,   dim=0)
-    targets = torch.cat(all_targets, dim=0)
+            # detach and move to CPU immediately
+            all_preds.append(preds.detach().cpu())
+            all_targets.append(y.detach().cpu())
 
-    # Métricas por clase (vector de tamaño n_classes)
-    iou_per_class  = multiclass_jaccard_index(
+    preds   = torch.cat(all_preds,   dim=0)  # [N, H, W] on CPU
+    targets = torch.cat(all_targets, dim=0)  # [N, H, W] on CPU
+
+    # compute metrics on CPU to avoid GPU OOM
+    iou_per_class = multiclass_jaccard_index(
         preds, targets,
         num_classes=n_classes,
-        average='none'           # ← para devolver un valor por clase
+        average='none'
     )
     dice_per_class = dice_score(
         preds, targets,
         num_classes=n_classes,
-        average='none',          # ← idem
-        input_format='index'     # ← indicamos que las entradas son índices de clase
+        average='none',
+        input_format='index'
     )
 
-    miou_macro  = iou_per_class.mean()
-    dice_macro  = dice_per_class.mean()
+    miou_macro = iou_per_class.mean().item()
+    dice_macro = dice_per_class.mean().item()
 
-    print("IoU por clase :",  iou_per_class.cpu().numpy())
-    print("Dice por clase:", dice_per_class.cpu().numpy())
-    print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
+    print(f"IoU per class : {iou_per_class.numpy()}")
+    print(f"Dice per class: {dice_per_class.numpy()}")
+    print(f"→ mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
 
     model.train()
     return miou_macro, dice_macro
