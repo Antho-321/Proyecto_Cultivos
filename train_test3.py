@@ -13,8 +13,8 @@ import numpy as np
 from model2 import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, save_performance_plot
 from config import Config
-from torchmetrics.classification import MulticlassConfusionMatrix
-from torchmetrics.functional import iou, dice
+from torchmetrics.functional.classification import multiclass_jaccard_index
+from torchmetrics.functional.segmentation    import dice_score
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -106,27 +106,42 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
 
 def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.to(device)
-    cm = MulticlassConfusionMatrix(num_classes=n_classes).to(device)
-
     model.eval()
+
+    all_preds   = []
+    all_targets = []
+
     with torch.inference_mode():
         for x, y in loader:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             logits = model(x)
-            if isinstance(logits, tuple): 
+            if isinstance(logits, tuple):
                 logits = logits[0]
             preds = torch.argmax(logits, dim=1)
-            cm.update(preds, y)
+            all_preds.append(preds)
+            all_targets.append(y)
 
-    conf_mat       = cm.compute().double()
-    iou_per_class  = iou(conf_mat, num_classes=n_classes)
-    dice_per_class = dice(conf_mat, num_classes=n_classes)
+    preds   = torch.cat(all_preds,   dim=0)
+    targets = torch.cat(all_targets, dim=0)
+
+    # Métricas por clase (vector de tamaño n_classes)
+    iou_per_class  = multiclass_jaccard_index(
+        preds, targets,
+        num_classes=n_classes,
+        average='none'           # ← para devolver un valor por clase
+    )
+    dice_per_class = dice_score(
+        preds, targets,
+        num_classes=n_classes,
+        average='none',          # ← idem
+        input_format='index'     # ← indicamos que las entradas son índices de clase
+    )
 
     miou_macro  = iou_per_class.mean()
     dice_macro  = dice_per_class.mean()
 
-    print("IoU per class :", iou_per_class.cpu().numpy())
-    print("Dice per class:", dice_per_class.cpu().numpy())
+    print("IoU por clase :",  iou_per_class.cpu().numpy())
+    print("Dice por clase:", dice_per_class.cpu().numpy())
     print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
 
     model.train()
