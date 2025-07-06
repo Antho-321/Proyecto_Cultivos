@@ -13,8 +13,6 @@ import numpy as np
 from model2 import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, save_performance_plot
 from config import Config
-from torchmetrics.functional.classification import multiclass_jaccard_index
-from torchmetrics.functional.segmentation    import dice_score
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
