@@ -105,14 +105,9 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
     return mean_iou
 
 def check_metrics(loader, model, n_classes=6, device="cuda"):
-    model.to(device)
     model.eval()
-
-    # free up as much GPU memory as possible before metric computation
-    torch.cuda.empty_cache()
-
-    all_preds   = []
-    all_targets = []
+    # matriz de confusión en GPU
+    conf_mat = torch.zeros((n_classes, n_classes), device=device, dtype=torch.long)
 
     with torch.inference_mode():
         for x, y in loader:
@@ -120,34 +115,27 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
             y = y.to(device, non_blocking=True).long()
 
             logits = model(x)
-            logits = logits[0] if isinstance(logits, tuple) else logits
-            preds  = torch.argmax(logits, dim=1)
+            preds = (logits[0] if isinstance(logits, tuple) else logits).argmax(dim=1)
 
-            # detach and move to CPU immediately
-            all_preds.append(preds.detach().cpu())
-            all_targets.append(y.detach().cpu())
+            # codificamos en un solo vector y usamos histograma en GPU
+            flat = (preds * n_classes + y).view(-1)
+            hist = torch.histc(flat.float(),
+                               bins=n_classes*n_classes,
+                               min=0, max=n_classes*n_classes-1,
+                               out=None).long().to(device)
+            conf_mat += hist.view(n_classes, n_classes)
 
-    preds   = torch.cat(all_preds,   dim=0)  # [N, H, W] on CPU
-    targets = torch.cat(all_targets, dim=0)  # [N, H, W] on CPU
+    # cálculo de IoU y Dice en GPU
+    inter     = conf_mat.diag().float()
+    union     = conf_mat.sum(0).float() + conf_mat.sum(1).float() - inter
+    iou_per_class  = (inter / union).cpu().numpy()
+    dice_per_class = ((2 * inter) / (conf_mat.sum(0).float() + conf_mat.sum(1).float())).cpu().numpy()
 
-    # compute metrics on CPU to avoid GPU OOM
-    iou_per_class = multiclass_jaccard_index(
-        preds, targets,
-        num_classes=n_classes,
-        average='none'
-    )
-    dice_per_class = dice_score(
-        preds, targets,
-        num_classes=n_classes,
-        average='none',
-        input_format='index'
-    )
+    miou_macro  = iou_per_class.mean()
+    dice_macro  = dice_per_class.mean()
 
-    miou_macro = iou_per_class.mean().item()
-    dice_macro = dice_per_class.mean().item()
-
-    print(f"IoU per class : {iou_per_class.numpy()}")
-    print(f"Dice per class: {dice_per_class.numpy()}")
+    print(f"IoU por clase : {iou_per_class}")
+    print(f"Dice por clase: {dice_per_class}")
     print(f"→ mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
 
     model.train()
@@ -208,12 +196,7 @@ def main():
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
     torch._inductor.config.triton.cudagraphs = True
-    model = torch.compile(
-        model, 
-        mode="max-autotune",
-        dynamic=False,           # ← NEW: Disable dynamic shapes for better optimization
-        fullgraph=True          # ← NEW: Compile entire model as one graph
-    )
+    model = torch.compile(model)
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
     scaler = GradScaler() 
