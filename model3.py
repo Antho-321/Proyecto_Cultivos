@@ -1,198 +1,231 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from config import Config
+import timm
 
-# -------------------------
-# 1) Depthwise separable conv
-# -------------------------
-class SeparableConv2d(nn.Module):
-    def __init__(self, in_ch, out_ch, kernel_size=3, stride=1, padding=1):
+# =================================================================================
+# 1. MÓDULO DE ATENCIÓN MEJORADO
+# =================================================================================
+class ChannelAttention(nn.Module):
+    """Atención de canal."""
+    def __init__(self, in_channels, reduction_ratio=16):
         super().__init__()
-        self.depthwise = nn.Conv2d(
-            in_ch, in_ch, kernel_size, stride, padding,
-            groups=in_ch, bias=False
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // reduction_ratio, 1, bias=False),
+            nn.ReLU(),
+            nn.Conv2d(in_channels // reduction_ratio, in_channels, 1, bias=False),
         )
-        self.pointwise = nn.Conv2d(in_ch, out_ch, 1, bias=False)
-        self.bn = nn.BatchNorm2d(out_ch)
-        self.relu = nn.ReLU(inplace=True)
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        x = self.depthwise(x)
-        x = self.pointwise(x)
-        x = self.bn(x)
-        return self.relu(x)
+        avg = self.fc(self.avg_pool(x))
+        mx  = self.fc(self.max_pool(x))
+        return self.sigmoid(avg + mx)
 
-
-# -------------------------
-# 2) Xception “ligero” backbone
-#    (Entry/Middle/Exit flows con avg pooling extra)
-# -------------------------
-class XceptionLite(nn.Module):
+class EnhancedSpatialAttention(nn.Module):
+    """Atención espacial multi-escala."""
     def __init__(self):
         super().__init__()
-        # Entry flow
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(3, 32, 3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(32), nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, 3, padding=1, bias=False),
-            nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+        # convoluciones multi-escala
+        self.conv1 = nn.Conv2d(2, 1, kernel_size=3, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(2, 1, kernel_size=5, padding=2, bias=False)
+        self.conv3 = nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False)
+        self.final_conv = nn.Conv2d(3, 1, kernel_size=1, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg = torch.mean(x, dim=1, keepdim=True)
+        mx, _ = torch.max(x, dim=1, keepdim=True)
+        inp = torch.cat([avg, mx], dim=1)
+        x1 = self.conv1(inp)
+        x2 = self.conv2(inp)
+        x3 = self.conv3(inp)
+        cat = torch.cat([x1, x2, x3], dim=1)
+        return self.sigmoid(self.final_conv(cat))
+
+class AttentionModule(nn.Module):
+    """Combina atención de canal y espacial mejorada."""
+    def __init__(self, in_channels, reduction_ratio=16):
+        super().__init__()
+        self.channel = ChannelAttention(in_channels, reduction_ratio)
+        self.spatial = EnhancedSpatialAttention()
+
+    def forward(self, x):
+        x = x * self.channel(x)
+        x = x * self.spatial(x)
+        return x
+
+# =================================================================================
+# 2. ASPP (con tasas de dilatación más pequeñas)
+# =================================================================================
+class ASPPConv(nn.Sequential):
+    def __init__(self, in_channels, out_channels, dilation):
+        super().__init__(
+            nn.Conv2d(in_channels, out_channels, 3, padding=dilation, dilation=dilation, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU()
         )
-        self.entry_blocks = nn.ModuleList([
-            nn.Sequential(
-                SeparableConv2d(64, 128),
-                SeparableConv2d(128, 128),
-                nn.MaxPool2d(3, stride=2, padding=1)
-            ),
-            nn.Sequential(
-                SeparableConv2d(128, 256),
-                SeparableConv2d(256, 256),
-                nn.MaxPool2d(3, stride=2, padding=1)
-            ),
-            nn.Sequential(
-                SeparableConv2d(256, 728),
-                SeparableConv2d(728, 728),
-                nn.MaxPool2d(3, stride=2, padding=1)
-            ),
-        ])
-        # Middle flow (16 × triple‐SeparableConv)
-        mid = []
-        for _ in range(16):
-            mid += [
-                SeparableConv2d(728, 728),
-                SeparableConv2d(728, 728),
-                SeparableConv2d(728, 728)
-            ]
-        self.middle_flow = nn.Sequential(*mid)
-        # Exit flow + avg‐pool extra
-        self.exit_flow = nn.Sequential(
-            SeparableConv2d(728, 1024),
-            nn.AvgPool2d(2, stride=2),
-            SeparableConv2d(1024, 1536),
-            nn.AvgPool2d(2, stride=2),
-            SeparableConv2d(1536, 1536),
-            nn.AvgPool2d(2, stride=2),
-            SeparableConv2d(1536, 2048),
+
+class ASPPPooling(nn.Sequential):
+    def __init__(self, in_channels, out_channels):
+        super().__init__(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU()
+        )
+    def forward(self, x):
+        size = x.shape[-2:]
+        return F.interpolate(super().forward(x), size=size, mode='bilinear', align_corners=False)
+
+class ASPP(nn.Module):
+    def __init__(self, in_channels, atrous_rates, out_channels=256):
+        super().__init__()
+        modules = [ nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU()
+        )]
+        for rate in atrous_rates:
+            modules.append(ASPPConv(in_channels, out_channels, rate))
+        modules.append(ASPPPooling(in_channels, out_channels))
+        self.convs = nn.ModuleList(modules)
+        self.project = nn.Sequential(
+            nn.Conv2d(len(modules) * out_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(),
+            nn.Dropout(0.3)
         )
 
     def forward(self, x):
-        x = self.conv1(x)
-        low_level = x
-        for b in self.entry_blocks:
-            x = b(x)
-        x = self.middle_flow(x)
-        x = self.exit_flow(x)
-        return x, low_level
+        res = [conv(x) for conv in self.convs]
+        return self.project(torch.cat(res, dim=1))
 
-
-# -------------------------
-# 3) ASPP multitasas + CBAM corregido
-# -------------------------
-class ASPP_CBAM(nn.Module):
-    def __init__(self, in_ch, out_ch):
+# =================================================================================
+# 3. BLOQUE DECODIFICADOR FPN
+# =================================================================================
+class DecoderBlock(nn.Module):
+    def __init__(self, in_channels_skip, in_channels_up, out_channels, use_attention=True):
         super().__init__()
-        rates = [1, 3, 9, 12]
-        # ASPP convolutions
-        self.convs = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(
-                    in_ch, out_ch,
-                    1 if r == 1 else 3,
-                    padding=0 if r == 1 else r,
-                    dilation=r,
-                    bias=False
-                ),
-                nn.BatchNorm2d(out_ch),
-                nn.ReLU(inplace=True)
-            )
-            for r in rates
-        ])
-        # reduce 4*out_ch → out_ch
-        self.reduce = nn.Sequential(
-            nn.Conv2d(len(rates) * out_ch, out_ch, 1, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
+        self.upsample = nn.ConvTranspose2d(in_channels_up, in_channels_up, 2, stride=2)
+        self.align = (nn.Conv2d(in_channels_skip, out_channels, 1, bias=False)
+                      if in_channels_skip != out_channels else nn.Identity())
+        total_in = in_channels_skip + in_channels_up
+        self.att = AttentionModule(in_channels_skip) if use_attention else None
+        self.fuse = nn.Sequential(
+            nn.Conv2d(total_in, out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(),
+            nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(),
+            nn.Dropout(0.3)
         )
-        # channel attention (CBAM)
-        self.ca_avg = nn.AdaptiveAvgPool2d(1)
-        self.ca_max = nn.AdaptiveMaxPool2d(1)
-        self.ca_fc  = nn.Sequential(
-            nn.Conv2d(out_ch, out_ch // 8, 1, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch // 8, out_ch, 1, bias=False),
-            nn.Sigmoid()
-        )
-        # spatial attention (CBAM)
-        self.sa_conv = nn.Conv2d(2, 1, 7, padding=3, bias=False)
-        self.sa_sig  = nn.Sigmoid()
+        self.relu = nn.ReLU()
 
-    def forward(self, x):
-        # ASPP feature maps
-        feats = [c(x) for c in self.convs]
-        x = torch.cat(feats, dim=1)    # [B, 4*out_ch, H, W]
-        x = self.reduce(x)             # [B, out_ch, H, W]
+    def forward(self, x_skip, x_up):
+        x = self.upsample(x_up)  
+        skip = self.att(x_skip)  
+        skip = F.interpolate(skip, size=x.shape[-2:], mode='bilinear', align_corners=False)  
+        cat = torch.cat([x, skip], dim=1)
+        fused = self.fuse(cat)
+        res = self.align(x_skip)
+        res = F.interpolate(res, size=fused.shape[-2:], mode='bilinear', align_corners=False)
+        return self.relu(fused + res)
 
-        # channel attention
-        avg = self.ca_avg(x)
-        maxp = self.ca_max(x)
-        ca = self.ca_fc(avg + maxp)
-        x = x * ca
-
-        # spatial attention
-        avgc = torch.mean(x, dim=1, keepdim=True)
-        maxc, _ = torch.max(x, dim=1, keepdim=True)
-        sa = self.sa_sig(self.sa_conv(torch.cat([avgc, maxc], dim=1)))
-        return x * sa
-
-
-# -------------------------
-# 4) Decoder con GAU
-# -------------------------
-class GAU(nn.Module):
-    def __init__(self, low_ch, high_ch, out_ch):
-        super().__init__()
-        self.conv_low = nn.Conv2d(low_ch, out_ch, 3, padding=1, bias=False)
-        self.pool     = nn.AdaptiveAvgPool2d(1)
-        self.fc       = nn.Sequential(
-            nn.Conv2d(out_ch, out_ch, 1, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 1, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, high, low):
-        low_proj = self.conv_low(low)
-        w = self.pool(low_proj)
-        w = self.fc(w)
-        low_w = low_proj * w
-        high_up = F.interpolate(
-            high,
-            size=low_w.shape[2:],
-            mode='bilinear',
-            align_corners=False
-        )
-        return low_w + high_up
-
-
-# -------------------------
-# 5) Improved DeepLabV3+ completo
-# -------------------------
+# =================================================================================
+# 4. ARQUITECTURA PRINCIPAL: CloudDeepLabV3+ MEJORADO
+# =================================================================================
 class CloudDeepLabV3Plus(nn.Module):
-    def __init__(self, n_classes):
+    def __init__(self, num_classes=1):
         super().__init__()
-        self.backbone  = XceptionLite()
-        self.aspp_cbam = ASPP_CBAM(in_ch=2048, out_ch=256)
-        self.decoder   = GAU(low_ch=64, high_ch=256, out_ch=256)
-        self.classifier = nn.Conv2d(256, n_classes, 1)
+        # shallow feature for small objects
+        self.shallow_conv = nn.Sequential(
+            nn.Conv2d(3, 16, 3, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ReLU()
+        )
+
+        # backbone con salida multi-escala y menor downsampling
+        self.backbone = timm.create_model(
+            'tf_efficientnetv2_s.in21k',
+            pretrained=True,
+            features_only=True,
+            out_indices=(0, 1, 2, 3, 4),
+            output_stride=8
+        )
+        chans = self.backbone.feature_info.channels()  # [24, 48, 64, 160, 256]
+
+        # ASPP con tasas más finas
+        # deep = feats[-1] tiene chans[-1] canales, no chans[3]
+        self.aspp = ASPP(in_channels=chans[-1], atrous_rates=(1,2,4,8), out_channels=256)
+
+        # bloques de decodificador
+        dec_ch = [128, 64, 48]
+        self.decoder_block3 = DecoderBlock(chans[3], 256, dec_ch[0])
+        self.decoder_block2 = DecoderBlock(chans[2], dec_ch[0], dec_ch[1])
+        self.decoder_block1 = DecoderBlock(chans[1], dec_ch[1], dec_ch[2])
+
+        # cabezal de segmentación principal
+        self.segmentation_head = nn.Sequential(
+            nn.Conv2d(dec_ch[2], 32, 3, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32, num_classes, 1)
+        )
+
+        # cabezales auxiliares
+        self.aux_head_3 = nn.Conv2d(dec_ch[0], num_classes, 1)
+        self.aux_head_2 = nn.Conv2d(dec_ch[1], num_classes, 1)
+        self.final_upsample = nn.UpsamplingBilinear2d(scale_factor=2)
+
+        # detección de objetos pequeños
+        in_small = chans[0] + 16
+        self.small_object_head = nn.Sequential(
+            nn.Conv2d(in_small, 64, 3, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Conv2d(64, 32, 3, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32, num_classes, 1)
+        )
 
     def forward(self, x):
-        high, low = self.backbone(x)
-        x = self.aspp_cbam(high)
-        x = self.decoder(x, low)
-        x = self.classifier(x)
-        return F.interpolate(
-            x,
-            size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH), 
-            mode='bilinear',
-            align_corners=False
-        )
+        # pequeña rama de alta resolución
+        shallow = self.shallow_conv(x)
+
+        feats = self.backbone(x)
+        # feats = [stride2, stride4, stride8, stride8, stride8]
+        # choose the *last* one for ASPP:
+        deep = feats[-1]                # H/8 × W/8
+        aspp_out = self.aspp(deep)      # H/8 × W/8
+        # Now decoder3 should fuse with feats[-2], which is also H/8×W/8:
+        d3 = self.decoder_block3(feats[-2], aspp_out)
+        # That up-samples to H/4×W/4 and then fuses with feats[-3], which *must* be H/4×W/4, etc.
+        d2 = self.decoder_block2(feats[-3], d3)
+        d1 = self.decoder_block1(feats[-4], d2)
+
+        # cabezal de pequeños objetos
+        skip0   = feats[0]                              # (B, C0, H/2, W/2)
+        # Redimensionamos shallow a H/2×W/2 y lo juntamos
+        shallow_ds = F.interpolate(shallow, skip0.shape[-2:], mode='bilinear', align_corners=False)
+        merged0   = torch.cat([skip0, shallow_ds], dim=1)  # (B, C0+16, H/2, W/2)
+        small_logits = self.small_object_head(merged0)
+        small_logits = F.interpolate(small_logits, size=x.shape[-2:], mode='bilinear', align_corners=False)
+
+        # segmentación principal
+        seg_logits = self.segmentation_head(d1)
+        main_up = seg_logits
+
+        # combinación ponderada
+        combined = main_up + 0.3 * small_logits
+
+        if self.training:
+            aux3 = F.interpolate(self.aux_head_3(d3), size=x.shape[-2:], mode='bilinear', align_corners=False)
+            aux2 = F.interpolate(self.aux_head_2(d2), size=x.shape[-2:], mode='bilinear', align_corners=False)
+            return combined, aux3, aux2, small_logits
+
+        return combined

@@ -1,5 +1,3 @@
-# train.py
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,8 +10,8 @@ import os
 from PIL import Image
 import numpy as np
 # Importa la arquitectura del otro archivo
-from model2 import CloudDeepLabV3Plus
-from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
+from model3 import CloudDeepLabV3Plus
+from utils import imprimir_distribucion_clases_post_augmentation
 from config import Config
 
 # =================================================================================
@@ -50,20 +48,8 @@ class CloudDataset(torch.utils.data.Dataset):
         image = np.array(Image.open(img_path).convert("RGB"))
         mask = np.array(Image.open(mask_path).convert("L"))
 
-        # --- MODIFICACIÓN CLAVE: Aplicar recorte ANTES de las transformaciones ---
-        # 1. Añadir una dimensión de canal a la máscara para que sea (H, W, 1)
-        mask_3d = np.expand_dims(mask, axis=-1)
-        
-        # 2. Aplicar la función de recorte
-        image_cropped, mask_cropped_3d = crop_around_classes(image, mask_3d)
-
-        # 3. Quitar la dimensión del canal de la máscara para Albumentations
-        mask_cropped = mask_cropped_3d.squeeze()
-        # ------------------------------------------------------------------------
-
         if self.transform:
-            # Pasa los arrays RECORTADOS a las transformaciones
-            augmented = self.transform(image=image_cropped, mask=mask_cropped)
+            augmented = self.transform(image=image, mask=mask)
             image = augmented["image"]
             mask = augmented["mask"]
 
@@ -71,14 +57,12 @@ class CloudDataset(torch.utils.data.Dataset):
 
 # =================================================================================
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
-# ... (El resto de tu código: train_fn, check_metrics)
 # =================================================================================
 def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
     """Procesa una época de entrenamiento con cálculo de IoU y Dice por clase."""
     loop = tqdm(loader, leave=True)
     model.train()
 
-    # Inicializamos los contadores para cada clase
     tp = torch.zeros(num_classes, device=Config.DEVICE)
     fp = torch.zeros(num_classes, device=Config.DEVICE)
     fn = torch.zeros(num_classes, device=Config.DEVICE)
@@ -97,91 +81,75 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
         scaler.step(optimizer)
         scaler.update()
 
-        # Convertir las predicciones a etiquetas de clase
         _, predicted_classes = torch.max(predictions, dim=1)
 
-        # Para cada clase, contar TP, FP y FN
         for c in range(num_classes):
-            true_positives = (predicted_classes == c) & (targets == c)
-            false_positives = (predicted_classes == c) & (targets != c)
-            false_negatives = (predicted_classes != c) & (targets == c)
+            tp[c] += ((predicted_classes == c) & (targets == c)).sum()
+            fp[c] += ((predicted_classes == c) & (targets != c)).sum()
+            fn[c] += ((predicted_classes != c) & (targets == c)).sum()
 
-            tp[c] += true_positives.sum()
-            fp[c] += false_positives.sum()
-            fn[c] += false_negatives.sum()
-
-        # Actualizar el loop con la pérdida
         loop.set_postfix(loss=loss.item())
 
-    # --- INICIO DE LAS MODIFICACIONES ---
-
-    # Para evitar división por cero, añadimos un pequeño epsilon
     epsilon = 1e-6
-
-    # 1. Calcular el IoU para cada clase
     iou_per_class = tp / (tp + fp + fn + epsilon)
-    
-    # 2. Calcular el Dice para cada clase (<--- MODIFICACIÓN 1: CALCULAR DICE)
     dice_per_class = (2 * tp) / (2 * tp + fp + fn + epsilon)
 
-    # 3. Imprimir el Dice por clase (<--- MODIFICACIÓN 2: IMPRIMIR DICE)
-    print(f"\nÉpoca de entrenamiento finalizada:")
-    # .cpu().numpy() es para imprimirlo de forma más limpia si estás en GPU
-    print(f"  - Dice por clase: {dice_per_class.cpu().numpy()}")
-    print(f"  - IoU por clase: {iou_per_class.cpu().numpy()}")
-
-    # 4. Calcular el Mean IoU (<--- MODIFICACIÓN 3: CALCULAR mIoU Y CAMBIAR RETURN)
     mean_iou = torch.nanmean(iou_per_class)
+    mean_dice = torch.nanmean(dice_per_class)
 
-    print(f"  - mIoU: {mean_iou:.4f}")
-    
-    # Devolver el mIoU
-    return mean_iou
+    print("\nÉpoca de entrenamiento finalizada:")
+    print("Dice por clase:", dice_per_class)
+    print("IoU por clase:", iou_per_class)
+    print("mIoU:", mean_iou)
+    print("mDice:", mean_dice)
 
-def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
-    """
-    Calcula métricas macro-promedio (mIoU y Dice) *sin* bucle por clase,
-    usando una matriz de confusión acumulada en GPU.
-    """
-    eps = 1e-8
-    conf_mat = torch.zeros((n_classes, n_classes), dtype=torch.float64, device=device)
-
+def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.eval()
-    with torch.no_grad():
+    # Confusion matrix en GPU
+    conf_mat = torch.zeros((n_classes, n_classes),
+                           device=device,
+                           dtype=torch.long)
+
+    with torch.inference_mode():
         for x, y in loader:
+            # carga batch en GPU
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()
 
-            logits = model(x)
-            logits = logits[0] if isinstance(logits, tuple) else logits
-            preds  = torch.argmax(logits, dim=1)
+            # inferencia y predicción
+            out   = model(x)
+            logits = out[0] if isinstance(out, tuple) else out
+            preds = logits.argmax(dim=1)
 
-            # ── Sustituimos el bucle TP/FP/FN por una matriz de confusión en GPU ──
-            flattened = (preds * n_classes + y).view(-1).float()
-            conf      = torch.histc(
-                flattened,
-                bins = n_classes * n_classes,
-                min  = 0,
-                max  = n_classes * n_classes - 1
-            ).view(n_classes, n_classes)
+            # combina pred y verdad en un solo índice
+            flat = (preds * n_classes + y).view(-1)
 
-            conf_mat += conf
-    # ─────────────────────────────────────────────────────────────────────────────
+            # conteo GPU de cada par (pred, target)
+            # torch.bincount funciona en CUDA si flat está en CUDA
+            hist = torch.bincount(
+                flat,
+                minlength=n_classes * n_classes
+            )
 
-    intersection = torch.diag(conf_mat)                  # TP por clase
-    pred_sum     = conf_mat.sum(dim=1)                   # TP + FP
-    true_sum     = conf_mat.sum(dim=0)                   # TP + FN
-    union        = pred_sum + true_sum - intersection    # TP + FP + FN
+            # acumula en la confusion matrix
+            conf_mat += hist.view(n_classes, n_classes)
 
-    iou_per_class  = (intersection + eps) / (union + eps)
-    dice_per_class = (2 * intersection + eps) / (pred_sum + true_sum + eps)
+    # Cálculo de métricas en GPU
+    inter     = conf_mat.diag().float()
+    sum_pred  = conf_mat.sum(1).float()
+    sum_truth = conf_mat.sum(0).float()
+    union     = sum_pred + sum_truth - inter
+
+    iou_per_class  = inter / (union     + 1e-6)
+    dice_per_class = (2 * inter) / (sum_pred + sum_truth + 1e-6)
 
     miou_macro  = iou_per_class.mean()
     dice_macro  = dice_per_class.mean()
 
-    print("IoU por clase :", iou_per_class.cpu().numpy())
-    print("Dice por clase:", dice_per_class.cpu().numpy())
-    print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
+    print("IoU por clase:", iou_per_class)
+    print("Dice por clase:", dice_per_class)
+    print("Mean IoU (macro):", miou_macro)
+    print("Mean Dice (macro):", dice_macro)
 
     model.train()
     return miou_macro, dice_macro
@@ -195,25 +163,17 @@ def main():
     print(f"Using device: {Config.DEVICE}")
     
     train_transform = A.Compose([
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH), # <-- MUY IMPORTANTE
+        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
         A.Rotate(limit=35, p=0.7),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
-        A.Normalize(
-            mean=[0.0, 0.0, 0.0],
-            std=[1.0, 1.0, 1.0],
-            max_pixel_value=255.0,
-        ),
+        A.Normalize(mean=[0.0,0.0,0.0], std=[1.0,1.0,1.0], max_pixel_value=255.0),
         ToTensorV2(),
     ])
 
     val_transform = A.Compose([
-        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH), # <-- MUY IMPORTANTE
-        A.Normalize(
-            mean=[0.0, 0.0, 0.0],
-            std=[1.0, 1.0, 1.0],
-            max_pixel_value=255.0,
-        ),
+        A.Resize(height=Config.IMAGE_HEIGHT, width=Config.IMAGE_WIDTH),
+        A.Normalize(mean=[0.0,0.0,0.0], std=[1.0,1.0,1.0], max_pixel_value=255.0),
         ToTensorV2(),
     ])
 
@@ -248,28 +208,20 @@ def main():
 
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
+    torch._inductor.config.triton.cudagraphs = True
     model = torch.compile(model)
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
     scaler = GradScaler() 
     best_mIoU = -1.0
 
-    # --- 2. INICIALIZAR LISTAS PARA EL HISTORIAL ---
-    train_miou_history = []
-    val_miou_history = []
-
     for epoch in range(Config.NUM_EPOCHS):
-        print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
-        
+        print(f"\n--- Epoch {epoch+1}/{Config.NUM_EPOCHS} ---")
         print("Calculando métricas de entrenamiento...")
-        train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
-        
+        train_fn(train_loader, model, optimizer, loss_fn, scaler)
         print("Calculando métricas de validación...")
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
-
-        # --- 4. GUARDAR LAS MÉTRICAS EN EL HISTORIAL ---
-        train_miou_history.append(train_mIoU.item()) # .item() para obtener el valor escalar
-        val_miou_history.append(current_mIoU.item())
+        print("Verificando mejor Mean IoU...")
 
         if current_mIoU > best_mIoU:
             best_mIoU = current_mIoU
@@ -282,22 +234,11 @@ def main():
             }
             torch.save(checkpoint, Config.MODEL_SAVE_PATH)
 
-    # --- 5. LLAMAR A LA FUNCIÓN DE GRAFICADO AL FINALIZAR ---
-    save_performance_plot(
-        train_history=train_miou_history,
-        val_history=val_miou_history,
-        save_path="/content/drive/MyDrive/colab/rendimiento_miou.png"
-    )
-
     print("\nEvaluando el modelo con mejor mIoU guardado…")
-
-    # --- Cargar el checkpoint del mejor modelo ---
-    # Añadir map_location para asegurar compatibilidad entre CPU/GPU
     best_model_checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
     model.load_state_dict(best_model_checkpoint['state_dict'])
-
-    # Ahora que el mejor modelo está cargado, se ejecuta la evaluación
     best_mIoU, best_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
     print(f"mIoU del modelo guardado: {best_mIoU:.4f} | Dice: {best_dice:.4f}")
+
 if __name__ == "__main__":
     main()
