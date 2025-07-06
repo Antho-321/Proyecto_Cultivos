@@ -8,6 +8,7 @@ from PIL import Image
 from typing import Tuple, List
 
 import torch
+
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
@@ -28,7 +29,7 @@ from utils import (
 from config import Config  # ↳ mismo Config, solo añade MAX_LR si quieres tunearlo
 
 # ---------------------------------------------
-# 1. Focal Loss (versión multi‑clase, γ=2)
+# 1. Focal Loss (versión multi-clase, γ=2)
 # ---------------------------------------------
 class FocalLoss(nn.Module):
     def __init__(self, gamma: float = 2.0, weight: torch.Tensor | None = None, reduction: str = "mean"):
@@ -84,12 +85,11 @@ class CloudDataset(torch.utils.data.Dataset):
         return image, mask
 
 # --------------------------------------------------------
-# 3. Función de entrenamiento (igual, pero aplica scheduler
-#    step‑wise y usa la nueva pérdida compuesta)
+# 3. Función de entrenamiento (scheduler step-wise y loss compuesta,
+#    plus vectorized metrics)
 # --------------------------------------------------------
-
 def make_loss_fn(class_weights: torch.Tensor) -> nn.Module:
-    ce   = nn.CrossEntropyLoss(weight=class_weights)
+    ce    = nn.CrossEntropyLoss(weight=class_weights)
     focal = FocalLoss(gamma=2.0, weight=class_weights)
 
     class ComboLoss(nn.Module):
@@ -121,29 +121,39 @@ def train_fn(loader, model, optimizer, scheduler, loss_fn, scaler, num_classes: 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        scheduler.step()  # one‑cycle actualiza cada iteración
+        scheduler.step()  # one-cycle actualiza cada iteración
 
         preds = torch.argmax(logits, dim=1)
-        for c in range(num_classes):
-            tp[c] += ((preds == c) & (targets == c)).sum()
-            fp[c] += ((preds == c) & (targets != c)).sum()
-            fn[c] += ((preds != c) & (targets == c)).sum()
+        # 📈 Métricas vectorizadas con bincount
+        conf = (
+            torch.bincount(
+                (preds * num_classes + targets).view(-1),
+                minlength=num_classes**2,
+            )
+            .view(num_classes, num_classes)
+            .to(tp.dtype)
+        )
+        tp += torch.diag(conf)
+        fp += conf.sum(0) - torch.diag(conf)
+        fn += conf.sum(1) - torch.diag(conf)
 
         loop.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0])
 
     iou  = tp / (tp + fp + fn + 1e-6)
     dice = 2 * tp / (2 * tp + fp + fn + 1e-6)
-    print(f"\n· Train Dice por clase: {dice.cpu().numpy()}\n· Train IoU  por clase: {iou.cpu().numpy()}\n· mIoU: {iou.mean():.4f} | mDice: {dice.mean():.4f}")
+    print(f"\n· Train Dice por clase: {dice.cpu().numpy()}")
+    print(f"· Train IoU  por clase: {iou.cpu().numpy()}")
+    print(f"· mIoU: {iou.mean():.4f} | mDice: {dice.mean():.4f}")
     return iou.mean()
 
 
 # --------------------------------------------------------
-# 4. Validación  (sin cambios)
+# 4. Validación  (sin cambios salvo dtype consistente)
 # --------------------------------------------------------
 @torch.no_grad()
 def check_metrics(loader, model, n_classes: int = 6):
     eps = 1e-8
-    conf = torch.zeros((n_classes, n_classes), dtype=torch.float64, device=Config.DEVICE)
+    conf = torch.zeros((n_classes, n_classes), dtype=torch.float16, device=Config.DEVICE)
     model.eval()
     for x, y in loader:
         x = x.to(Config.DEVICE, non_blocking=True)
@@ -151,7 +161,10 @@ def check_metrics(loader, model, n_classes: int = 6):
         logits = model(x)
         logits = logits[0] if isinstance(logits, tuple) else logits
         preds = torch.argmax(logits, 1)
-        conf += torch.bincount((preds * n_classes + y).view(-1), minlength=n_classes**2).view(n_classes, n_classes)
+        conf += torch.bincount(
+            (preds * n_classes + y).view(-1),
+            minlength=n_classes**2
+        ).view(n_classes, n_classes).to(conf.dtype)
 
     inter = torch.diag(conf)
     pred_sum, true_sum = conf.sum(1), conf.sum(0)
@@ -167,8 +180,8 @@ def check_metrics(loader, model, n_classes: int = 6):
 # --------------------------------------------------------
 # 5. Main
 # --------------------------------------------------------
-
 def main():
+    # ✅ Más flags de backend
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
 
@@ -192,21 +205,55 @@ def main():
     train_ds = CloudDataset(Config.TRAIN_IMG_DIR, Config.TRAIN_MASK_DIR, train_tf)
     val_ds   = CloudDataset(Config.VAL_IMG_DIR,   Config.VAL_MASK_DIR,   val_tf)
 
-    train_ld = DataLoader(train_ds, batch_size=Config.BATCH_SIZE, shuffle=True,
-                          num_workers=Config.NUM_WORKERS, pin_memory=Config.PIN_MEMORY)
-    val_ld   = DataLoader(val_ds,   batch_size=Config.BATCH_SIZE, shuffle=False,
-                          num_workers=Config.NUM_WORKERS, pin_memory=Config.PIN_MEMORY)
+    # 🔄 DataLoader optimizado
+    train_ld = DataLoader(
+        train_ds,
+        batch_size=Config.BATCH_SIZE,
+        shuffle=True,
+        num_workers=Config.NUM_WORKERS,
+        pin_memory=Config.PIN_MEMORY,
+        pin_memory_device=Config.DEVICE,
+        persistent_workers=True,
+        prefetch_factor=4,
+    )
+    val_ld = DataLoader(
+        val_ds,
+        batch_size=Config.BATCH_SIZE,
+        shuffle=False,
+        num_workers=Config.NUM_WORKERS,
+        pin_memory=Config.PIN_MEMORY,
+        pin_memory_device=Config.DEVICE,
+        persistent_workers=True,
+        prefetch_factor=4,
+    )
 
     # ---------- Distribución y pesos ----------
-    class_weights = torch.tensor([0.0549, 1.1832, 1.2697, 1.0435, 2.0081, 0.4406], device=Config.DEVICE)
+    class_weights = torch.tensor(
+        [0.0549, 1.1832, 1.2697, 1.0435, 2.0081, 0.4406],
+        device=Config.DEVICE
+    )
 
-    imprimir_distribucion_clases_post_augmentation(train_ld, 6,
-        "Distribución de clases en ENTRENAMIENTO (post-aug)")
+    imprimir_distribucion_clases_post_augmentation(
+        train_ld, 6, "Distribución de clases en ENTRENAMIENTO (post-aug)"
+    )
 
-    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
-    model = torch.compile(model, mode="max-autotune", fullgraph=True, dynamic=False)
+    # 🏗 Modelo con memory_format y compilación
+    model = CloudDeepLabV3Plus(num_classes=6)
+    model = model.to(Config.DEVICE, memory_format=torch.channels_last)
+    model = torch.compile(
+        model,
+        mode="max-autotune",
+        fullgraph=True,
+        dynamic=False
+    )
 
-    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
+    # ⚙️ Optimizador fusionado
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=Config.LEARNING_RATE,
+        weight_decay=Config.WEIGHT_DECAY,
+        fused=True
+    )
 
     total_steps = len(train_ld) * Config.NUM_EPOCHS
     scheduler = OneCycleLR(
@@ -220,7 +267,8 @@ def main():
     )
 
     loss_fn = make_loss_fn(class_weights)
-    scaler  = GradScaler()
+    # 🎛 GradScaler con growth_interval
+    scaler = GradScaler(growth_interval=2000)
 
     best_miou = -1.0
     train_hist, val_hist = [], []
