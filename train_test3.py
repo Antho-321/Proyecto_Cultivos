@@ -94,12 +94,14 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
     iou_per_class = tp / (tp + fp + fn + epsilon)
     dice_per_class = (2 * tp) / (2 * tp + fp + fn + epsilon)
 
-    print(f"\nÉpoca de entrenamiento finalizada:")
-    print(f"  - Dice por clase: {dice_per_class.cpu().numpy()}")
-    print(f"  - IoU por clase: {iou_per_class.cpu().numpy()}")
-
     mean_iou = torch.nanmean(iou_per_class)
-    print(f"  - mIoU: {mean_iou:.4f}")
+    mean_dice = torch.nanmean(dice_per_class)
+
+    print("\nÉpoca de entrenamiento finalizada:")
+    print("Dice por clase:", dice_per_class)
+    print("IoU por clase:", iou_per_class)
+    print("mIoU:", mean_iou)
+    print("mDice:", mean_dice)
 
 def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.eval()
@@ -209,6 +211,7 @@ def main():
         train_fn(train_loader, model, optimizer, loss_fn, scaler)
         print("Calculando métricas de validación...")
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
+        print("Verificando mejor Mean IoU...")
 
         if current_mIoU > best_mIoU:
             best_mIoU = current_mIoU
