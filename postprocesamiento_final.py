@@ -70,7 +70,7 @@ def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
 
             # 2) aplicar majority_filter
             preds_cpu = preds.cpu().numpy()               # (B, H, W)
-            filtered = [majority_filter(p, window_size=7) for p in preds_cpu]
+            filtered = [majority_filter(p, window_size=5) for p in preds_cpu]
             filtered = np.stack(filtered, axis=0)         # (B, H, W)
 
             # 3) volver a tensor y al dispositivo
