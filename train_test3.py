@@ -113,7 +113,8 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
 
     with torch.inference_mode():
         for x, y in loader:
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+            x = x.to(device,   non_blocking=True)
+            y = y.to(device,   non_blocking=True).long()
             logits = model(x)
             if isinstance(logits, tuple):
                 logits = logits[0]
