@@ -194,6 +194,7 @@ def main():
 
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
+    torch._inductor.config.triton.cudagraphs = True
     model = torch.compile(
         model, 
         mode="max-autotune",
