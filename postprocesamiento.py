@@ -77,26 +77,19 @@ def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
             logits = model(x)
             logits = logits[0] if isinstance(logits, (tuple, list)) else logits
 
-            # 1) obtener predicciones crudas
-            preds = logits.argmax(dim=1)  # shape (B, H, W)
+            preds = logits.argmax(dim=1)
 
-            # 2) **AQUÍ** conviertes a numpy y aplicas tu majority_filter
-            preds_cpu = preds.cpu().numpy()               # (B, H, W)
-            filtered = []
-            for p in preds_cpu:
-                filtered.append( majority_filter(p, window_size=3) )
-            filtered = np.stack(filtered, axis=0)         # (B, H, W)
-
-            # 3) vuelves a tensor y al dispositivo
+            preds_cpu = preds.cpu().numpy()
+            filtered = [majority_filter(p, window_size=5) for p in preds_cpu]
+            filtered = np.stack(filtered, axis=0)
             preds = torch.from_numpy(filtered).to(device)
 
-            # 4) construyes la matriz de confusión como antes
             flat = (preds * n_classes + y).view(-1).float()
             conf = torch.histc(
                 flat,
-                bins = n_classes*n_classes,
-                min  = 0,
-                max  = n_classes*n_classes - 1
+                bins=n_classes*n_classes,
+                min=0,
+                max=n_classes*n_classes-1
             ).view(n_classes, n_classes)
             conf_mat += conf
 
@@ -106,14 +99,16 @@ def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
     union        = pred_sum + true_sum - intersection
 
     iou_per_class  = (intersection + eps) / (union + eps)
-    dice_per_class = (2*intersection + eps) / (pred_sum + true_sum + eps)
+    dice_per_class = (2 * intersection + eps) / (pred_sum + true_sum + eps)
 
-    miou_macro = iou_per_class.mean().item()
-    dice_macro = dice_per_class.mean().item()
+    # Filtrar sólo clases con union > 0 (clases presentes)
+    valid = union > eps
+    miou_macro = iou_per_class[valid].mean().item()
+    dice_macro = dice_per_class[valid].mean().item()
 
     print("IoU por clase :", iou_per_class.cpu().numpy())
     print("Dice por clase:", dice_per_class.cpu().numpy())
-    print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
+    print(f"mIoU macro (clases presentes) = {miou_macro:.4f} | Dice macro (clases presentes) = {dice_macro:.4f}")
 
     return miou_macro, dice_macro
 
@@ -151,7 +146,7 @@ def main():
 
     # cargar modelo
     model = torch.jit.load(
-        "/content/drive/MyDrive/colab/cultivos_deeplab_final.pt",
+        r"C:\Users\Administrador\Desktop\datos_expo\cultivos_deeplab_final.pt",
         map_location=device
     ).eval()
 
