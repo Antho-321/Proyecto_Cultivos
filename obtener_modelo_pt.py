@@ -7,7 +7,7 @@ from collections import OrderedDict # Importa OrderedDict
 from model2 import CloudDeepLabV3Plus
 
 # --- 2. Define las rutas de tus archivos ---
-RUTA_CHECKPOINT_ENTRADA = '/content/drive/MyDrive/colab/checkpoints/0.8488miou.pth.tar' 
+RUTA_CHECKPOINT_ENTRADA = '/content/drive/MyDrive/colab/best_model.pth.tar' 
 RUTA_MODELO_SALIDA_PT = "/content/drive/MyDrive/colab/cultivos_deeplab_final.pt"
 
 # --- 3. Define los parámetros de tu modelo ---
