@@ -100,7 +100,6 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
 
     mean_iou = torch.nanmean(iou_per_class)
     print(f"  - mIoU: {mean_iou:.4f}")
-    return mean_iou
 
 def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.eval()
@@ -132,14 +131,14 @@ def check_metrics(loader, model, n_classes=6, device="cuda"):
     iou_per_class = inter.div(union)                            # Sigue en CUDA
     dice_per_class = (2 * inter) / (sum_gt + sum_pred)  # Tensor en CUDA
 
-    # si sólo quieres verlos por pantalla sin moverlos, basta con:
+    miou_macro = iou_per_class.mean()
+    dice_macro = dice_per_class.mean()
+
     print("IoU por clase:", iou_per_class)
     print("Dice por clase:", dice_per_class)
-
-    # y si necesitas un escalar:
-    miou_macro = iou_per_class.mean().item()                    # sólo ese .item() vuelve un float en CPU
-    dice_macro = dice_per_class.mean().item()                    # sólo ese .item() vuelve un float en CPU
-
+    print("Mean IoU (macro):", miou_macro)
+    print("Mean Dice (macro):", dice_macro)
+    
     model.train()
     return miou_macro, dice_macro  # devuelve el vector aún en GPU
 
@@ -204,18 +203,12 @@ def main():
     scaler = GradScaler() 
     best_mIoU = -1.0
 
-    train_miou_history = []
-    val_miou_history = []
-
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n--- Epoch {epoch+1}/{Config.NUM_EPOCHS} ---")
         print("Calculando métricas de entrenamiento...")
-        train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
+        train_fn(train_loader, model, optimizer, loss_fn, scaler)
         print("Calculando métricas de validación...")
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
-
-        train_miou_history.append(train_mIoU.item())
-        val_miou_history.append(current_mIoU)
 
         if current_mIoU > best_mIoU:
             best_mIoU = current_mIoU
@@ -227,12 +220,6 @@ def main():
                 "best_mIoU":  best_mIoU,
             }
             torch.save(checkpoint, Config.MODEL_SAVE_PATH)
-
-    save_performance_plot(
-        train_history=train_miou_history,
-        val_history=val_miou_history,
-        save_path="/content/drive/MyDrive/colab/rendimiento_miou.png"
-    )
 
     print("\nEvaluando el modelo con mejor mIoU guardado…")
     best_model_checkpoint = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
