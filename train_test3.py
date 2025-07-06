@@ -105,44 +105,54 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
 
 def check_metrics(loader, model, n_classes=6, device="cuda"):
     model.eval()
-    # creamos la conf_mat en GPU
-    conf_mat = torch.zeros((n_classes, n_classes), device=device, dtype=torch.long)
+    # Confusion matrix en GPU
+    conf_mat = torch.zeros((n_classes, n_classes),
+                           device=device,
+                           dtype=torch.long)
 
     with torch.inference_mode():
         for x, y in loader:
+            # carga batch en GPU
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()
 
-            logits = model(x)
-            preds = (logits[0] if isinstance(logits, tuple) else logits).argmax(dim=1)
+            # inferencia y predicción
+            out   = model(x)
+            logits = out[0] if isinstance(out, tuple) else out
+            preds = logits.argmax(dim=1)
 
+            # combina pred y verdad en un solo índice
             flat = (preds * n_classes + y).view(-1)
-            hist = torch.histc(
-                flat.float(),
-                bins=n_classes*n_classes,
-                min=0, max=n_classes*n_classes-1,
-                out=None
-            ).long().to(device)
+
+            # conteo GPU de cada par (pred, target)
+            # torch.bincount funciona en CUDA si flat está en CUDA
+            hist = torch.bincount(
+                flat,
+                minlength=n_classes * n_classes
+            )
+
+            # acumula en la confusion matrix
             conf_mat += hist.view(n_classes, n_classes)
 
-    # cálculos en GPU
-    inter  = conf_mat.diag().float()                             # Tensor en CUDA
-    sum_gt   = conf_mat.sum(0).float()            # total de píxels reales por clase (columnas)
-    sum_pred = conf_mat.sum(1).float()            # total de píxels predichos por clase (filas)
-    union  = conf_mat.sum(0).float() + conf_mat.sum(1).float() - inter
-    iou_per_class = inter.div(union)                            # Sigue en CUDA
-    dice_per_class = (2 * inter) / (sum_gt + sum_pred)  # Tensor en CUDA
+    # Cálculo de métricas en GPU
+    inter     = conf_mat.diag().float()
+    sum_pred  = conf_mat.sum(1).float()
+    sum_truth = conf_mat.sum(0).float()
+    union     = sum_pred + sum_truth - inter
 
-    miou_macro = iou_per_class.mean()
-    dice_macro = dice_per_class.mean()
+    iou_per_class  = inter / (union     + 1e-6)
+    dice_per_class = (2 * inter) / (sum_pred + sum_truth + 1e-6)
+
+    miou_macro  = iou_per_class.mean()
+    dice_macro  = dice_per_class.mean()
 
     print("IoU por clase:", iou_per_class)
     print("Dice por clase:", dice_per_class)
     print("Mean IoU (macro):", miou_macro)
     print("Mean Dice (macro):", dice_macro)
-    
+
     model.train()
-    return miou_macro, dice_macro  # devuelve el vector aún en GPU
+    return miou_macro, dice_macro
 
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
