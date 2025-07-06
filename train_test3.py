@@ -194,7 +194,12 @@ def main():
 
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
-    model = torch.compile(model)
+    model = torch.compile(
+        model, 
+        mode="max-autotune",
+        dynamic=False,           # ← NEW: Disable dynamic shapes for better optimization
+        fullgraph=True          # ← NEW: Compile entire model as one graph
+    )
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
     scaler = GradScaler() 
