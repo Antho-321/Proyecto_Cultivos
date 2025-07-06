@@ -1,16 +1,6 @@
 # =============================
-#  train.py  (versión mejorada)
+#  train.py
 # =============================
-"""
-Cambios respecto a la versión anterior
--------------------------------------
-1. **Pérdida compuesta**  = 0.5·CrossEntropy(pesada)  +  0.5·FocalLoss(γ=2).
-2. **One‑Cycle LR**  en lugar de ReduceLROnPlateau  (calentamiento + coseno).
-3. Métricas y chequeo de sobre‑ajuste sin cambios sustanciales.
-
-Para mantener el ejemplo auto‑contenido se dejan los imports y funciones
-externas (CloudDeepLabV3Plus, crop_around_classes, etc.) tal cual.
-"""
 
 import os
 import numpy as np

@@ -9,7 +9,7 @@ from tqdm import tqdm
 from config import Config
 from scipy.ndimage import generic_filter
 
-def majority_filter(label_map: np.ndarray, window_size: int = 3) -> np.ndarray: 
+def majority_filter(label_map: np.ndarray, window_size: int = 7) -> np.ndarray: 
     def _vote(window: np.ndarray) -> int:
         vals, counts = np.unique(window, return_counts=True)
         return vals[np.argmax(counts)]
@@ -65,7 +65,7 @@ def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
             preds = logits.argmax(dim=1)
 
             preds_cpu = preds.cpu().numpy()
-            filtered = [majority_filter(p, window_size=3) for p in preds_cpu]
+            filtered = [majority_filter(p, window_size=7) for p in preds_cpu]
             filtered = np.stack(filtered, axis=0)
             preds = torch.from_numpy(filtered).to(device)
 
