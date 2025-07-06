@@ -13,6 +13,8 @@ import numpy as np
 from model2 import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, save_performance_plot
 from config import Config
+from torchmetrics.classification import MulticlassConfusionMatrix
+from torchmetrics.functional import iou, dice
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -102,39 +104,29 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
     print(f"  - mIoU: {mean_iou:.4f}")
     return mean_iou
 
-def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
-    eps = 1e-8
-    conf_mat = torch.zeros((n_classes, n_classes), dtype=torch.float64, device=device)
+def check_metrics(loader, model, n_classes=6, device="cuda"):
+    model.to(device)
+    cm = MulticlassConfusionMatrix(num_classes=n_classes).to(device)
 
     model.eval()
-    with torch.no_grad():
+    with torch.inference_mode():
         for x, y in loader:
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True).long()
-
+            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             logits = model(x)
-            logits = logits[0] if isinstance(logits, tuple) else logits
-            preds  = torch.argmax(logits, dim=1)
+            if isinstance(logits, tuple): 
+                logits = logits[0]
+            preds = torch.argmax(logits, dim=1)
+            cm.update(preds, y)
 
-            flattened = (preds * n_classes + y).view(-1).float()
-            conf      = torch.histc(flattened, bins=n_classes*n_classes, min=0, max=n_classes*n_classes-1)
-            conf      = conf.view(n_classes, n_classes)
-
-            conf_mat += conf
-
-    intersection = torch.diag(conf_mat)
-    pred_sum     = conf_mat.sum(dim=1)
-    true_sum     = conf_mat.sum(dim=0)
-    union        = pred_sum + true_sum - intersection
-
-    iou_per_class  = (intersection + eps) / (union + eps)
-    dice_per_class = (2 * intersection + eps) / (pred_sum + true_sum + eps)
+    conf_mat       = cm.compute().double()
+    iou_per_class  = iou(conf_mat, num_classes=n_classes)
+    dice_per_class = dice(conf_mat, num_classes=n_classes)
 
     miou_macro  = iou_per_class.mean()
     dice_macro  = dice_per_class.mean()
 
-    print("IoU por clase :", iou_per_class.cpu().numpy())
-    print("Dice por clase:", dice_per_class.cpu().numpy())
+    print("IoU per class :", iou_per_class.cpu().numpy())
+    print("Dice per class:", dice_per_class.cpu().numpy())
     print(f"mIoU macro = {miou_macro:.4f} | Dice macro = {dice_macro:.4f}")
 
     model.train()
