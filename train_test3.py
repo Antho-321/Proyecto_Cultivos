@@ -11,7 +11,7 @@ from PIL import Image
 import numpy as np
 # Importa la arquitectura del otro archivo
 from model2 import CloudDeepLabV3Plus
-from utils import imprimir_distribucion_clases_post_augmentation, save_performance_plot
+from utils import imprimir_distribucion_clases_post_augmentation
 from config import Config
 
 # =================================================================================
