@@ -3,7 +3,6 @@ import numpy as np
 import os
 from keras.preprocessing.image import load_img, img_to_array
 from sklearn.model_selection import train_test_split
-import shutil
 
 # =========================================================================
 # Utilidades
@@ -185,63 +184,8 @@ def contar_imagenes_sin_recorte(
     print(f"Número de imágenes sin recorte: {contador}")
     return contador
 
-# Asegúrate de que estas utilidades estén definidas o importadas:
-# from tu_modulo import ensure_channel_dim, crop_around_classes
-
-def mover_imagenes_sin_recorte(
-    image_directory: str,
-    mask_directory: str,
-    target_directory: str = "analyzing_images",
-    classes_to_find: list[int] = [1, 2, 3, 4, 5],
-    margin: int = 10,
-) -> int:
-    """
-    Mueve las imágenes y máscaras que, tras aplicar crop_around_classes,
-    mantienen sus dimensiones originales, a la carpeta target_directory,
-    dentro de subcarpetas 'images' y 'masks'.
-    Devuelve el número de pares movidos.
-    """
-    images_target = os.path.join(target_directory, "images")
-    masks_target  = os.path.join(target_directory, "masks")
-    os.makedirs(images_target, exist_ok=True)
-    os.makedirs(masks_target,  exist_ok=True)
-
-    contador = 0
-
-    for image_filename in sorted(os.listdir(image_directory)):
-        if not image_filename.lower().endswith((".jpg", ".png")):
-            continue
-
-        img_path   = os.path.join(image_directory, image_filename)
-        mask_name  = os.path.splitext(image_filename)[0] + "_mask.png"
-        mask_path  = os.path.join(mask_directory, mask_name)
-        if not os.path.exists(mask_path):
-            continue
-
-        # cargamos la imagen y la máscara originales
-        img_array  = img_to_array(load_img(img_path))
-        mask_array = ensure_channel_dim(np.array(Image.open(mask_path)))
-
-        # aplicamos el recorte
-        img_crop, mask_crop = crop_around_classes(
-            img_array,
-            mask_array,
-            classes_to_find,
-            margin
-        )
-
-        # si no cambió el tamaño, movemos ambos archivos
-        if img_crop.shape == img_array.shape and mask_crop.shape == mask_array.shape:
-            shutil.move(img_path,  os.path.join(images_target, image_filename))
-            shutil.move(mask_path, os.path.join(masks_target,  mask_name))
-            contador += 1
-
-    print(f"Se movieron {contador} pares de imagen y máscara sin recorte.")
-    return contador
-
 
 if __name__ == "__main__":
-    IMAGE_DIR  = "Balanced/train/images"
-    MASK_DIR   = "Balanced/train/masks"
-    mover_imagenes_sin_recorte(IMAGE_DIR, MASK_DIR)
-
+    IMAGE_DIR = "Balanced/train/images"
+    MASK_DIR  = "Balanced/train/masks"
+    contar_imagenes_sin_recorte(IMAGE_DIR, MASK_DIR)
