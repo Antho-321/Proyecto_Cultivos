@@ -1,16 +1,36 @@
-import os, re, torch, numpy as np, matplotlib.pyplot as plt
-from matplotlib.patches import Patch                       # ← NUEVO
+import os
+import re
+import requests
+from io import BytesIO
+
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+
 from pathlib import Path
 from PIL import Image
+
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+
 from config import Config
-from train_test4 import CloudDeepLabV3Plus                 # cámbiala si vive en otro módulo
+from train_test4 import CloudDeepLabV3Plus  # Cámbiala si vive en otro módulo
+
+# ─────────────────────────── 0) FUNCIONES PARA IMÁGENES REMOTAS ───────────────────
+def open_remote_image(url: str) -> Image.Image:
+    r = requests.get(url)
+    r.raise_for_status()
+    return Image.open(BytesIO(r.content))
+
+def remote_exists(url: str) -> bool:
+    r = requests.head(url)
+    return r.status_code == 200
 
 # ─────────────────────────── 1) PALETA Y FUNCIONES AUXILIARES ─────────────────────
 PALETTE = [
     (255,255,255), (128,0,0), (0,128,0),
-    (255,255,0),   (0,0,0), (128,0,128)
+    (255,255,0),   (0,0,0),   (128,0,128)
 ]
 FLAT_PAL = [c for rgb in PALETTE for c in rgb]
 
@@ -20,26 +40,24 @@ def rgb_to_idx(rgb_arr: np.ndarray, palette: list[tuple[int,int,int]]) -> np.nda
         idx[np.all(rgb_arr == color, axis=-1)] = i
     return idx
 
-# ─────────────────────────── 2) BÚSQUEDA DE MÁSCARA GT ────────────────────────────
-def find_mask(img_path: Path) -> Path | None:
-    base = re.sub(r"\.(jpg|jpeg)$", "", img_path.name, flags=re.I)
-    candidates = [
-        img_path.with_name(f"{base}_mask.png"),
-        img_path.with_name(f"{base}.png"),
-        img_path.parent.parent / "labels" / f"{base}_mask.png",
-        img_path.parent.parent / "masks"  / f"{base}_mask.png",
-        img_path.parent.parent / "labels" / f"{base}.png",
-        img_path.parent.parent / "masks"  / f"{base}.png",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
+# ─────────────────────────── 2) BÚSQUEDA DE MÁSCARA GT REMOTA ─────────────────────
+BASE_URL = "https://raw.githubusercontent.com/JorgePazos-git/Dataset-of-weeds-in-potato-crops-in-the-province-of-Carchi-and-Imbabura-in-/refs/heads/main/Balanced/val"
+
+def find_mask(image_url: str) -> str | None:
+    base = re.sub(r"\.(jpg|jpeg)$", "", os.path.basename(image_url), flags=re.I)
+    dirs = ["", "labels/", "masks/"]
+    exts = ["_mask.png", ".png"]
+    for d in dirs:
+        for ext in exts:
+            candidate = f"{os.path.dirname(image_url).rsplit('/',1)[0]}/{d}{base}{ext}"
+            if remote_exists(candidate):
+                return candidate
     return None
 
-def load_gt(mask_path: Path | None, size: tuple[int,int]) -> Image.Image:
-    if mask_path is None:
+def load_gt(mask_url: str | None, size: tuple[int,int]) -> Image.Image:
+    if mask_url is None:
         return Image.new("RGB", size, (0,0,0))
-    m = Image.open(mask_path)
+    m = open_remote_image(mask_url)
     if m.mode in ("P", "L", "I"):
         idx = np.array(m, dtype=np.uint8)
     else:
@@ -49,12 +67,11 @@ def load_gt(mask_path: Path | None, size: tuple[int,int]) -> Image.Image:
     return gt.convert("RGB").resize(size, Image.NEAREST)
 
 # ─────────────────────────── 3) LISTA DE IMÁGENES ────────────────────────────────
-BASE_DIR = Path("Balanced/val")
-image_paths = [
-    BASE_DIR / "images/out_focus_5-105m3_jpg.rf.6aa735c9180337fbcc3e0b778038e7f9.jpg",
-    BASE_DIR / "images/rotate90_DJI_0058-JPG_2250_250_JPG.rf.8aa8dbebf43c94149e0ca7ddd4c9cf97.jpg",
-    BASE_DIR / "images/rotate90_5-318m3_jpg.rf.2c05aba51bc931e14faef3ce46fcb30c.jpg",
-    BASE_DIR / "images/rotate90_DJI_0058-JPG_2250_250_JPG.rf.8aa8dbebf43c94149e0ca7ddd4c9cf97.jpg",
+image_urls = [
+    f"{BASE_URL}/images/DJI_0058-JPG_1500_2000_JPG.rf.dfa17ea56a5a4a7aebd29c2b33de2522.jpg",
+    f"{BASE_URL}/images/DJI_0055-JPG_2250_1750_JPG.rf.1da573f04d505c757d408807e17e1be8.jpg",
+    f"{BASE_URL}/images/bright_5-221m3_jpg.rf.9a48144a508a0e410fa0225c37c21474.jpg",
+    f"{BASE_URL}/images/67_jpg.rf.841de14d82ab29ae699603779f003823.jpg",
 ]
 
 # ─────────────────────────── 4) MODELO Y TRANSFORMACIÓN ──────────────────────────
@@ -73,9 +90,9 @@ tfm = A.Compose([
 
 # ─────────────────────────── 5) INFERENCIAS Y VISUALIZACIÓN ──────────────────────
 results = []
-for img_path in image_paths:
-    original = Image.open(img_path).convert("RGB")
-    gt_mask  = load_gt(find_mask(img_path), original.size)
+for url in image_urls:
+    original = open_remote_image(url).convert("RGB")
+    gt_mask  = load_gt(find_mask(url), original.size)
 
     tensor = tfm(image=np.array(original))["image"].unsqueeze(0).to(device)
     with torch.no_grad():
@@ -89,7 +106,6 @@ for img_path in image_paths:
 
     results.append((original, gt_mask, pred_rgb))
 
-# Figura con N filas × 3 columnas
 n = len(results)
 fig, axs = plt.subplots(n, 3, figsize=(15, 5*n), constrained_layout=True)
 for i, (orig, gt, pred) in enumerate(results):
@@ -100,29 +116,20 @@ for i, (orig, gt, pred) in enumerate(results):
         ax.set_title(title, fontsize=12)
         ax.axis("off")
 
-# 0 ───── LISTA DE NOMBRES DE CLASE  ───────────────────────────────────────────
-# Ajusta estos nombres al orden exacto de tu PALETTE
+# ───── LISTA DE NOMBRES DE CLASE ───────────────────────────────────────────
 CLASS_NAMES = [
-    "Fondo",   # índice 0  → (255,255,255)
-    "Lengua de vaca",                # índice 1  → (128,0,0)
-    "Diente de león",          # índice 2  → (0,128,0)
-    "Kikuyo",        # índice 3  → (255,255,0)
-    "Otro",       # índice 4  → (0,0,0)
-    "Papa",    # índice 5  → (128,0,128)
+    "Fondo", "Lengua de vaca", "Diente de león",
+    "Kikuyo", "Otro", "Papa",
 ]
-# Comprueba que len(CLASS_NAMES) == len(PALETTE)
 assert len(CLASS_NAMES) == len(PALETTE), "‽ Mismos elementos en PALETTE y CLASS_NAMES"
 
-# … (todo tu código previo sin cambios) …
-
-# 6 ───── LEYENDA DE COLORES POR CLASE (CUADRADOS PEQUEÑOS)  ──────────────────
+# ───── LEYENDA DE COLORES POR CLASE ────────────────────────────────────────
 handles = [
     Patch(facecolor=np.array(rgb)/255.0,
           edgecolor="black",
-          label=CLASS_NAMES[i])          # ← ahora usa el nombre descriptivo
+          label=CLASS_NAMES[i])
     for i, rgb in enumerate(PALETTE)
 ]
-
 fig.legend(
     handles=handles,
     loc="upper center",
@@ -132,7 +139,6 @@ fig.legend(
     fontsize=11
 )
 
-# Guardar y mostrar
 plt.savefig("all_predictions_grid.png", dpi=300, bbox_inches="tight")
 plt.show()
 
