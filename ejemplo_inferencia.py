@@ -51,9 +51,9 @@ def load_gt(mask_path: Path | None, size: tuple[int,int]) -> Image.Image:
 # ─────────────────────────── 3) LISTA DE IMÁGENES ────────────────────────────────
 BASE_DIR = Path("Balanced/train")
 image_paths = [
-    BASE_DIR / "images/bright_5-362_jpg.rf.21b17ae9ace7005bad0240b0b0ac1398.jpg",
-    BASE_DIR / "images/DJI_0048-JPG_250_2250_JPG.rf.ec5c39ef8bf1931e33172fb10694fe8a.jpg",
-    BASE_DIR / "images/5-1_jpg.rf.5431ec27cf40a74146d8af1334f5b25a.jpg",
+    BASE_DIR / "images/rotate90_DJI_0055-JPG_1000_1250_JPG.rf.b7bc1af55586adc2cb74efa41a5ad120.jpg",
+    BASE_DIR / "images/out_focus_DJI_0055-JPG_3000_2250_JPG.rf.45df51405de8371efd35595221893a12.jpg",
+    BASE_DIR / "images/bright_5-143_jpg.rf.13e2c5b34c1f3289b7bc7bb3ae895af2.jpg",
     BASE_DIR / "images/48_jpg.rf.0d966bab36d3eb079b164494e4f3cd02.jpg",
 ]
 
