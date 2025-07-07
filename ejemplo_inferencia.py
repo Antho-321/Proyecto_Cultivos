@@ -49,7 +49,7 @@ def load_gt(mask_path: Path | None, size: tuple[int,int]) -> Image.Image:
     return gt.convert("RGB").resize(size, Image.NEAREST)
 
 # ─────────────────────────── 3) LISTA DE IMÁGENES ────────────────────────────────
-BASE_DIR = Path("Balanced/train")
+BASE_DIR = Path("Balanced/val")
 image_paths = [
     BASE_DIR / "images/out_focus_5-105m3_jpg.rf.6aa735c9180337fbcc3e0b778038e7f9.jpg",
     BASE_DIR / "images/rotate90_DJI_0058-JPG_2250_250_JPG.rf.8aa8dbebf43c94149e0ca7ddd4c9cf97.jpg",
