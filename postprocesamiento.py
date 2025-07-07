@@ -146,7 +146,7 @@ def main():
 
     # cargar modelo
     model = torch.jit.load(
-        r"C:\Users\Administrador\Desktop\datos_expo\cultivos_deeplab_final.pt",
+        "/content/drive/MyDrive/colab/cultivos_deeplab_final.pt",
         map_location=device
     ).eval()
 
