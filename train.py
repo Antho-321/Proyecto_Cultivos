@@ -15,10 +15,6 @@ import numpy as np
 from model import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation, crop_around_classes, save_performance_plot
 from config import Config
-torch.backends.cuda.matmul.allow_tf32 = True      # kernels TF32 en Ampere+
-torch.backends.cudnn.benchmark = True             # ya lo tienes ✔
-torch.set_float32_matmul_precision("high")        # PyTorch 2.3+
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 # =================================================================================
 # 2. DATASET PERSONALIZADO (MODIFICADO)
@@ -77,111 +73,65 @@ class CloudDataset(torch.utils.data.Dataset):
 # 3. FUNCIONES DE ENTRENAMIENTO Y VALIDACIÓN (Sin cambios)
 # ... (El resto de tu código: train_fn, check_metrics)
 # =================================================================================
-def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes=6):
-    """Procesa una época de entrenamiento con cálculo de IoU y Dice por clase."""
+def train_fn(loader, model, optimizer, loss_fn, scaler):
+    """Procesa una época de entrenamiento."""
     loop = tqdm(loader, leave=True)
     model.train()
 
-    # Inicializamos los contadores para cada clase
-    tp = torch.zeros(num_classes, device=Config.DEVICE)
-    fp = torch.zeros(num_classes, device=Config.DEVICE)
-    fn = torch.zeros(num_classes, device=Config.DEVICE)
-
     for batch_idx, (data, targets) in enumerate(loop):
-        data = data.to(Config.DEVICE, non_blocking=True)
-        targets = targets.to(Config.DEVICE, non_blocking=True).long()
+        data     = data.to(Config.DEVICE, non_blocking=True)
+        targets  = targets.to(Config.DEVICE, non_blocking=True).long()
 
         with autocast(device_type=Config.DEVICE, dtype=torch.float16):
+            # Desempaquetamos o seleccionamos la salida principal
             output = model(data)
             predictions = output[0] if isinstance(output, tuple) else output
             loss = loss_fn(predictions, targets)
 
-        optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
 
-        # Convertir las predicciones a etiquetas de clase
-        _, predicted_classes = torch.max(predictions, dim=1)
-
-        # Para cada clase, contar TP, FP y FN
-        for c in range(num_classes):
-            true_positives = (predicted_classes == c) & (targets == c)
-            false_positives = (predicted_classes == c) & (targets != c)
-            false_negatives = (predicted_classes != c) & (targets == c)
-
-            tp[c] += true_positives.sum()
-            fp[c] += false_positives.sum()
-            fn[c] += false_negatives.sum()
-
-        # Actualizar el loop con la pérdida
         loop.set_postfix(loss=loss.item())
 
-    # --- INICIO DE LAS MODIFICACIONES ---
-
-    # Para evitar división por cero, añadimos un pequeño epsilon
-    epsilon = 1e-6
-
-    # 1. Calcular el IoU para cada clase
-    iou_per_class = tp / (tp + fp + fn + epsilon)
-    
-    # 2. Calcular el Dice para cada clase (<--- MODIFICACIÓN 1: CALCULAR DICE)
-    dice_per_class = (2 * tp) / (2 * tp + fp + fn + epsilon)
-
-    # 3. Imprimir el Dice por clase (<--- MODIFICACIÓN 2: IMPRIMIR DICE)
-    print(f"\nÉpoca de entrenamiento finalizada:")
-    # .cpu().numpy() es para imprimirlo de forma más limpia si estás en GPU
-    print(f"  - Dice por clase: {dice_per_class.cpu().numpy()}")
-    print(f"  - IoU por clase: {iou_per_class.cpu().numpy()}")
-
-    # 4. Calcular el Mean IoU (<--- MODIFICACIÓN 3: CALCULAR mIoU Y CAMBIAR RETURN)
-    mean_iou = torch.nanmean(iou_per_class)
-
-    print(f"  - mIoU: {mean_iou:.4f}")
-    
-    # Devolver el mIoU
-    return mean_iou
-
-def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
-    """
-    Calcula métricas macro-promedio (mIoU y Dice) *sin* bucle por clase,
-    usando una matriz de confusión acumulada en GPU.
-    """
+def check_metrics(loader, model, n_classes=6, device="cuda"):
+    """Devuelve mIoU macro y Dice macro."""
     eps = 1e-8
-    conf_mat = torch.zeros((n_classes, n_classes), dtype=torch.float64, device=device)
+    intersection_sum = torch.zeros(n_classes, dtype=torch.float64, device=device)
+    union_sum        = torch.zeros_like(intersection_sum)
+    dice_num_sum     = torch.zeros_like(intersection_sum)
+    dice_den_sum     = torch.zeros_like(intersection_sum)
 
     model.eval()
+
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()
 
-            logits = model(x)
-            logits = logits[0] if isinstance(logits, tuple) else logits
+            output = model(x)
+            logits = output[0] if isinstance(output, tuple) else output # <-- ¡ESTA ES LA CORRECCIÓN CLAVE!
             preds  = torch.argmax(logits, dim=1)
 
-            # ── Sustituimos el bucle TP/FP/FN por una matriz de confusión en GPU ──
-            flattened = (preds * n_classes + y).view(-1).float()
-            conf      = torch.histc(
-                flattened,
-                bins = n_classes * n_classes,
-                min  = 0,
-                max  = n_classes * n_classes - 1
-            ).view(n_classes, n_classes)
+            for cls in range(n_classes):
+                pred_c   = (preds == cls)
+                true_c   = (y == cls)
+                inter    = (pred_c & true_c).sum().double()
+                pred_sum = pred_c.sum().double()
+                true_sum = true_c.sum().double()
+                union    = pred_sum + true_sum - inter
 
-            conf_mat += conf
-    # ─────────────────────────────────────────────────────────────────────────────
+                intersection_sum[cls] += inter
+                union_sum[cls]        += union
+                dice_num_sum[cls]     += 2 * inter
+                dice_den_sum[cls]     += pred_sum + true_sum
 
-    intersection = torch.diag(conf_mat)                  # TP por clase
-    pred_sum     = conf_mat.sum(dim=1)                   # TP + FP
-    true_sum     = conf_mat.sum(dim=0)                   # TP + FN
-    union        = pred_sum + true_sum - intersection    # TP + FP + FN
+    iou_per_class  = (intersection_sum + eps) / (union_sum + eps)
+    dice_per_class = (dice_num_sum   + eps) / (dice_den_sum + eps)
 
-    iou_per_class  = (intersection + eps) / (union + eps)
-    dice_per_class = (2 * intersection + eps) / (pred_sum + true_sum + eps)
-
-    miou_macro  = iou_per_class.mean()
-    dice_macro  = dice_per_class.mean()
+    miou_macro = iou_per_class.mean()
+    dice_macro = dice_per_class.mean()
 
     print("IoU por clase :", iou_per_class.cpu().numpy())
     print("Dice por clase:", dice_per_class.cpu().numpy())
@@ -193,35 +143,8 @@ def check_metrics(loader, model, n_classes: int = 6, device: str = "cuda"):
 # =================================================================================
 # 4. FUNCIÓN PRINCIPAL DE EJECUCIÓN (Sin cambios)
 # =================================================================================
-
-def validate_fn(loader, model, loss_fn, device=Config.DEVICE):
-    model.eval()
-    total_loss = 0.0
-    with torch.no_grad():
-        for x, y in loader:
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True).long()
-
-            logits = model(x)
-            logits = logits[0] if isinstance(logits, tuple) else logits
-            loss = loss_fn(logits, y)
-
-            total_loss += loss.item() * x.size(0)
-
-    avg_loss = total_loss / len(loader.dataset)
-    model.train()
-    return avg_loss
-
 def main():
-    
-    # Enable memory pool for faster allocations
-    torch.cuda.empty_cache()
-    torch.cuda.set_per_process_memory_fraction(0.95)  # Use 95% of GPU memory
-    
-    # Set optimal memory format
     torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True  # ← NEW: Enable TF32 for cuDNN
 
     print(f"Using device: {Config.DEVICE}")
     
@@ -258,9 +181,7 @@ def main():
         batch_size=Config.BATCH_SIZE,
         num_workers=Config.NUM_WORKERS,
         pin_memory=Config.PIN_MEMORY,
-        shuffle=True,
-        persistent_workers=True,      # keep workers alive across epochs
-        prefetch_factor=2,            # have each worker pre-load 2 batches
+        shuffle=True
     )
 
     val_dataset = CloudDataset(
@@ -281,25 +202,9 @@ def main():
 
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     print("Compiling the model... (this may take a minute)")
-    torch._inductor.config.triton.unique_kernel_names = True
-    torch._inductor.config.epilogue_fusion           = "max"
-    torch._inductor.config.triton.cudagraphs = True
-    model = torch.compile(
-        model, 
-        mode="max-autotune",
-        dynamic=False,           # ← NEW: Disable dynamic shapes for better optimization
-        fullgraph=True          # ← NEW: Compile entire model as one graph
-    )
+    model = torch.compile(model)
     loss_fn = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode='min',           # 'min' porque queremos reducir LR cuando val_loss no baje
-        factor=0.3,           # reducción multiplicativa
-        patience=20,          # épocas de paciencia
-        min_lr=1e-7,          # LR mínimo
-        verbose=True          # imprime mensaje cuando baja el LR
-    )
+    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
     scaler = GradScaler() 
     best_mIoU = -1.0
 
@@ -309,16 +214,14 @@ def main():
 
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n--- Epoch {epoch + 1}/{Config.NUM_EPOCHS} ---")
+        train_fn(train_loader, model, optimizer, loss_fn, scaler)
         
+        # --- 3. CALCULAR MÉTRICAS PARA ENTRENAMIENTO Y VALIDACIÓN ---
         print("Calculando métricas de entrenamiento...")
-        train_mIoU = train_fn(train_loader, model, optimizer, loss_fn, scaler)
-
-        val_loss = validate_fn(val_loader, model, loss_fn)
+        train_mIoU, _ = check_metrics(train_loader, model, n_classes=6, device=Config.DEVICE)
         
         print("Calculando métricas de validación...")
         current_mIoU, current_dice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
-
-        scheduler.step(val_loss)
 
         # --- 4. GUARDAR LAS MÉTRICAS EN EL HISTORIAL ---
         train_miou_history.append(train_mIoU.item()) # .item() para obtener el valor escalar
