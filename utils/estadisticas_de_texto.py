@@ -2011,20 +2011,55 @@ def create_miou_plot(epochs: list, train_mious: list, val_mious: list, save_path
 
     plt.show()
 
+def plot_loss_vs_epoch(log_text: str, save_path: str = None):
+    """
+    Parses the training log text to extract loss values per epoch and plots loss vs. epochs.
+    Optionally saves the figure to a file.
+
+    Parameters:
+    - log_text (str): Multi-line string containing the training logs.
+    - save_path (str, optional): Path (including filename) where to save the plot image. 
+      If None, the plot is not saved to disk.
+    """
+    epochs = []
+    losses = []
+    
+    # Find all epoch headers and corresponding loss values
+    for match in re.finditer(r"--- Epoch\s+(\d+)/\d+\s+---", log_text):
+        epoch_num = int(match.group(1))
+        snippet = log_text[match.end():]
+        
+        # Search for the first occurrence of loss= in the snippet
+        loss_match = re.search(r"loss=([0-9]*\.?[0-9]+)", snippet)
+        if loss_match:
+            loss_val = float(loss_match.group(1))
+            epochs.append(epoch_num)
+            losses.append(loss_val)
+    
+    # Plotting
+    plt.figure()
+    plt.plot(epochs, losses)
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Loss vs. Epoch")
+    plt.grid(True)
+    
+    # Save the figure if a path is provided
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight')
+    
+    plt.show()
+
+def total_training_time(log_text: str) -> str:
+    """
+    Suma los tiempos de todas las líneas de training que empiecen con “100%”.
+    """
+    #   ^\s*100%   → líneas de epochs
+    #   \[(\d{2}):(\d{2})< → captura MM y SS
+    times = re.findall(r"^\s*100%.*\[(\d{2}):(\d{2})<", log_text, re.M)
+    total_seconds = sum(int(m)*60 + int(s) for m, s in times)
+    minutes, seconds = divmod(total_seconds, 60)
+    return f"{minutes} min {seconds} s"
 
 if __name__ == "__main__":
-    # 1. Analizar el texto del log para extraer los datos
-    epochs, train_mious, val_mious = parse_log_data(log_text)
-
-    # 2. Imprimir los datos extraídos como verificación
-    if epochs:
-        print("Datos extraídos exitosamente:")
-        for i in range(len(epochs)):
-            print(f"  Época {epochs[i]:<3} -> mIoU Entrenamiento: {train_mious[i]:.4f} | mIoU Validación: {val_mious[i]:.4f}")
-        print("-" * 60)
-        
-        # 3. Crear y mostrar el gráfico
-        create_miou_plot(epochs, train_mious, val_mious, save_path="evolucion_miou.png")
-    else:
-        print("No se pudo extraer ninguna información de mIoU del log proporcionado.")
-        print("Por favor, verifica que el texto del log contenga las líneas '--- Epoch ...' y 'mIoU macro = ...'.")
+    print(total_training_time(log_text))
