@@ -9,6 +9,8 @@ class Config:
     TRAIN_MASK_DIR = "Balanced/train/masks"
     VAL_IMG_DIR = "Balanced/val/images"
     VAL_MASK_DIR = "Balanced/val/masks"
+    TEST_IMG_DIR = "Balanced/test/images"
+    TEST_MASK_DIR = "Balanced/test/masks"
     
     LEARNING_RATE = 1e-4
     WEIGHT_DECAY = 1e-5

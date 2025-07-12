@@ -17,8 +17,8 @@ def get_val_loader():
     ])
 
     val_ds = CloudDataset(
-        image_dir=Config.VAL_IMG_DIR,
-        mask_dir=Config.VAL_MASK_DIR,
+        image_dir=Config.TEST_IMG_DIR,
+        mask_dir=Config.TEST_MASK_DIR,
         transform=val_transform
     )
     return DataLoader(
