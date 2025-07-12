@@ -5,8 +5,6 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from sklearn.metrics import confusion_matrix
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 from config import Config
 from train_test4 import CloudDataset, CloudDeepLabV3Plus
@@ -35,9 +33,8 @@ def load_model(checkpoint_path: str, device: torch.device):
     model = CloudDeepLabV3Plus(num_classes=6).to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = checkpoint['state_dict']
-    # corregir prefijo de torch.compile()
     new_sd = {}
-    for k,v in state_dict.items():
+    for k, v in state_dict.items():
         if k.startswith('_orig_mod.'):
             new_sd[k[10:]] = v
         else:
@@ -46,7 +43,22 @@ def load_model(checkpoint_path: str, device: torch.device):
     model.eval()
     return model
 
-def compute_and_plot_confusion_matrix(model, loader, device):
+def calculate_mean_iou(cm: np.ndarray):
+    """
+    Calcula el IoU por clase y el mean IoU a partir de la matriz de confusión absoluta.
+    Devuelve una lista de IoU por clase y el mean IoU.
+    """
+    ious = []
+    for i in range(cm.shape[0]):
+        tp = cm[i, i]
+        fn = cm[i, :].sum() - tp
+        fp = cm[:, i].sum() - tp
+        denom = tp + fp + fn
+        iou = tp / denom if denom > 0 else float('nan')
+        ious.append(iou)
+    return ious, np.nanmean(ious)
+
+def compute_miou(model, loader, device):
     all_preds = []
     all_labels = []
 
@@ -64,50 +76,35 @@ def compute_and_plot_confusion_matrix(model, loader, device):
     y_pred = np.concatenate(all_preds)
     y_true = np.concatenate(all_labels)
 
-    # 1) Confusion matrix absoluta
+    # 1) Matriz de confusión absoluta
     cm = confusion_matrix(y_true, y_pred, labels=list(range(6)))
     print("Matriz de confusión (absoluta):\n", cm)
 
     class_names = [
-        "Fondo",   # índice 0  → (255,255,255)
-        "Lengua de vaca",                # índice 1  → (128,0,0)
-        "Diente de león",          # índice 2  → (0,128,0)
-        "Kikuyo",        # índice 3  → (255,255,0)
-        "Otro",       # índice 4  → (0,0,0)
-        "Papa",    # índice 5  → (128,0,128)
+        "Fondo",           # índice 0  → (255,255,255)
+        "Lengua de vaca",  # índice 1  → (128,0,0)
+        "Diente de león",  # índice 2  → (0,128,0)
+        "Kikuyo",          # índice 3  → (255,255,0)
+        "Otro",            # índice 4  → (0,0,0)
+        "Papa",            # índice 5  → (128,0,128)
     ]
-    plt.figure(figsize=(7,6))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-                xticklabels=class_names, yticklabels=class_names)
-    plt.xlabel("Predichos")
-    plt.ylabel("Reales")
-    plt.title("Matriz de Confusión (absoluta)")
-    plt.tight_layout()
-    plt.savefig("matriz_confusion_absoluta.png", dpi=300)
-    plt.close()
 
-    # 2) Confusion matrix normalizada por fila
-    cm_norm = cm.astype(float) / cm.sum(axis=1)[:, np.newaxis]
-    plt.figure(figsize=(7,6))
-    sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues",
-                xticklabels=class_names, yticklabels=class_names)
-    plt.xlabel("Predichos")
-    plt.ylabel("Reales")
-    plt.title("Matriz de Confusión (normalizada por fila)")
-    plt.tight_layout()
-    plt.savefig("matriz_confusion_normalizada.png", dpi=300)
-    plt.show()
+    # Cálculo de IoU
+    ious, mean_iou = calculate_mean_iou(cm)
+    for cls_name, iou in zip(class_names, ious):
+        print(f"IoU {cls_name}: {iou:.4f}")
+    print(f"Mean IoU: {mean_iou:.4f}")
 
 def main():
     device = torch.device(Config.DEVICE)
     val_loader = get_val_loader()
 
-    checkpoint_path = r"C:\Users\Administrador\Documents\INGENIERIA_EN_SOFTWARE\BIG_DATA\CÓDIGO\Proyecto_Cultivos\datos_expo\0.8410miou.pth.tar"
+    checkpoint_path = "/content/drive/MyDrive/colab/0.8410miou.pth.tar"
     if not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(f"No se encontró el archivo: {checkpoint_path}")
 
     model = load_model(checkpoint_path, device)
-    compute_and_plot_confusion_matrix(model, val_loader, device)
+    compute_miou(model, val_loader, device)
 
 if __name__ == "__main__":
     main()
