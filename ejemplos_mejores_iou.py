@@ -13,7 +13,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from config import Config            # ← tu módulo con IMAGE_HEIGHT / WIDTH
-from train_test4 import CloudDeepLabV3Plus   # o la ruta correcta al modelo
+from train import CloudDeepLabV3Plus   # o la ruta correcta al modelo
 
 # ─────────────────────────── 2) CONFIGURA TUS RUTAS ───────────────────────
 BASE_DIR      = Path("analyzing_images")
