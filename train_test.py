@@ -14,7 +14,9 @@ from albumentations.pytorch import ToTensorV2
 from model2 import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation
 from config import Config
-
+import torch._inductor.config as cfg
+# Permite autotuning GEMM en GPUs con cualquier número de SMs
+cfg.triton.max_autotune_min_sms = 0
 
 # ================================================================================
 # 1. DATASET
@@ -118,7 +120,7 @@ def check_metrics(
     if compile_model and hasattr(torch, "compile") and not isinstance(
         model, torch._dynamo.OptimizedModule
     ):
-        model = torch.compile(model, mode="max-autotune", dynamic=True)
+        model = torch.compile(model, mode="reduce-overhead", dynamic=True)
 
     model = model.to(device).eval()
 
