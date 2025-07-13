@@ -16,7 +16,8 @@ from utils import imprimir_distribucion_clases_post_augmentation
 from config import Config
 import torch._inductor.config as cfg
 # Permite autotuning GEMM en GPUs con cualquier número de SMs
-cfg.triton.max_autotune_min_sms = 0
+cfg.max_autotune_gemm = True               #  ✅  new way
+cfg.max_autotune_pointwise = True        #  if you also want point-wise tuning
 
 # ================================================================================
 # 1. DATASET
