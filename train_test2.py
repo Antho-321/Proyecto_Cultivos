@@ -115,10 +115,6 @@ def check_metrics(
     use_amp: bool = True,
     compile_model: bool = False,
 ):
-    if compile_model and hasattr(torch, "compile") and not isinstance(
-        model, torch._dynamo.OptimizedModule
-    ):
-        model = torch.compile(model, mode="reduce-overhead", dynamic=True)
 
     model = model.to(device).eval()
 
@@ -200,13 +196,6 @@ def main():
 
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     torch._inductor.config.triton.cudagraphs = True
-    model = torch.compile(
-        model,
-        backend="inductor",
-        mode="max-autotune",
-        fullgraph=True,
-        dynamic=True,
-    )
 
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
