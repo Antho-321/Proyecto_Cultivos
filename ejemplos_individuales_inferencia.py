@@ -15,19 +15,17 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from config import Config
-from train import CloudDeepLabV3Plus  # Cámbiala si vive en otro módulo
+from train import CloudDeepLabV3Plus  # Cámbiala si está en otro módulo
 
 # ─────────────────────────── 0) FUNCIONES PARA IMÁGENES REMOTAS ───────────────────
 def open_remote_image(url: str) -> Image.Image:
-    r = requests.get(url)
-    r.raise_for_status()
+    r = requests.get(url); r.raise_for_status()
     return Image.open(BytesIO(r.content))
 
 def remote_exists(url: str) -> bool:
-    r = requests.head(url)
-    return r.status_code == 200
+    return requests.head(url).status_code == 200
 
-# ─────────────────────────── 1) PALETA Y FUNCIONES AUXILIARES ─────────────────────
+# ─────────────────────────── 1) PALETA Y AUXILIARES ───────────────────────────────
 PALETTE = [
     (255,255,255), (128,0,0), (0,128,0),
     (255,255,0),   (0,0,0),   (128,0,128)
@@ -40,10 +38,12 @@ def rgb_to_idx(rgb_arr: np.ndarray, palette: list[tuple[int,int,int]]) -> np.nda
         idx[np.all(rgb_arr == color, axis=-1)] = i
     return idx
 
-# ─────────────────────────── 2) BÚSQUEDA DE MÁSCARA GT REMOTA ─────────────────────
-BASE_URL = ("https://raw.githubusercontent.com/"
-            "JorgePazos-git/Dataset-of-weeds-in-potato-crops-in-the-province-of-Carchi-and-Imbabura-in-"
-            "/refs/heads/main/Balanced/train")
+# ─────────────────────────── 2) BÚSQUEDA MÁSCARA GT ───────────────────────────────
+BASE_URL = (
+    "https://raw.githubusercontent.com/"
+    "JorgePazos-git/Dataset-of-weeds-in-potato-crops-in-the-province-of-Carchi-and-Imbabura-in-"
+    "/refs/heads/main/Balanced/train"
+)
 
 def find_mask(image_url: str) -> str | None:
     base = re.sub(r"\.(jpg|jpeg)$", "", os.path.basename(image_url), flags=re.I)
@@ -51,16 +51,16 @@ def find_mask(image_url: str) -> str | None:
     exts = ["_mask.png", ".png"]
     for d in dirs:
         for ext in exts:
-            candidate = f"{os.path.dirname(image_url).rsplit('/',1)[0]}/{d}{base}{ext}"
-            if remote_exists(candidate):
-                return candidate
+            cand = f"{os.path.dirname(image_url).rsplit('/',1)[0]}/{d}{base}{ext}"
+            if remote_exists(cand):
+                return cand
     return None
 
 def load_gt(mask_url: str | None, size: tuple[int,int]) -> Image.Image:
     if mask_url is None:
         return Image.new("RGB", size, (0,0,0))
     m = open_remote_image(mask_url)
-    if m.mode in ("P", "L", "I"):
+    if m.mode in ("P","L","I"):
         idx = np.array(m, dtype=np.uint8)
     else:
         idx = rgb_to_idx(np.array(m.convert("RGB")), PALETTE)
@@ -93,22 +93,23 @@ tfm = A.Compose([
 # ─────────────────────────── 5) INFERENCIAS ───────────────────────────────────────
 results = []
 for url in image_urls:
-    original = open_remote_image(url).convert("RGB")
-    gt_mask  = load_gt(find_mask(url), original.size)
+    orig = open_remote_image(url).convert("RGB")
+    gt_mask = load_gt(find_mask(url), orig.size)
 
-    tensor = tfm(image=np.array(original))["image"].unsqueeze(0).to(device)
+    tensor = tfm(image=np.array(orig))["image"].unsqueeze(0).to(device)
     with torch.no_grad():
         logits = model(tensor)
         logits = logits[0] if isinstance(logits, tuple) else logits
-        pred = torch.argmax(logits, 1).squeeze().cpu().numpy()
+        pred_idx = torch.argmax(logits, 1).squeeze().cpu().numpy()
 
-    pred_img = Image.fromarray(pred.astype(np.uint8), mode="P")
+    # convertir a RGB para visualizar
+    pred_img = Image.fromarray(pred_idx.astype(np.uint8), mode="P")
     pred_img.putpalette(FLAT_PAL)
-    pred_rgb = pred_img.convert("RGB").resize(original.size, Image.NEAREST)
+    pred_rgb = pred_img.convert("RGB").resize(orig.size, Image.NEAREST)
 
-    results.append((original, gt_mask, pred_rgb))
+    results.append((orig, gt_mask, pred_rgb))
 
-# ─────────────────────────── 6) LEYENDA DE COLORES POR CLASE ────────────────────
+# ─────────────────────────── 6) LEYENDA DE COLORES ───────────────────────────────
 CLASS_NAMES = [
     "Fondo", "Lengua de vaca", "Diente de león",
     "Kikuyo", "Otro", "Papa",
@@ -120,14 +121,35 @@ handles = [
     for i, rgb in enumerate(PALETTE)
 ]
 
-# ─────────────────── 7) VISUALIZACIÓN Y GUARDADO POR FILA ───────────────────────
+# ──────────────── 7) VISUALIZACIÓN, IoU POR CLASE Y GUARDADO ────────────────────
 output_dir = "/content/drive/MyDrive/colab/"
 os.makedirs(output_dir, exist_ok=True)
 
 for idx, (orig, gt, pred) in enumerate(results, start=1):
+    # reconstruir índices
+    gt_idx   = rgb_to_idx(np.array(gt),   PALETTE)
+    pred_idx = rgb_to_idx(np.array(pred), PALETTE)
+
+    # calcular IoU por clase
+    ious = []
+    for c in range(len(PALETTE)):
+        inter = np.logical_and(gt_idx == c, pred_idx == c).sum()
+        uni   = np.logical_or (gt_idx == c, pred_idx == c).sum()
+        ious.append(inter/uni if uni > 0 else 0.0)
+
+    # formatear texto de IoU por clase
+    iou_text = ", ".join(
+        f"{CLASS_NAMES[c]}={ious[c]:.3f}"
+        for c in range(len(ious))
+    )
+
+    # dibujar figura
     fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=False)
-    # Ajustamos el espacio superior para la leyenda
-    fig.subplots_adjust(top=0.80)
+    fig.subplots_adjust(top=0.75)  # espacio extra arriba
+
+    # mostrar IoU por clase encima
+    fig.text(0.5, 0.88, "IoU por clase:", ha="center", fontsize=12, weight="bold")
+    fig.text(0.5, 0.84, iou_text, ha="center", fontsize=10)
 
     for ax, img, title in zip(
         axes,
@@ -135,19 +157,20 @@ for idx, (orig, gt, pred) in enumerate(results, start=1):
         ("Imagen original", "Máscara GT", "Predicción")
     ):
         ax.imshow(img)
-        ax.set_title(title, fontsize=12, pad=10)  # un poco de 'pad' extra
+        ax.set_title(title, fontsize=12, pad=10)
         ax.axis("off")
 
-    # Leyenda elevada
+    # leyenda de colores
     fig.legend(
         handles=handles,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.95),  # y=0.95 va más arriba
+        bbox_to_anchor=(0.5, 0.95),
         ncol=len(PALETTE),
         frameon=False,
         fontsize=11
     )
 
+    # guardar y cerrar
     save_path = os.path.join(output_dir, f"fila_prediccion_{idx}.png")
     fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
