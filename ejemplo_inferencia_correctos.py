@@ -71,7 +71,7 @@ image_urls = [
     f"{BASE_URL}/images/rotate270_5-212m3_jpg.rf.24451e85934c80b44cede45e8d640c6a.jpg",
     f"{BASE_URL}/images/67_jpg.rf.841de14d82ab29ae699603779f003823.jpg",
     f"{BASE_URL}/images/dark_DJI_0058-JPG_0_1750_JPG.rf.aef7705f747c179cb73e53a6f2357058.jpg",
-    f"{BASE_URL}/images/rotate180_DJI_0055-JPG_250_750_JPG.rf.fc24bc0573e18f6c3c8a4071b6254c40.jpg",
+    f"{BASE_URL}/images/dark_5-338_jpg.rf.fe350b74c2af3f00b7d84af37036152e.jpg",
 ]
 
 # ─────────────────────────── 4) MODELO Y TRANSFORMACIÓN ──────────────────────────
