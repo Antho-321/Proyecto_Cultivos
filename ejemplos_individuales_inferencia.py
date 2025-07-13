@@ -121,9 +121,10 @@ os.makedirs(output_dir, exist_ok=True)
 
 for idx, (orig, gt_rgb, pred_rgb, gt_idx_small, pred_idx) in enumerate(results, start=1):
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    # Reservamos espacio abajo para leyenda y tabla
     fig.subplots_adjust(top=0.85, bottom=0.25, wspace=0.3)
 
-    # Mostrar cada imagen con bordes y títulos destacados
+    # 1) Mostrar imágenes con bordes y títulos
     for ax, img, title in zip(
         axes,
         (orig, gt_rgb, pred_rgb),
@@ -139,16 +140,16 @@ for idx, (orig, gt_rgb, pred_rgb, gt_idx_small, pred_idx) in enumerate(results, 
             spine.set_linewidth(1)
             spine.set_edgecolor('black')
 
-    # Calcular IoU por clase
+    # 2) Calcular IoU por clase
     ious = []
     for cls in range(len(CLASS_NAMES)):
         m_gt = (gt_idx_small == cls)
         m_pred = (pred_idx == cls)
         inter = np.logical_and(m_gt, m_pred).sum()
-        uni = np.logical_or(m_gt, m_pred).sum()
+        uni   = np.logical_or(m_gt, m_pred).sum()
         ious.append(inter / uni if uni > 0 else 0.0)
 
-    # Leyenda centrada abajo
+    # 3) Leyenda de clases en la parte inferior
     fig.legend(
         handles=handles,
         title='Leyenda de clases',
@@ -160,20 +161,22 @@ for idx, (orig, gt_rgb, pred_rgb, gt_idx_small, pred_idx) in enumerate(results, 
         frameon=False
     )
 
-    # Tabla de IoU debajo de las imágenes
+    # 4) Tabla de IoU en un nuevo Axes
     table_data = [[CLASS_NAMES[i], f"{ious[i]:.2f}"] for i in range(len(CLASS_NAMES))]
-    tbl = fig.table(
+    ax_tab = fig.add_axes([0.1, 0.02, 0.8, 0.2], frame_on=False)  # [left, bottom, width, height]
+    ax_tab.axis('off')
+    tbl = ax_tab.table(
         cellText=table_data,
         colLabels=["Clase", "IoU"],
         cellLoc='center',
-        loc='bottom',
+        loc='center',
         colColours=["#f1f1f2"] * 2
     )
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(12)
     tbl.scale(1, 1.5)
 
-    # Guardar y mostrar
+    # 5) Guardar y mostrar
     save_path = os.path.join(output_dir, f"fila_prediccion_{idx}.png")
     fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
