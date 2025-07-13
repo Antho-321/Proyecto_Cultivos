@@ -5,7 +5,7 @@ from PIL import Image
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from config import Config
-from train_test4 import CloudDeepLabV3Plus                 # cámbiala si vive en otro módulo
+from train import CloudDeepLabV3Plus                 # cámbiala si vive en otro módulo
 
 # ─────────────────────────── 1) PALETA Y FUNCIONES AUXILIARES ─────────────────────
 PALETTE = [
