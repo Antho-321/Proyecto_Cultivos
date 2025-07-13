@@ -29,6 +29,7 @@ PALETTE = [
     (255,255,0),   (0,0,0),   (128,0,128)
 ]
 FLAT_PAL = [c for rgb in PALETTE for c in rgb]
+CLASS_NAMES = ["Fondo","Lengua de vaca","Diente de león","Kikuyo","Otro","Papa"]
 
 def rgb_to_idx(rgb_arr: np.ndarray, palette: list[tuple[int,int,int]]) -> np.ndarray:
     idx = np.zeros(rgb_arr.shape[:2], dtype=np.uint8)
@@ -44,7 +45,7 @@ BASE_URL = (
 )
 
 def find_mask(image_url: str) -> str | None:
-    base = re.sub(r"\.(jpg|jpeg)$","",os.path.basename(image_url),flags=re.I)
+    base = re.sub(r"\.(jpg|jpeg)$", "", os.path.basename(image_url), flags=re.I)
     dirs = ["", "labels/", "masks/"]
     exts = ["_mask.png", ".png"]
     for d in dirs:
@@ -108,55 +109,71 @@ for url in image_urls:
 
     results.append((orig, gt_mask, pred_rgb, gt_idx_small, pred_idx))
 
-# ───────────────────── 6) LEYENDA ─────────────────────
-CLASS_NAMES = ["Fondo","Lengua de vaca","Diente de león","Kikuyo","Otro","Papa"]
+# ───────────────────── 6) PREPARACIÓN DE LEYENDA ─────────────────────
 handles = [
-    Patch(facecolor=np.array(rgb)/255., edgecolor="black", label=CLASS_NAMES[i])
-    for i, rgb in enumerate(PALETTE)
+    Patch(facecolor=np.array(rgb)/255., edgecolor="black", label=name)
+    for rgb, name in zip(PALETTE, CLASS_NAMES)
 ]
 
-# ─────────────────── 7) VISUALIZACIÓN Y GUARDADO POR FILA ───────────────────────
+# ─────────────────── 7) VISUALIZACIÓN Y GUARDADO ────────────────────
 output_dir = "/content/drive/MyDrive/colab/"
 os.makedirs(output_dir, exist_ok=True)
 
 for idx, (orig, gt_rgb, pred_rgb, gt_idx_small, pred_idx) in enumerate(results, start=1):
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=False)
-    fig.subplots_adjust(top=0.80)
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.subplots_adjust(top=0.85, bottom=0.25, wspace=0.3)
 
+    # Mostrar cada imagen con bordes y títulos destacados
     for ax, img, title in zip(
         axes,
         (orig, gt_rgb, pred_rgb),
-        ("Imagen original", "Máscara GT", "Predicción")
+        ("Imagen Original", "Máscara Real (GT)", "Predicción del Modelo")
     ):
-        ax.imshow(img)
-        ax.set_title(title, fontsize=12, pad=10)
-        ax.axis("off")
+        interp = 'nearest' if title != "Imagen Original" else None
+        ax.imshow(img, interpolation=interp)
+        ax.set_title(title, fontsize=16, fontweight='bold', pad=12)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(1)
+            spine.set_edgecolor('black')
 
-    # Calcula IoU por clase
+    # Calcular IoU por clase
     ious = []
     for cls in range(len(CLASS_NAMES)):
-        m_gt   = (gt_idx_small == cls)
-        m_pred = (pred_idx   == cls)
-        inter  = np.logical_and(m_gt, m_pred).sum()
-        uni    = np.logical_or(m_gt, m_pred).sum()
-        ious.append(inter/uni if uni > 0 else 0.0)
+        m_gt = (gt_idx_small == cls)
+        m_pred = (pred_idx == cls)
+        inter = np.logical_and(m_gt, m_pred).sum()
+        uni = np.logical_or(m_gt, m_pred).sum()
+        ious.append(inter / uni if uni > 0 else 0.0)
 
-    # Labels dinámicas con IoU
-    labels = [
-        f"{CLASS_NAMES[i]}\nIoU: {ious[i]:.2f}"
-        for i in range(len(CLASS_NAMES))
-    ]
-
+    # Leyenda centrada abajo
     fig.legend(
         handles=handles,
-        labels=labels,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.95),
-        ncol=len(PALETTE),
-        frameon=False,
-        fontsize=11
+        title='Leyenda de clases',
+        title_fontsize=14,
+        fontsize=12,
+        loc='lower center',
+        bbox_to_anchor=(0.5, -0.02),
+        ncol=3,
+        frameon=False
     )
 
+    # Tabla de IoU debajo de las imágenes
+    table_data = [[CLASS_NAMES[i], f"{ious[i]:.2f}"] for i in range(len(CLASS_NAMES))]
+    tbl = fig.table(
+        cellText=table_data,
+        colLabels=["Clase", "IoU"],
+        cellLoc='center',
+        loc='bottom',
+        colColours=["#f1f1f2"] * 2
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(12)
+    tbl.scale(1, 1.5)
+
+    # Guardar y mostrar
     save_path = os.path.join(output_dir, f"fila_prediccion_{idx}.png")
     fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
