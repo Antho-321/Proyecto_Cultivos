@@ -13,7 +13,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from config import Config
-from train import CloudDeepLabV3Plus  # Cámbiala si vive en otro módulo
+from train import CloudDeepLabV3Plus
 
 # ────────────────────── 0) FUNCIONES REMOTAS ──────────────────────
 def open_remote_image(url: str) -> Image.Image:
@@ -117,8 +117,8 @@ handles = [Patch(facecolor=np.array(rgb)/255., edgecolor="black", label=CLASS_NA
 output_dir = "/content/drive/MyDrive/colab/"
 os.makedirs(output_dir, exist_ok=True)
 
-# posibles desplazamientos para evitar solapamientos
-offsets = [(+30,+30), (-30,+30), (+30,-30), (-30,-30), (0,+40), (+40,0), (-40,0), (0,-40)]
+def rects_intersect(a, b):
+    return not (a[2] < b[0] or a[0] > b[2] or a[3] < b[1] or a[1] > b[3])
 
 for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
     ious = []
@@ -142,28 +142,43 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
     h_big,w_big,_  = np.array(pred_rgb).shape
     sx,sy = w_big/w_small, h_big/h_small
 
-    for c,iou in enumerate(ious):
-        if iou<=0: continue
-        ys,xs = np.where(pred_idx==c)
-        if ys.size==0: continue
+    placed_boxes = []
+    radius = 50
+    angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
+    fontsize = 10
+    char_w = 7
+    text_h = fontsize
 
-        # mediana en el espacio pequeño
+    for c, iou in enumerate(ious):
+        if iou <= 0: continue
+        ys, xs = np.where(pred_idx==c)
+        if ys.size == 0: continue
+
         y0_small, x0_small = np.median(ys), np.median(xs)
         x0, y0 = x0_small*sx, y0_small*sy
 
-        # elegir desplazamiento según índice para evitar cruces
-        dx, dy = offsets[c % len(offsets)]
+        text = f"{CLASS_NAMES[c]} = {iou:.3f}"
+        text_w = len(text)*char_w
 
-        ax_pred.annotate(
-            f"{CLASS_NAMES[c]} = {iou:.3f}",
-            xy=(x0, y0),
-            xytext=(x0 + dx, y0 + dy),
-            color="black", fontsize=10, zorder=3,
-            arrowprops=dict(
-                arrowstyle="->", color="black", lw=1, zorder=1
-            ),
-            clip_on=False
-        )
+        # buscar ángulo que no choque
+        for theta in angles:
+            dx = np.cos(theta)*radius
+            dy = np.sin(theta)*radius
+            tx = x0 + dx
+            ty = y0 + dy
+            # bbox: [xmin, ymin, xmax, ymax]
+            bbox = (tx, ty-text_h, tx+text_w, ty)
+            if not any(rects_intersect(bbox, pb) for pb in placed_boxes):
+                placed_boxes.append(bbox)
+                ax_pred.annotate(
+                    text,
+                    xy=(x0, y0),
+                    xytext=(tx, ty),
+                    color="black", fontsize=fontsize, zorder=3,
+                    arrowprops=dict(arrowstyle="->", color="black", lw=1, zorder=1),
+                    clip_on=False
+                )
+                break
 
     fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5,0.95),
                ncol=len(PALETTE), frameon=False, fontsize=11)
