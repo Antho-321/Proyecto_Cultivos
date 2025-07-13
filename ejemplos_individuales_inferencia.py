@@ -92,20 +92,16 @@ results = []
 for url in image_urls:
     orig = open_remote_image(url).convert("RGB")
 
-    # GT pequeño para IoU
     gt_small = load_gt(find_mask(url), size=(Config.IMAGE_WIDTH, Config.IMAGE_HEIGHT))
     gt_idx_small = rgb_to_idx(np.array(gt_small), PALETTE)
 
-    # Predicción
     tensor = tfm(image=np.array(orig))["image"].unsqueeze(0).to(device)
     with torch.no_grad():
         logits = model(tensor)
         logits = logits[0] if isinstance(logits, tuple) else logits
         pred_idx = torch.argmax(logits,1).squeeze().cpu().numpy()
 
-    # GT visual
     gt_mask = load_gt(find_mask(url), orig.size)
-    # Predicción visual
     pred_img = Image.fromarray(pred_idx.astype(np.uint8), mode="P")
     pred_img.putpalette(FLAT_PAL)
     pred_rgb = pred_img.convert("RGB").resize(orig.size, Image.NEAREST)
@@ -121,20 +117,20 @@ handles = [Patch(facecolor=np.array(rgb)/255., edgecolor="black", label=CLASS_NA
 output_dir = "/content/drive/MyDrive/colab/"
 os.makedirs(output_dir, exist_ok=True)
 
+# posibles desplazamientos para evitar solapamientos
+offsets = [(+30,+30), (-30,+30), (+30,-30), (-30,-30), (0,+40), (+40,0), (-40,0), (0,-40)]
+
 for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
-    # calcular IoUs
     ious = []
     for c in range(len(PALETTE)):
         inter = np.logical_and(gt_idx==c, pred_idx==c).sum()
         uni   = np.logical_or(gt_idx==c, pred_idx==c).sum()
         ious.append(inter/uni if uni>0 else 0.0)
 
-    # imprimir IoUs
     print(f"\nIoU imagen {idx}:")
     for c,iou in enumerate(ious):
         print(f"  {CLASS_NAMES[c]:<15}: {iou:.3f}")
 
-    # crear figura
     fig, axes = plt.subplots(1,3,figsize=(15,5))
     fig.subplots_adjust(top=0.75)
     for ax,img,title in zip(axes,(orig,gt_mask,pred_rgb),
@@ -142,30 +138,30 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
         ax.imshow(img); ax.set_title(title,fontsize=12,pad=10); ax.axis("off")
 
     ax_pred = axes[2]
-
-    # factores de escala
     h_small,w_small = pred_idx.shape
     h_big,w_big,_  = np.array(pred_rgb).shape
     sx,sy = w_big/w_small, h_big/h_small
 
-    # anotaciones con mediana
     for c,iou in enumerate(ious):
-        if iou<=0: 
-            continue
+        if iou<=0: continue
         ys,xs = np.where(pred_idx==c)
-        if ys.size==0: 
-            continue
+        if ys.size==0: continue
 
-        # centro = mediana de coordenadas
-        y0_small,x0_small = np.median(ys), np.median(xs)
+        # mediana en el espacio pequeño
+        y0_small, x0_small = np.median(ys), np.median(xs)
         x0, y0 = x0_small*sx, y0_small*sy
+
+        # elegir desplazamiento según índice para evitar cruces
+        dx, dy = offsets[c % len(offsets)]
 
         ax_pred.annotate(
             f"{CLASS_NAMES[c]} = {iou:.3f}",
-            xy=(x0,y0),
-            xytext=(x0+30,y0+30),
-            color="black", fontsize=10,
-            arrowprops=dict(arrowstyle="->", color="black", lw=1),
+            xy=(x0, y0),
+            xytext=(x0 + dx, y0 + dy),
+            color="black", fontsize=10, zorder=3,
+            arrowprops=dict(
+                arrowstyle="->", color="black", lw=1, zorder=1
+            ),
             clip_on=False
         )
 
