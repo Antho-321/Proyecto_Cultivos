@@ -96,41 +96,33 @@ results = []
 for url in image_urls:
     orig = open_remote_image(url).convert("RGB")
 
-    # 1) GT para IoU: redimensionada a la resolución del modelo
-    gt_small = load_gt(find_mask(url),
-                       size=(Config.IMAGE_WIDTH, Config.IMAGE_HEIGHT))
+    # 1) GT para IoU
+    gt_small = load_gt(find_mask(url), size=(Config.IMAGE_WIDTH, Config.IMAGE_HEIGHT))
     gt_idx_small = rgb_to_idx(np.array(gt_small), PALETTE)
 
-    # 2) Tensor y predicción
+    # 2) Predicción
     tensor = tfm(image=np.array(orig))["image"].unsqueeze(0).to(device)
     with torch.no_grad():
         logits = model(tensor)
         logits = logits[0] if isinstance(logits, tuple) else logits
         pred_idx = torch.argmax(logits, 1).squeeze().cpu().numpy()
 
-    # 3) GT para visualización: al tamaño original
+    # 3) Máscara GT visual
     gt_mask = load_gt(find_mask(url), orig.size)
 
-    # 4) Imagen RGB de la predicción (para mostrar)
+    # 4) Predicción visual
     pred_img = Image.fromarray(pred_idx.astype(np.uint8), mode="P")
     pred_img.putpalette(FLAT_PAL)
     pred_rgb = pred_img.convert("RGB").resize(orig.size, Image.NEAREST)
 
     results.append((orig, gt_mask, pred_rgb, gt_idx_small, pred_idx))
 
-# ─────────────────────────── 6) LEYENDA DE COLORES POR CLASE ────────────────────
-CLASS_NAMES = [
-    "Fondo", "Lengua de vaca", "Diente de león",
-    "Kikuyo", "Otro", "Papa",
-]
-assert len(CLASS_NAMES) == len(PALETTE), "PALETTE y CLASS_NAMES deben coincidir en longitud"
+# ─────────────────────────── 6) LEYENDA ──────────────────────────────────────────
+CLASS_NAMES = ["Fondo", "Lengua de vaca", "Diente de león", "Kikuyo", "Otro", "Papa"]
+handles = [Patch(facecolor=np.array(rgb)/255.0, edgecolor="black", label=CLASS_NAMES[i])
+           for i, rgb in enumerate(PALETTE)]
 
-handles = [
-    Patch(facecolor=np.array(rgb)/255.0, edgecolor="black", label=CLASS_NAMES[i])
-    for i, rgb in enumerate(PALETTE)
-]
-
-# ─────────────────── 7) CÁLCULO IoU Y VISUALIZACIÓN ────────────────────────────
+# ─────────────────── 7) VISUALIZACIÓN Y IoU ──────────────────────────────────────
 output_dir = "/content/drive/MyDrive/colab/"
 os.makedirs(output_dir, exist_ok=True)
 
@@ -142,45 +134,40 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results, 1):
         uni   = np.logical_or(gt_idx == c, pred_idx == c).sum()
         ious.append(inter/uni if uni > 0 else 0.0)
 
-    # impresión en consola de IoU por clase
+    # imprimir IoUs
     print(f"\nIoU imagen {idx}:")
     for c, iou in enumerate(ious):
         print(f"  {CLASS_NAMES[c]:<15}: {iou:.3f}")
 
-    # figura
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=False)
+    # crear figura
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     fig.subplots_adjust(top=0.75)
 
-    for ax, img, title in zip(
-        axes,
-        (orig, gt_mask, pred_rgb),
-        ("Imagen original", "Máscara GT", "Predicción")
-    ):
+    for ax, img, title in zip(axes, (orig, gt_mask, pred_rgb),
+                              ("Imagen original", "Máscara GT", "Predicción")):
         ax.imshow(img)
         ax.set_title(title, fontsize=12, pad=10)
         ax.axis("off")
 
     ax_pred = axes[2]
 
-    # ────────── Ajuste de coordenadas para anotaciones ──────────
-    # suponiendo que pred_idx.shape == (h_small, w_small)
+    # escala de coordenadas
     h_small, w_small = pred_idx.shape
-    # y que pred_rgb tiene tamaño (h_big, w_big, 3)
     h_big, w_big, _ = np.array(pred_rgb).shape
-    sx = w_big / w_small
-    sy = h_big / h_small
+    sx, sy = w_big / w_small, h_big / h_small
 
+    # anotaciones apuntando al centro del bounding-box
     for c, iou in enumerate(ious):
         if iou <= 0:
             continue
         ys, xs = np.where(pred_idx == c)
         if ys.size == 0:
             continue
-        # centro en escala pequeña
-        y0_small, x0_small = ys.mean(), xs.mean()
-        # PASO CRÍTICO: escalar al tamaño grande
-        x0 = x0_small * sx
-        y0 = y0_small * sy
+        # centro del bounding-box en pequeño
+        y0_small = (ys.min() + ys.max()) / 2
+        x0_small = (xs.min() + xs.max()) / 2
+        # escalar al tamaño grande
+        x0, y0 = x0_small * sx, y0_small * sy
 
         ax_pred.annotate(
             f"{CLASS_NAMES[c]} = {iou:.3f}",
@@ -191,14 +178,8 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results, 1):
             clip_on=False
         )
 
-    fig.legend(
-        handles=handles,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.95),
-        ncol=len(PALETTE),
-        frameon=False,
-        fontsize=11
-    )
+    fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.95),
+               ncol=len(PALETTE), frameon=False, fontsize=11)
 
     save_path = os.path.join(output_dir, f"fila_prediccion_{idx}.png")
     fig.savefig(save_path, dpi=300, bbox_inches="tight")
