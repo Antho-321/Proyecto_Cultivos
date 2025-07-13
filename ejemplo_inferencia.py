@@ -15,7 +15,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from config import Config
-from train_test4 import CloudDeepLabV3Plus  # Cámbiala si vive en otro módulo
+from train import CloudDeepLabV3Plus  # Cámbiala si vive en otro módulo
 
 # ─────────────────────────── 0) FUNCIONES PARA IMÁGENES REMOTAS ───────────────────
 def open_remote_image(url: str) -> Image.Image:
