@@ -146,6 +146,9 @@ def check_metrics(
 
     miou = (inter / union).mean()
     mdice = ((2 * inter) / (sum_pred + sum_truth + 1e-6)).mean()
+    print("\nValidation finished:")
+    print("mIoU :", miou)
+    print("mDice:", mdice)
     return miou, mdice
 
 
