@@ -125,20 +125,24 @@ output_dir = "/content/drive/MyDrive/colab/"
 os.makedirs(output_dir, exist_ok=True)
 
 for idx, (orig, gt, pred) in enumerate(results, start=1):
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=False)
+    # Ajustamos el espacio superior para la leyenda
+    fig.subplots_adjust(top=0.80)
+
     for ax, img, title in zip(
         axes,
         (orig, gt, pred),
         ("Imagen original", "Máscara GT", "Predicción")
     ):
         ax.imshow(img)
-        ax.set_title(title, fontsize=12)
+        ax.set_title(title, fontsize=12, pad=10)  # un poco de 'pad' extra
         ax.axis("off")
 
+    # Leyenda elevada
     fig.legend(
         handles=handles,
         loc="upper center",
-        bbox_to_anchor=(0.5, 1.02),
+        bbox_to_anchor=(0.5, 0.95),  # y=0.95 va más arriba
         ncol=len(PALETTE),
         frameon=False,
         fontsize=11
