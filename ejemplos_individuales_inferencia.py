@@ -29,7 +29,6 @@ PALETTE = [
     (255,255,0),   (0,0,0),   (128,0,128)
 ]
 FLAT_PAL = [c for rgb in PALETTE for c in rgb]
-CLASS_NAMES = ["Fondo","Lengua de vaca","Diente de león","Kikuyo","Otro","Papa"]
 
 def rgb_to_idx(rgb_arr: np.ndarray, palette: list[tuple[int,int,int]]) -> np.ndarray:
     idx = np.zeros(rgb_arr.shape[:2], dtype=np.uint8)
@@ -45,7 +44,7 @@ BASE_URL = (
 )
 
 def find_mask(image_url: str) -> str | None:
-    base = re.sub(r"\.(jpg|jpeg)$", "", os.path.basename(image_url), flags=re.I)
+    base = re.sub(r"\.(jpg|jpeg)$","",os.path.basename(image_url),flags=re.I)
     dirs = ["", "labels/", "masks/"]
     exts = ["_mask.png", ".png"]
     for d in dirs:
@@ -109,75 +108,85 @@ for url in image_urls:
 
     results.append((orig, gt_mask, pred_rgb, gt_idx_small, pred_idx))
 
-# ───────────────────── 6) PREPARACIÓN DE LEYENDA ─────────────────────
-handles = [
-    Patch(facecolor=np.array(rgb)/255., edgecolor="black", label=name)
-    for rgb, name in zip(PALETTE, CLASS_NAMES)
-]
+# ───────────────────── 6) LEYENDA ─────────────────────
+CLASS_NAMES = ["Fondo","Lengua de vaca","Diente de león","Kikuyo","Otro","Papa"]
+handles = [Patch(facecolor=np.array(rgb)/255., edgecolor="black", label=CLASS_NAMES[i])
+           for i,rgb in enumerate(PALETTE)]
 
-# ─────────────────── 7) VISUALIZACIÓN Y GUARDADO ────────────────────
+# ───────────────────── 7) PLOT + IoU ─────────────────────
 output_dir = "/content/drive/MyDrive/colab/"
 os.makedirs(output_dir, exist_ok=True)
 
-for idx, (orig, gt_rgb, pred_rgb, gt_idx_small, pred_idx) in enumerate(results, start=1):
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    # Reservamos espacio abajo para leyenda y tabla
-    fig.subplots_adjust(top=0.85, bottom=0.25, wspace=0.3)
+def rects_intersect(a, b):
+    return not (a[2] < b[0] or a[0] > b[2] or a[3] < b[1] or a[1] > b[3])
 
-    # 1) Mostrar imágenes con bordes y títulos
-    for ax, img, title in zip(
-        axes,
-        (orig, gt_rgb, pred_rgb),
-        ("Imagen Original", "Máscara Real (GT)", "Predicción del Modelo")
-    ):
-        interp = 'nearest' if title != "Imagen Original" else None
-        ax.imshow(img, interpolation=interp)
-        ax.set_title(title, fontsize=16, fontweight='bold', pad=12)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        for spine in ax.spines.values():
-            spine.set_visible(True)
-            spine.set_linewidth(1)
-            spine.set_edgecolor('black')
-
-    # 2) Calcular IoU por clase
+for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
     ious = []
-    for cls in range(len(CLASS_NAMES)):
-        m_gt = (gt_idx_small == cls)
-        m_pred = (pred_idx == cls)
-        inter = np.logical_and(m_gt, m_pred).sum()
-        uni   = np.logical_or(m_gt, m_pred).sum()
-        ious.append(inter / uni if uni > 0 else 0.0)
+    for c in range(len(PALETTE)):
+        inter = np.logical_and(gt_idx==c, pred_idx==c).sum()
+        uni   = np.logical_or(gt_idx==c, pred_idx==c).sum()
+        ious.append(inter/uni if uni>0 else 0.0)
 
-    # 3) Leyenda de clases en la parte inferior
-    fig.legend(
-        handles=handles,
-        title='Leyenda de clases',
-        title_fontsize=14,
-        fontsize=12,
-        loc='lower center',
-        bbox_to_anchor=(0.5, -0.02),
-        ncol=3,
-        frameon=False
-    )
+    print(f"\nIoU imagen {idx}:")
+    for c,iou in enumerate(ious):
+        print(f"  {CLASS_NAMES[c]:<15}: {iou:.3f}")
 
-    # 4) Tabla de IoU en un nuevo Axes
-    table_data = [[CLASS_NAMES[i], f"{ious[i]:.2f}"] for i in range(len(CLASS_NAMES))]
-    ax_tab = fig.add_axes([0.1, 0.02, 0.8, 0.2], frame_on=False)  # [left, bottom, width, height]
-    ax_tab.axis('off')
-    tbl = ax_tab.table(
-        cellText=table_data,
-        colLabels=["Clase", "IoU"],
-        cellLoc='center',
-        loc='center',
-        colColours=["#f1f1f2"] * 2
-    )
-    tbl.auto_set_font_size(False)
-    tbl.set_fontsize(12)
-    tbl.scale(1, 1.5)
+    fig, axes = plt.subplots(1,3,figsize=(15,5))
+    fig.subplots_adjust(top=0.75)
+    for ax,img,title in zip(axes,(orig,gt_mask,pred_rgb),
+                             ("Imagen original","Máscara GT","Predicción")):
+        ax.imshow(img); ax.set_title(title,fontsize=12,pad=10); ax.axis("off")
 
-    # 5) Guardar y mostrar
+    ax_pred = axes[2]
+    h_small,w_small = pred_idx.shape
+    h_big,w_big,_  = np.array(pred_rgb).shape
+    sx,sy = w_big/w_small, h_big/h_small
+
+    placed_boxes = []
+    radius = 50
+    angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
+    fontsize = 10
+    char_w = 7
+    text_h = fontsize
+
+    for c, iou in enumerate(ious):
+        if iou <= 0: continue
+        ys, xs = np.where(pred_idx==c)
+        if ys.size == 0: continue
+
+        y0_small, x0_small = np.median(ys), np.median(xs)
+        x0, y0 = x0_small*sx, y0_small*sy
+
+        text = f"{CLASS_NAMES[c]} = {iou:.3f}"
+        text_w = len(text)*char_w
+
+        # buscar ángulo que no choque
+        for theta in angles:
+            dx = np.cos(theta)*radius
+            dy = np.sin(theta)*radius
+            tx = x0 + dx
+            ty = y0 + dy
+            # bbox: [xmin, ymin, xmax, ymax]
+            bbox = (tx, ty-text_h, tx+text_w, ty)
+            if not any(rects_intersect(bbox, pb) for pb in placed_boxes):
+                placed_boxes.append(bbox)
+                ax_pred.annotate(
+                    text,
+                    xy=(x0, y0),
+                    xytext=(tx, ty),
+                    color="black", fontsize=fontsize, zorder=3,
+                    arrowprops=dict(arrowstyle="->", color="black", lw=1, zorder=1),
+                    clip_on=False
+                )
+                break
+
+    fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5,0.95),
+               ncol=len(PALETTE), frameon=False, fontsize=11)
+
     save_path = os.path.join(output_dir, f"fila_prediccion_{idx}.png")
     fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
     plt.close(fig)
+
+if __name__=="__main__":
+    pass
