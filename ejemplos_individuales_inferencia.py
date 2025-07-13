@@ -116,7 +116,6 @@ for url in image_urls:
     pred_img.putpalette(FLAT_PAL)
     pred_rgb = pred_img.convert("RGB").resize(orig.size, Image.NEAREST)
 
-    # guardamos todos los elementos
     results.append((orig, gt_mask, pred_rgb, gt_idx_small, pred_idx))
 
 # ─────────────────────────── 6) LEYENDA DE COLORES POR CLASE ────────────────────
@@ -136,18 +135,22 @@ output_dir = "/content/drive/MyDrive/colab/"
 os.makedirs(output_dir, exist_ok=True)
 
 for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results, 1):
-    # ahora gt_idx y pred_idx tienen la misma forma
+    # cálculo de IoUs
     ious = []
     for c in range(len(PALETTE)):
         inter = np.logical_and(gt_idx == c, pred_idx == c).sum()
         uni   = np.logical_or(gt_idx == c, pred_idx == c).sum()
         ious.append(inter/uni if uni > 0 else 0.0)
 
+    # impresión en consola de IoU por clase
+    print(f"\nIoU imagen {idx}:")
+    for c, iou in enumerate(ious):
+        print(f"  {CLASS_NAMES[c]:<15}: {iou:.3f}")
+
     # figura
     fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=False)
     fig.subplots_adjust(top=0.75)
 
-    # plot de imágenes
     for ax, img, title in zip(
         axes,
         (orig, gt_mask, pred_rgb),
@@ -157,7 +160,6 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results, 1):
         ax.set_title(title, fontsize=12, pad=10)
         ax.axis("off")
 
-    # anotaciones IoU para cada clase en la predicción
     ax_pred = axes[2]
     for c, iou in enumerate(ious):
         if iou <= 0:
@@ -173,7 +175,6 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results, 1):
             arrowprops=dict(arrowstyle="->", color="black", lw=1)
         )
 
-    # leyenda de colores
     fig.legend(
         handles=handles,
         loc="upper center",
@@ -183,7 +184,6 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results, 1):
         fontsize=11
     )
 
-    # guardar y mostrar
     save_path = os.path.join(output_dir, f"fila_prediccion_{idx}.png")
     fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
