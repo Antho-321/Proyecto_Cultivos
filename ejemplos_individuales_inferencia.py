@@ -161,18 +161,34 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results, 1):
         ax.axis("off")
 
     ax_pred = axes[2]
+
+    # ────────── Ajuste de coordenadas para anotaciones ──────────
+    # suponiendo que pred_idx.shape == (h_small, w_small)
+    h_small, w_small = pred_idx.shape
+    # y que pred_rgb tiene tamaño (h_big, w_big, 3)
+    h_big, w_big, _ = np.array(pred_rgb).shape
+    sx = w_big / w_small
+    sy = h_big / h_small
+
     for c, iou in enumerate(ious):
         if iou <= 0:
             continue
         ys, xs = np.where(pred_idx == c)
         if ys.size == 0:
             continue
-        y0, x0 = ys.mean(), xs.mean()
+        # centro en escala pequeña
+        y0_small, x0_small = ys.mean(), xs.mean()
+        # PASO CRÍTICO: escalar al tamaño grande
+        x0 = x0_small * sx
+        y0 = y0_small * sy
+
         ax_pred.annotate(
             f"{CLASS_NAMES[c]} = {iou:.3f}",
-            xy=(x0, y0), xytext=(x0 + 30, y0 + 30),
+            xy=(x0, y0),
+            xytext=(x0 + 30, y0 + 30),
             color="black", fontsize=10,
-            arrowprops=dict(arrowstyle="->", color="black", lw=1)
+            arrowprops=dict(arrowstyle="->", color="black", lw=1),
+            clip_on=False
         )
 
     fig.legend(
