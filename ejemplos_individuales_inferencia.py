@@ -169,8 +169,8 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results, 1):
         ax_pred.annotate(
             f"{CLASS_NAMES[c]} = {iou:.3f}",
             xy=(x0, y0), xytext=(x0 + 30, y0 + 30),
-            color="white", fontsize=10,
-            arrowprops=dict(arrowstyle="->", color="white", lw=1)
+            color="black", fontsize=10,
+            arrowprops=dict(arrowstyle="->", color="black", lw=1)
         )
 
     # leyenda de colores
