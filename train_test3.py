@@ -5,7 +5,7 @@ from PIL import Image
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
@@ -75,7 +75,7 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes: int = 6):
         data = data.to(Config.DEVICE, non_blocking=True)
         targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
-        with autocast(device_type="cuda", dtype=torch.float16):
+        with autocast(dtype=torch.float16):
             output = model(data)
             logits = output[0] if isinstance(output, tuple) else output
             loss = loss_fn(logits, targets)
@@ -123,7 +123,7 @@ def check_metrics(
     model = model.to(device).eval()
 
     conf_mat = torch.zeros((n_classes, n_classes), device=device, dtype=torch.int32)
-    amp_ctx = autocast(device_type="cuda") if use_amp else contextlib.nullcontext()
+    amp_ctx = autocast(dtype=torch.float16) if use_amp else contextlib.nullcontext()
 
     for x, y in loader:
         x = x.to(device, non_blocking=True).to(memory_format=torch.channels_last)
