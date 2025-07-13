@@ -68,10 +68,10 @@ def load_gt(mask_url: str | None, size: tuple[int,int]) -> Image.Image:
 
 # ─────────────────────────── 3) LISTA DE IMÁGENES ────────────────────────────────
 image_urls = [
-    f"{BASE_URL}/images/DJI_0058-JPG_1500_2000_JPG.rf.dfa17ea56a5a4a7aebd29c2b33de2522.jpg",
-    f"{BASE_URL}/images/DJI_0055-JPG_2250_1750_JPG.rf.1da573f04d505c757d408807e17e1be8.jpg",
-    f"{BASE_URL}/images/bright_5-221m3_jpg.rf.9a48144a508a0e410fa0225c37c21474.jpg",
+    f"{BASE_URL}/images/rotate270_5-212m3_jpg.rf.24451e85934c80b44cede45e8d640c6a.jpg",
     f"{BASE_URL}/images/67_jpg.rf.841de14d82ab29ae699603779f003823.jpg",
+    f"{BASE_URL}/images/dark_DJI_0058-JPG_0_1750_JPG.rf.aef7705f747c179cb73e53a6f2357058.jpg",
+    f"{BASE_URL}/images/rotate180_DJI_0055-JPG_250_750_JPG.rf.fc24bc0573e18f6c3c8a4071b6254c40.jpg",
 ]
 
 # ─────────────────────────── 4) MODELO Y TRANSFORMACIÓN ──────────────────────────
