@@ -69,7 +69,7 @@ def load_gt(mask_url: str | None, size: tuple[int,int]) -> Image.Image:
 # ─────────────────────────── 3) LISTA DE IMÁGENES ────────────────────────────────
 image_urls = [
     f"{BASE_URL}/images/rotate270_5-212m3_jpg.rf.24451e85934c80b44cede45e8d640c6a.jpg",
-    f"{BASE_URL}/images/67_jpg.rf.841de14d82ab29ae699603779f003823.jpg",
+    f"{BASE_URL}/images/5-437m3_jpg.rf.f52dfd7b93c4ab49ab0e82263e056d03.jpg",
     f"{BASE_URL}/images/dark_DJI_0058-JPG_0_1750_JPG.rf.aef7705f747c179cb73e53a6f2357058.jpg",
     f"{BASE_URL}/images/dark_5-338_jpg.rf.fe350b74c2af3f00b7d84af37036152e.jpg",
 ]
