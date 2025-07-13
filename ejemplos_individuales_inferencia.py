@@ -15,7 +15,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from config import Config
-from train import CloudDeepLabV3Plus  # Cámbiala si está en otro módulo
+from train import CloudDeepLabV3Plus  # Cámbiala si vive en otro módulo
 
 # ─────────────────────────── 0) FUNCIONES PARA IMÁGENES REMOTAS ───────────────────
 def open_remote_image(url: str) -> Image.Image:
@@ -26,7 +26,7 @@ def open_remote_image(url: str) -> Image.Image:
 def remote_exists(url: str) -> bool:
     return requests.head(url).status_code == 200
 
-# ─────────────────────────── 1) PALETA Y FUNCIONES AUXILIARES ─────────────────────
+# ─────────────────────────── 1) PALETA Y FUN AUXILIARES ──────────────────────────
 PALETTE = [
     (255,255,255), (128,0,0), (0,128,0),
     (255,255,0),   (0,0,0),   (128,0,128)
@@ -95,20 +95,29 @@ tfm = A.Compose([
 results = []
 for url in image_urls:
     orig = open_remote_image(url).convert("RGB")
-    gt_mask = load_gt(find_mask(url), orig.size)
 
+    # 1) GT para IoU: redimensionada a la resolución del modelo
+    gt_small = load_gt(find_mask(url),
+                       size=(Config.IMAGE_WIDTH, Config.IMAGE_HEIGHT))
+    gt_idx_small = rgb_to_idx(np.array(gt_small), PALETTE)
+
+    # 2) Tensor y predicción
     tensor = tfm(image=np.array(orig))["image"].unsqueeze(0).to(device)
     with torch.no_grad():
         logits = model(tensor)
         logits = logits[0] if isinstance(logits, tuple) else logits
         pred_idx = torch.argmax(logits, 1).squeeze().cpu().numpy()
 
-    # convertir a RGB para visualizar
+    # 3) GT para visualización: al tamaño original
+    gt_mask = load_gt(find_mask(url), orig.size)
+
+    # 4) Imagen RGB de la predicción (para mostrar)
     pred_img = Image.fromarray(pred_idx.astype(np.uint8), mode="P")
     pred_img.putpalette(FLAT_PAL)
     pred_rgb = pred_img.convert("RGB").resize(orig.size, Image.NEAREST)
 
-    results.append((orig, gt_mask, pred_rgb, pred_idx))
+    # guardamos todos los elementos
+    results.append((orig, gt_mask, pred_rgb, gt_idx_small, pred_idx))
 
 # ─────────────────────────── 6) LEYENDA DE COLORES POR CLASE ────────────────────
 CLASS_NAMES = [
@@ -122,36 +131,33 @@ handles = [
     for i, rgb in enumerate(PALETTE)
 ]
 
-# ─────────────────── 7) VISUALIZACIÓN, IoU POR CLASE Y ANOTACIONES ─────────────────
+# ─────────────────── 7) CÁLCULO IoU Y VISUALIZACIÓN ────────────────────────────
 output_dir = "/content/drive/MyDrive/colab/"
 os.makedirs(output_dir, exist_ok=True)
 
-for idx, (orig, gt, pred, pred_idx) in enumerate(results, start=1):
-    # reconstruir índices de GT
-    gt_idx = rgb_to_idx(np.array(gt), PALETTE)
-
-    # calcular IoU por clase
+for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results, 1):
+    # ahora gt_idx y pred_idx tienen la misma forma
     ious = []
     for c in range(len(PALETTE)):
         inter = np.logical_and(gt_idx == c, pred_idx == c).sum()
-        uni   = np.logical_or (gt_idx == c, pred_idx == c).sum()
+        uni   = np.logical_or(gt_idx == c, pred_idx == c).sum()
         ious.append(inter/uni if uni > 0 else 0.0)
 
-    # crear figura
+    # figura
     fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=False)
     fig.subplots_adjust(top=0.75)
 
-    # mostrar cada imagen
+    # plot de imágenes
     for ax, img, title in zip(
         axes,
-        (orig, gt, pred),
+        (orig, gt_mask, pred_rgb),
         ("Imagen original", "Máscara GT", "Predicción")
     ):
         ax.imshow(img)
         ax.set_title(title, fontsize=12, pad=10)
         ax.axis("off")
 
-    # anotaciones IoU en la predicción
+    # anotaciones IoU para cada clase en la predicción
     ax_pred = axes[2]
     for c, iou in enumerate(ious):
         if iou <= 0:
