@@ -202,15 +202,10 @@ def main():
     torch._inductor.config.triton.cudagraphs = True
     model = torch.compile(
         model,
-        backend="inductor",            # the default ML-compiler backend
-        mode="max-autotune",           # profiles multiple kernels for best speed
-        fullgraph=True,                # fuse as much of the model into one big graph
-        dynamic=True,                  # optionally generate dynamic-shape kernels
-        options={
-            "epilogue_fusion": True,   # fuse pointwise ops into templates (requires max-autotune)
-            "shape_padding": True,     # pad tensor shapes for better Tensor-Core alignment
-            # you can also tweak other flags, e.g. "fallback_random" or "triton.cudagraphs"
-        }
+        backend="inductor",
+        mode="max-autotune",
+        fullgraph=True,
+        dynamic=True,
     )
 
     loss_fn = nn.CrossEntropyLoss()
