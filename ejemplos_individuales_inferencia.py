@@ -145,9 +145,9 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
     placed_boxes = []
     radius = 50
 
-    # 1. Generas los ángulos base
-    base_angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
-    # 2. Los ordenas para que los más horizontales (sin → 0) vayan al frente
+    # 1. Mucha más granularidad: 360 ángulos (paso ≈1°)
+    base_angles = np.linspace(0, 2*np.pi, 360, endpoint=False)
+    # 2. Los ordenas igual, poniendo primero los más horizontales
     angles = sorted(base_angles, key=lambda t: abs(np.sin(t)))
 
     fontsize = 10
