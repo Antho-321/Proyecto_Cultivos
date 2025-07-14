@@ -142,10 +142,11 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
     h_big,w_big,_  = np.array(pred_rgb).shape
     sx,sy = w_big/w_small, h_big/h_small
 
-    # Parámetros para anotaciones horizontales
+    # Parámetros para anotaciones horizontales y ajuste dentro de la imagen
     fontsize = 10
     char_w = 7
     offset = 50
+    margin = 5
 
     for c, iou in enumerate(ious):
         if iou <= 0: continue
@@ -159,20 +160,22 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
         text = f"{CLASS_NAMES[c]} = {iou:.3f}"
         text_w = len(text)*char_w
 
-        # decidir derecha o izquierda según espacio
-        if x0 + offset + text_w < w_big:
-            tx = x0 + offset
-            ha = "left"
-        else:
-            tx = x0 - offset - text_w
-            ha = "right"
+        # posición inicial a la derecha
+        tx = x0 + offset
+        # si se sale por la derecha, ajusta al borde
+        if tx + text_w > w_big - margin:
+            tx = w_big - text_w - margin
+        # si de algún modo sale por la izquierda, ajusta también
+        if tx < margin:
+            tx = margin
+
         ty = y0  # misma altura
 
         ax_pred.annotate(
             text,
             xy=(x0, y0),
             xytext=(tx, ty),
-            va="center", ha=ha,
+            va="center", ha="left",
             fontsize=fontsize, color="black", zorder=3,
             arrowprops=dict(arrowstyle="->", color="black", lw=1),
             clip_on=False
