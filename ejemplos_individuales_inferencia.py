@@ -144,7 +144,12 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
 
     placed_boxes = []
     radius = 50
-    angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
+
+    # 1. Generas los ángulos base
+    base_angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
+    # 2. Los ordenas para que los más horizontales (sin → 0) vayan al frente
+    angles = sorted(base_angles, key=lambda t: abs(np.sin(t)))
+
     fontsize = 10
     char_w = 7
     text_h = fontsize
@@ -160,13 +165,11 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
         text = f"{CLASS_NAMES[c]} = {iou:.3f}"
         text_w = len(text)*char_w
 
-        # buscar ángulo que no choque
         for theta in angles:
             dx = np.cos(theta)*radius
             dy = np.sin(theta)*radius
             tx = x0 + dx
             ty = y0 + dy
-            # bbox: [xmin, ymin, xmax, ymax]
             bbox = (tx, ty-text_h, tx+text_w, ty)
             if not any(rects_intersect(bbox, pb) for pb in placed_boxes):
                 placed_boxes.append(bbox)
