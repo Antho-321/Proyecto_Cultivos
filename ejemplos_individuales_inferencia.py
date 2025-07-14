@@ -162,7 +162,7 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
         y0_small, x0_small = np.median(ys), np.median(xs)
         x0, y0 = x0_small*sx, y0_small*sy
 
-        text = f"{CLASS_NAMES[c]} = {iou:.3f}"
+        text = f"{CLASS_NAMES[c]} = {iou:.3f} IoU"
         text_w = len(text)*char_w
 
         for theta in angles:
