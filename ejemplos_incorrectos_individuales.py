@@ -67,10 +67,10 @@ def load_gt(mask_url: str | None, size: tuple[int,int]) -> Image.Image:
 
 # ──────────────────── 3) LISTA DE IMÁGENES ────────────────────
 image_urls = [
-    f"{BASE_URL}/images/5-113m3_jpg.rf.1a908ea089918e172ac9b1cfbc81b590.jpg",
-    f"{BASE_URL}/images/101_jpg.rf.2a2a92bdf083fea463b938aa1f3e6bbf.jpg",
-    f"{BASE_URL}/images/118_jpg.rf.eceeb04c2e33998be1c3ded4e4bd0fdd.jpg",
-    f"{BASE_URL}/images/137_jpg.rf.6980a8e200cb1d6a3471c93debb03d04.jpg",
+    f"{BASE_URL}/images/DJI_0058-JPG_1500_2000_JPG.rf.dfa17ea56a5a4a7aebd29c2b33de2522.jpg",
+    f"{BASE_URL}/images/DJI_0055-JPG_2250_1750_JPG.rf.1da573f04d505c757d408807e17e1be8.jpg",
+    f"{BASE_URL}/images/bright_5-221m3_jpg.rf.9a48144a508a0e410fa0225c37c21474.jpg",
+    f"{BASE_URL}/images/67_jpg.rf.841de14d82ab29ae699603779f003823.jpg",
 ]
 
 # ──────────────────── 4) MODELO + TRANSFORMS ────────────────────
@@ -116,7 +116,7 @@ handles = [
 ]
 
 # ─────────────────── 7) VISUALIZACIÓN Y GUARDADO POR FILA ───────────────────────
-output_dir = "/content/drive/MyDrive/colab/"
+output_dir = "/content/drive/MyDrive/colab/predicciones_incorrectas"
 os.makedirs(output_dir, exist_ok=True)
 
 for idx, (orig, gt_rgb, pred_rgb, gt_idx_small, pred_idx) in enumerate(results, start=1):
