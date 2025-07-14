@@ -142,43 +142,41 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
     h_big,w_big,_  = np.array(pred_rgb).shape
     sx,sy = w_big/w_small, h_big/h_small
 
-    placed_boxes = []
-    radius = 50
-    angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
+    # Parámetros para anotaciones horizontales
     fontsize = 10
     char_w = 7
-    text_h = fontsize
+    offset = 50
 
     for c, iou in enumerate(ious):
         if iou <= 0: continue
         ys, xs = np.where(pred_idx==c)
         if ys.size == 0: continue
 
+        # punto medio de la máscara predicha
         y0_small, x0_small = np.median(ys), np.median(xs)
         x0, y0 = x0_small*sx, y0_small*sy
 
         text = f"{CLASS_NAMES[c]} = {iou:.3f}"
         text_w = len(text)*char_w
 
-        # buscar ángulo que no choque
-        for theta in angles:
-            dx = np.cos(theta)*radius
-            dy = np.sin(theta)*radius
-            tx = x0 + dx
-            ty = y0 + dy
-            # bbox: [xmin, ymin, xmax, ymax]
-            bbox = (tx, ty-text_h, tx+text_w, ty)
-            if not any(rects_intersect(bbox, pb) for pb in placed_boxes):
-                placed_boxes.append(bbox)
-                ax_pred.annotate(
-                    text,
-                    xy=(x0, y0),
-                    xytext=(tx, ty),
-                    color="black", fontsize=fontsize, zorder=3,
-                    arrowprops=dict(arrowstyle="->", color="black", lw=1, zorder=1),
-                    clip_on=False
-                )
-                break
+        # decidir derecha o izquierda según espacio
+        if x0 + offset + text_w < w_big:
+            tx = x0 + offset
+            ha = "left"
+        else:
+            tx = x0 - offset - text_w
+            ha = "right"
+        ty = y0  # misma altura
+
+        ax_pred.annotate(
+            text,
+            xy=(x0, y0),
+            xytext=(tx, ty),
+            va="center", ha=ha,
+            fontsize=fontsize, color="black", zorder=3,
+            arrowprops=dict(arrowstyle="->", color="black", lw=1),
+            clip_on=False
+        )
 
     fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5,0.95),
                ncol=len(PALETTE), frameon=False, fontsize=11)
@@ -188,5 +186,5 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
     plt.show()
     plt.close(fig)
 
-if __name__=="__main__":
+if __name__ == "__main__":
     pass
