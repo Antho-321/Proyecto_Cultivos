@@ -40,7 +40,7 @@ def rgb_to_idx(rgb_arr: np.ndarray, palette: list[tuple[int,int,int]]) -> np.nda
 BASE_URL = (
     "https://raw.githubusercontent.com/"
     "JorgePazos-git/Dataset-of-weeds-in-potato-crops-in-the-province-of-Carchi-and-Imbabura-in-"
-    "/refs/heads/main/Balanced/train"
+    "/refs/heads/main/Balanced/val"
 )
 
 def find_mask(image_url: str) -> str | None:
