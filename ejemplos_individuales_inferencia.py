@@ -147,11 +147,15 @@ for idx, (orig, gt_rgb, pred_rgb, gt_idx_small, pred_idx) in enumerate(results, 
         for i in range(len(CLASS_NAMES))
     ]
 
+    # ajusta margen inferior para dejar hueco
+    fig.subplots_adjust(bottom=0.15)
+
+    # coloca la leyenda abajo
     fig.legend(
         handles=handles,
         labels=labels,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.95),
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.02),  # 0.5 en x, ligeramente por debajo (y negativo)
         ncol=len(PALETTE),
         frameon=False,
         fontsize=11
