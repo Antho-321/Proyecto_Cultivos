@@ -142,44 +142,43 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
     h_big,w_big,_  = np.array(pred_rgb).shape
     sx,sy = w_big/w_small, h_big/h_small
 
-    # Parámetros para anotaciones horizontales y ajuste dentro de la imagen
+    placed_boxes = []
+    radius = 50
+    angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
     fontsize = 10
     char_w = 7
-    offset = 50
-    margin = 5
+    text_h = fontsize
 
     for c, iou in enumerate(ious):
         if iou <= 0: continue
         ys, xs = np.where(pred_idx==c)
         if ys.size == 0: continue
 
-        # punto medio de la máscara predicha
         y0_small, x0_small = np.median(ys), np.median(xs)
         x0, y0 = x0_small*sx, y0_small*sy
 
         text = f"{CLASS_NAMES[c]} = {iou:.3f}"
         text_w = len(text)*char_w
 
-        # posición inicial a la derecha
-        tx = x0 + offset
-        # si se sale por la derecha, ajusta al borde
-        if tx + text_w > w_big - margin:
-            tx = w_big - text_w - margin
-        # si de algún modo sale por la izquierda, ajusta también
-        if tx < margin:
-            tx = margin
-
-        ty = y0  # misma altura
-
-        ax_pred.annotate(
-            text,
-            xy=(x0, y0),
-            xytext=(tx, ty),
-            va="center", ha="left",
-            fontsize=fontsize, color="black", zorder=3,
-            arrowprops=dict(arrowstyle="->", color="black", lw=1),
-            clip_on=False
-        )
+        # buscar ángulo que no choque
+        for theta in angles:
+            dx = np.cos(theta)*radius
+            dy = np.sin(theta)*radius
+            tx = x0 + dx
+            ty = y0 + dy
+            # bbox: [xmin, ymin, xmax, ymax]
+            bbox = (tx, ty-text_h, tx+text_w, ty)
+            if not any(rects_intersect(bbox, pb) for pb in placed_boxes):
+                placed_boxes.append(bbox)
+                ax_pred.annotate(
+                    text,
+                    xy=(x0, y0),
+                    xytext=(tx, ty),
+                    color="black", fontsize=fontsize, zorder=3,
+                    arrowprops=dict(arrowstyle="->", color="black", lw=1, zorder=1),
+                    clip_on=False
+                )
+                break
 
     fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5,0.95),
                ncol=len(PALETTE), frameon=False, fontsize=11)
@@ -189,5 +188,5 @@ for idx, (orig, gt_mask, pred_rgb, gt_idx, pred_idx) in enumerate(results,1):
     plt.show()
     plt.close(fig)
 
-if __name__ == "__main__":
+if __name__=="__main__":
     pass
