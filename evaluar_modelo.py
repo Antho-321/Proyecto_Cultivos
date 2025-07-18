@@ -7,7 +7,7 @@ from sklearn.metrics import confusion_matrix
 import numpy as np
 
 from config import Config
-from train_test4 import CloudDataset, CloudDeepLabV3Plus
+from train_test3 import CloudDataset, CloudDeepLabV3Plus
 
 def get_val_loader():
     val_transform = A.Compose([
@@ -17,8 +17,8 @@ def get_val_loader():
     ])
 
     val_ds = CloudDataset(
-        image_dir=Config.TEST_IMG_DIR,
-        mask_dir=Config.TEST_MASK_DIR,
+        image_dir=Config.VAL_IMG_DIR,
+        mask_dir=Config.VAL_MASK_DIR,
         transform=val_transform
     )
     return DataLoader(
@@ -99,7 +99,7 @@ def main():
     device = torch.device(Config.DEVICE)
     val_loader = get_val_loader()
 
-    checkpoint_path = "/content/drive/MyDrive/colab/0.8410miou.pth.tar"
+    checkpoint_path = "/content/drive/MyDrive/colab/best_model.pth.tar"
     if not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(f"No se encontró el archivo: {checkpoint_path}")
 
