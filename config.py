@@ -13,7 +13,7 @@ class Config:
     LEARNING_RATE = 1e-4
     WEIGHT_DECAY = 1e-5
     BATCH_SIZE = 8
-    NUM_EPOCHS = 200
+    NUM_EPOCHS = 360
     NUM_WORKERS = 2
     
     IMAGE_HEIGHT = 256
@@ -21,7 +21,7 @@ class Config:
     
     PIN_MEMORY = True
     LOAD_MODEL = False
-    BASE_PATH = "/content/drive/MyDrive/colab/"
+    BASE_PATH = "/"
     MODEL_SAVE_PATH = BASE_PATH + "best_model.pth.tar"
     PERFORMANCE_PATH = BASE_PATH + "rendimiento_miou.png"
 
