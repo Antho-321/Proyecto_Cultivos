@@ -21,7 +21,7 @@ class Config:
     
     PIN_MEMORY = True
     LOAD_MODEL = False
-    BASE_PATH = "/"
+    BASE_PATH = "/kaggle/working/Proyecto_Cultivos/"
     MODEL_SAVE_PATH = BASE_PATH + "best_model.pth.tar"
     PERFORMANCE_PATH = BASE_PATH + "rendimiento_miou.png"
 
