@@ -47,19 +47,23 @@ def dense_crf_refine(image_rgb, probs, n_iters: int = 50):
     return np.argmax(Q, axis=0).reshape(h, w).astype(np.uint8)
 
 
-def morph_refine(mask, k=2, min_area=10):
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-    refined = mask.copy()
-    for c in [3, 5]:                # solo clases extensas
-        bin = (mask == c).astype(np.uint8)
-        bin = cv2.morphologyEx(bin, cv2.MORPH_OPEN,  kernel)
-        bin = cv2.morphologyEx(bin, cv2.MORPH_CLOSE, kernel)
-        if min_area:
-            n, lbl, stats, _ = cv2.connectedComponentsWithStats(bin, 8)
-            for lab in range(1, n):
-                if stats[lab, cv2.CC_STAT_AREA] < min_area:
-                    bin[lbl == lab] = 0
-        refined[bin == 1] = c
+def morph_refine(mask, k: int = 3, min_area: int = 50):
+    """Opening + Closing + eliminación de componentes pequeñas."""
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    refined = np.zeros_like(mask, dtype=np.uint8)
+
+    for c in range(NUM_CLASSES):
+        bin_mask = (mask == c).astype(np.uint8)
+
+        bin_mask = cv2.morphologyEx(bin_mask, cv2.MORPH_OPEN,  kernel)
+        bin_mask = cv2.morphologyEx(bin_mask, cv2.MORPH_CLOSE, kernel)
+
+        n_lbl, lbls, stats, _ = cv2.connectedComponentsWithStats(bin_mask, 8)
+        for lab in range(1, n_lbl):
+            if stats[lab, cv2.CC_STAT_AREA] < min_area:
+                bin_mask[lbls == lab] = 0
+
+        refined[bin_mask == 1] = c
     return refined
 
 
