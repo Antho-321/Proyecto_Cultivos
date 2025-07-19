@@ -67,12 +67,12 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes: int = 6):
     model.train()
     loop = tqdm(loader, leave=True)
 
-    # Confusion matrix for metrics
-    conf_mat = torch.zeros((num_classes, num_classes), device=Config.DEVICE, dtype=torch.int64)
+    tp = torch.zeros(num_classes, device=Config.DEVICE)
+    fp = torch.zeros(num_classes, device=Config.DEVICE)
+    fn = torch.zeros(num_classes, device=Config.DEVICE)
 
     for data, targets in loop:
-        # Move data with channels_last for faster conv
-        data = data.to(Config.DEVICE, non_blocking=True, memory_format=torch.channels_last)
+        data = data.to(Config.DEVICE, non_blocking=True)
         targets = targets.to(Config.DEVICE, non_blocking=True).long()
 
         with autocast(device_type="cuda", dtype=torch.float16):
@@ -85,23 +85,17 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes: int = 6):
         scaler.step(optimizer)
         scaler.update()
 
-        # Update confusion matrix
         preds = logits.argmax(1)
-        hist = torch.bincount(
-            (preds * num_classes + targets).view(-1), minlength=num_classes * num_classes
-        ).view(num_classes, num_classes)
-        conf_mat += hist
+        for c in range(num_classes):
+            tp[c] += ((preds == c) & (targets == c)).sum()
+            fp[c] += ((preds == c) & (targets != c)).sum()
+            fn[c] += ((preds != c) & (targets == c)).sum()
 
         loop.set_postfix(loss=loss.item())
 
-    # Compute IoU and Dice
-    inter = conf_mat.diag().float()
-    sum_pred = conf_mat.sum(1).float()
-    sum_truth = conf_mat.sum(0).float()
     eps = 1e-6
-    iou = inter / (sum_pred + sum_truth - inter + eps)
-    dice = (2 * inter) / (sum_pred + sum_truth + eps)
-
+    iou = tp / (tp + fp + fn + eps)
+    dice = (2 * tp) / (2 * tp + fp + fn + eps)
     print("\nTrain finished:")
     print("IoU :", iou)
     print("Dice:", dice)
@@ -128,14 +122,12 @@ def check_metrics(
 
     model = model.to(device).eval()
 
-    # Use int64 for potential large counts
-    conf_mat = torch.zeros((n_classes, n_classes), device=device, dtype=torch.int64)
+    conf_mat = torch.zeros((n_classes, n_classes), device=device, dtype=torch.int32)
     amp_ctx = autocast(device_type="cuda") if use_amp else contextlib.nullcontext()
-    eps = 1e-6
 
     for x, y in loader:
         x = x.to(device, non_blocking=True).to(memory_format=torch.channels_last)
-        y = y.to(device, non_blocking=True).long()
+        y = y.to(device, non_blocking=True).int()
 
         with amp_ctx:
             logits = model(x)
@@ -145,16 +137,15 @@ def check_metrics(
         hist = torch.bincount(
             (preds * n_classes + y).view(-1), minlength=n_classes * n_classes
         ).view(n_classes, n_classes)
-        conf_mat += hist
+        conf_mat += hist.to(conf_mat.dtype)
 
     inter = conf_mat.diag().float()
     sum_pred = conf_mat.sum(1).float()
     sum_truth = conf_mat.sum(0).float()
-    union = sum_pred + sum_truth - inter + eps
+    union = sum_pred + sum_truth - inter + 1e-6
 
     miou = (inter / union).mean()
-    mdice = ((2 * inter) / (sum_pred + sum_truth + eps)).mean()
-
+    mdice = ((2 * inter) / (sum_pred + sum_truth + 1e-6)).mean()
     print("\nValidation finished:")
     print("mIoU :", miou)
     print("mDice:", mdice)
@@ -168,27 +159,24 @@ def main():
     torch.backends.cudnn.benchmark = True
     print(f"Device: {Config.DEVICE}")
 
-    # TF32 for faster FP32 matmuls
-    torch.set_float32_matmul_precision('high')
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch._inductor.config.triton.cudagraphs = True
+    train_tf = A.Compose(
+        [
+            A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
+            A.Rotate(limit=35, p=0.7),
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.3),
+            A.Normalize(mean=(0, 0, 0), std=(1, 1, 1), max_pixel_value=255.0),
+            ToTensorV2(),
+        ]
+    )
+    val_tf = A.Compose(
+        [
+            A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
+            A.Normalize(mean=(0, 0, 0), std=(1, 1, 1), max_pixel_value=255.0),
+            ToTensorV2(),
+        ]
+    )
 
-    # Transforms
-    train_tf = A.Compose([
-        A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
-        A.Rotate(limit=35, p=0.7),
-        A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.3),
-        A.Normalize(mean=(0, 0, 0), std=(1, 1, 1), max_pixel_value=255.0),
-        ToTensorV2(),
-    ])
-    val_tf = A.Compose([
-        A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
-        A.Normalize(mean=(0, 0, 0), std=(1, 1, 1), max_pixel_value=255.0),
-        ToTensorV2(),
-    ])
-
-    # Datasets and loaders
     train_ds = CloudDataset(Config.TRAIN_IMG_DIR, Config.TRAIN_MASK_DIR, train_tf)
     val_ds = CloudDataset(Config.VAL_IMG_DIR, Config.VAL_MASK_DIR, val_tf)
     train_loader = DataLoader(
@@ -197,7 +185,6 @@ def main():
         shuffle=True,
         num_workers=Config.NUM_WORKERS,
         pin_memory=Config.PIN_MEMORY,
-        persistent_workers=True,
     )
     val_loader = DataLoader(
         val_ds,
@@ -205,30 +192,25 @@ def main():
         shuffle=False,
         num_workers=Config.NUM_WORKERS,
         pin_memory=Config.PIN_MEMORY,
-        persistent_workers=True,
     )
 
-    # Print post-augmentation distribution
     imprimir_distribucion_clases_post_augmentation(
         train_loader, 6, "Distribución de clases en ENTRENAMIENTO (post-aug)"
     )
 
-    # Model, loss, optimizer, scaler
     model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
-    model = torch.compile(model, mode="reduce-overhead", dynamic=True)
+    torch._inductor.config.triton.cudagraphs = True
+    model = torch.compile(model)
 
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
     scaler = GradScaler()
     best_miou = -1.0
 
-    # Training loop
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n--- Epoch {epoch+1}/{Config.NUM_EPOCHS} ---")
         train_fn(train_loader, model, optimizer, loss_fn, scaler)
-        miou, mdice = check_metrics(
-            val_loader, model, n_classes=6, device=Config.DEVICE
-        )
+        miou, mdice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
 
         if miou > best_miou:
             best_miou = miou
@@ -243,13 +225,10 @@ def main():
                 Config.MODEL_SAVE_PATH,
             )
 
-    # Evaluate best checkpoint
     print("\nEvaluating best checkpoint …")
     ckpt = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
     model.load_state_dict(ckpt["state_dict"])
-    miou, mdice = check_metrics(
-        val_loader, model, n_classes=6, device=Config.DEVICE
-    )
+    miou, mdice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
     print(f"Best checkpoint ⇒ mIoU {miou:.4f} | Dice {mdice:.4f}")
 
 
