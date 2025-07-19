@@ -30,10 +30,9 @@ def dense_crf_refine(image_rgb, probs, n_iters: int = 50):
     h, w = image_rgb.shape[:2]
     d = dcrf.DenseCRF2D(w, h, NUM_CLASSES)
 
-    unary = unary_from_softmax(probs)       # shape C×(H*W)
+    unary = unary_from_softmax(probs)          # C × (H*W)
     d.setUnaryEnergy(unary)
 
-    # Par empíricamente razonables
     gauss = create_pairwise_gaussian(sdims=(3, 3), shape=(h, w))
     d.addPairwiseEnergy(gauss, compat=3)
 
@@ -70,8 +69,8 @@ def morph_refine(mask, k: int = 3, min_area: int = 50):
 def postprocess(logits, rgb_img):
     """logits: torch.Tensor C×H×W (CPU), rgb_img: H×W×3."""
     probs = torch.softmax(logits, dim=0).cpu().numpy()
-    crf_mask = dense_crf_refine(rgb_img, probs)
-    return morph_refine(crf_mask)
+    crf_mask = dense_crf_refine(rgb_img, probs)   # aplica CRF
+    return morph_refine(crf_mask)                 # morfología
 
 # --------------------------------------------------------------------
 # 2. Inferencia + métricas
@@ -91,8 +90,8 @@ def run_inference():
 
     # --------  Modelo  --------
     model = CloudDeepLabV3Plus(num_classes=NUM_CLASSES).to(Config.DEVICE)
-    torch._inductor.config.triton.cudagraphs = True           # mismo flag que en train
-    model = torch.compile(model)                              # ¡clave para que coincidan las claves!
+    torch._inductor.config.triton.cudagraphs = True
+    model = torch.compile(model)          # necesario para coincidir con el checkpoint
     ckpt  = torch.load(CKPT_PATH, map_location=Config.DEVICE)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
@@ -107,10 +106,13 @@ def run_inference():
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             logits = model(img_t)[0].squeeze(0).to("cpu")     # C×H×W
 
-        # Imagen RGB original (sin normalizar) para CRF
-        rgb = np.array(
-            Image.open(os.path.join(Config.VAL_IMG_DIR, val_ds.images[i]))
-        )
+        # Imagen RGB original y **resize** al tamaño de logits
+        rgb = np.array(Image.open(
+            os.path.join(Config.VAL_IMG_DIR, val_ds.images[i])
+        ))
+        h, w = logits.shape[1:]
+        if (rgb.shape[0], rgb.shape[1]) != (h, w):
+            rgb = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_LINEAR)
 
         refined = postprocess(logits, rgb)                    # H×W uint8
 
