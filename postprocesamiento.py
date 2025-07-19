@@ -18,6 +18,7 @@ from model2 import CloudDeepLabV3Plus
 from config import Config
 from continuar_entrenamiento import CloudDataset   # dataset ya definido
 
+USE_CRF   = False           # ← pon True si quieres volver a activarlo
 NUM_CLASSES = 6
 CKPT_PATH   = Config.MODEL_SAVE_PATH
 SAVE_DIR    = "./pred_masks_pp"
@@ -67,10 +68,18 @@ def morph_refine(mask, k: int = 3, min_area: int = 50):
 
 
 def postprocess(logits, rgb_img):
-    """logits: torch.Tensor C×H×W (CPU), rgb_img: H×W×3."""
-    probs = torch.softmax(logits, dim=0).cpu().numpy()
-    crf_mask = dense_crf_refine(rgb_img, probs)   # aplica CRF
-    return morph_refine(crf_mask)                 # morfología
+    """
+    logits: torch.Tensor C×H×W (en CPU)
+    rgb_img: np.ndarray H×W×3  (solo se usa si USE_CRF=True)
+    """
+    if USE_CRF:
+        probs = torch.softmax(logits, dim=0).cpu().numpy()
+        crf_mask = dense_crf_refine(rgb_img, probs)      # CRF
+        return morph_refine(crf_mask)                    # morfología
+    else:
+        # 1️⃣ argmax directo  2️⃣ morfología ligera
+        raw_mask = logits.argmax(0).cpu().numpy().astype(np.uint8)
+        return morph_refine(raw_mask)
 
 # --------------------------------------------------------------------
 # 2. Inferencia + métricas
