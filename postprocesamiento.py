@@ -16,7 +16,7 @@ from pydensecrf.utils import (
 
 from model2 import CloudDeepLabV3Plus
 from config import Config
-from train import CloudDataset        # ← ya definido en tu código
+from continuar_entrenamiento import CloudDataset        # ← ya definido en tu código
 
 NUM_CLASSES = 6
 CKPT_PATH   = Config.MODEL_SAVE_PATH
