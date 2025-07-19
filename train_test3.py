@@ -10,24 +10,19 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+from torch.nn import DataParallel
 
 from model2 import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation
 from config import Config
 
-
-# ================================================================================
-# 1. DATASET
-# ================================================================================
+# ================================================================================  
+# 1. DATASET  
+# ================================================================================  
 class CloudDataset(torch.utils.data.Dataset):
     _IMG_EXTENSIONS = (".jpg", ".png")
 
-    def __init__(
-        self,
-        image_dir: str,
-        mask_dir: str,
-        transform: A.Compose | None = None,
-    ):
+    def __init__(self, image_dir: str, mask_dir: str, transform: A.Compose | None = None):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
         self.transform = transform
@@ -59,10 +54,9 @@ class CloudDataset(torch.utils.data.Dataset):
 
         return image, mask
 
-
-# ================================================================================
-# 2. ENTRENAMIENTO
-# ================================================================================
+# ================================================================================  
+# 2. ENTRENAMIENTO  
+# ================================================================================  
 def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes: int = 6):
     model.train()
     loop = tqdm(loader, leave=True)
@@ -102,22 +96,12 @@ def train_fn(loader, model, optimizer, loss_fn, scaler, num_classes: int = 6):
     print("mIoU :", torch.nanmean(iou))
     print("mDice:", torch.nanmean(dice))
 
-
-# ================================================================================
-# 3. VALIDACIÓN
-# ================================================================================
+# ================================================================================  
+# 3. VALIDACIÓN  
+# ================================================================================  
 @torch.no_grad()
-def check_metrics(
-    loader,
-    model,
-    n_classes: int = 6,
-    device: str = "cuda",
-    use_amp: bool = True,
-    compile_model: bool = False,
-):
-    if compile_model and hasattr(torch, "compile") and not isinstance(
-        model, torch._dynamo.OptimizedModule
-    ):
+def check_metrics(loader, model, n_classes: int = 6, device: torch.device = torch.device("cuda"), use_amp: bool = True, compile_model: bool = False):
+    if compile_model and hasattr(torch, "compile") and not isinstance(model, torch._dynamo.OptimizedModule):
         model = torch.compile(model, mode="reduce-overhead", dynamic=True)
 
     model = model.to(device).eval()
@@ -135,7 +119,8 @@ def check_metrics(
 
         preds = logits.argmax(1)
         hist = torch.bincount(
-            (preds * n_classes + y).view(-1), minlength=n_classes * n_classes
+            (preds * n_classes + y).view(-1),
+            minlength=n_classes * n_classes
         ).view(n_classes, n_classes)
         conf_mat += hist.to(conf_mat.dtype)
 
@@ -151,86 +136,83 @@ def check_metrics(
     print("mDice:", mdice)
     return miou, mdice
 
-
-# ================================================================================
-# 4. MAIN
-# ================================================================================
+# ================================================================================  
+# 4. MAIN  
+# ================================================================================  
 def main():
     torch.backends.cudnn.benchmark = True
-    print(f"Device: {Config.DEVICE}")
 
-    train_tf = A.Compose(
-        [
-            A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
-            A.Rotate(limit=35, p=0.7),
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.3),
-            A.Normalize(mean=(0, 0, 0), std=(1, 1, 1), max_pixel_value=255.0),
-            ToTensorV2(),
-        ]
-    )
-    val_tf = A.Compose(
-        [
-            A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
-            A.Normalize(mean=(0, 0, 0), std=(1, 1, 1), max_pixel_value=255.0),
-            ToTensorV2(),
-        ]
-    )
+    # Configurar dispositivo y GPUs
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    n_gpus = torch.cuda.device_count()
+    print(f"Using device {device}, GPUs available: {n_gpus}")
+    Config.DEVICE = device
 
+    # Transformaciones
+    train_tf = A.Compose([
+        A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
+        A.Rotate(limit=35, p=0.7),
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.3),
+        A.Normalize(mean=(0,0,0), std=(1,1,1), max_pixel_value=255.0),
+        ToTensorV2(),
+    ])
+    val_tf = A.Compose([
+        A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
+        A.Normalize(mean=(0,0,0), std=(1,1,1), max_pixel_value=255.0),
+        ToTensorV2(),
+    ])
+
+    # Datasets y loaders
     train_ds = CloudDataset(Config.TRAIN_IMG_DIR, Config.TRAIN_MASK_DIR, train_tf)
-    val_ds = CloudDataset(Config.VAL_IMG_DIR, Config.VAL_MASK_DIR, val_tf)
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=Config.BATCH_SIZE,
-        shuffle=True,
-        num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=Config.BATCH_SIZE,
-        shuffle=False,
-        num_workers=Config.NUM_WORKERS,
-        pin_memory=Config.PIN_MEMORY,
-    )
+    val_ds   = CloudDataset(Config.VAL_IMG_DIR,   Config.VAL_MASK_DIR,   val_tf)
+    train_loader = DataLoader(train_ds, batch_size=Config.BATCH_SIZE, shuffle=True,
+                              num_workers=Config.NUM_WORKERS, pin_memory=Config.PIN_MEMORY)
+    val_loader   = DataLoader(val_ds,   batch_size=Config.BATCH_SIZE, shuffle=False,
+                              num_workers=Config.NUM_WORKERS, pin_memory=Config.PIN_MEMORY)
 
-    imprimir_distribucion_clases_post_augmentation(
-        train_loader, 6, "Distribución de clases en ENTRENAMIENTO (post-aug)"
-    )
+    imprimir_distribucion_clases_post_augmentation(train_loader, 6, "Distribución de clases en ENTRENAMIENTO (post-aug)")
 
-    model = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
+    # Modelo
+    model = CloudDeepLabV3Plus(num_classes=6)
+    if n_gpus > 1:
+        model = DataParallel(model)
+    model = model.to(device)
+
     torch._inductor.config.triton.cudagraphs = True
-    model = torch.compile(model)
+    try:
+        model = torch.compile(model)
+    except Exception as e:
+        print("Model compilation skipped:", e)
 
-    loss_fn = nn.CrossEntropyLoss()
+    # Optimizador y pérdida
+    loss_fn  = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
-    scaler = GradScaler()
+    scaler    = GradScaler()
     best_miou = -1.0
 
+    # Bucle de entrenamiento
     for epoch in range(Config.NUM_EPOCHS):
         print(f"\n--- Epoch {epoch+1}/{Config.NUM_EPOCHS} ---")
         train_fn(train_loader, model, optimizer, loss_fn, scaler)
-        miou, mdice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
+        miou, mdice = check_metrics(val_loader, model, n_classes=6, device=device)
 
         if miou > best_miou:
             best_miou = miou
             print(f"🔹 New best mIoU {miou:.4f} | Dice {mdice:.4f}  →  saving …")
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "state_dict": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "best_mIoU": best_miou,
-                },
-                Config.MODEL_SAVE_PATH,
-            )
+            torch.save({
+                "epoch": epoch,
+                "state_dict": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "best_mIoU": best_miou,
+            }, Config.MODEL_SAVE_PATH)
 
+    # Evaluar mejor checkpoint
     print("\nEvaluating best checkpoint …")
-    ckpt = torch.load(Config.MODEL_SAVE_PATH, map_location=Config.DEVICE)
+    ckpt = torch.load(Config.MODEL_SAVE_PATH, map_location=device)
     model.load_state_dict(ckpt["state_dict"])
-    miou, mdice = check_metrics(val_loader, model, n_classes=6, device=Config.DEVICE)
+    miou, mdice = check_metrics(val_loader, model, n_classes=6, device=device)
     print(f"Best checkpoint ⇒ mIoU {miou:.4f} | Dice {mdice:.4f}")
-
 
 if __name__ == "__main__":
     main()
