@@ -16,18 +16,25 @@ from model2 import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation
 from config import Config
 
-from playwright.sync_api import sync_playwright
+import requests
+from pathlib import Path
+from tqdm import tqdm   # pip install tqdm
 
-url = "https://limewire.com/d/mfbXX#LlD19WlXvw"
+URL = "https://limewire.com/d/mfbXX"      # sin el fragmento ‘#…’
+DEST = Path("best_model.pth.tar")
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    context = browser.new_context(accept_downloads=True)
-    page = context.new_page()
-    page.goto(url, wait_until="networkidle")  # espera a que acaben las peticiones
-    download = page.wait_for_event("download")  # LimeWire dispara la descarga
-    download.save_as("best_model.pth.tar")
-    print("Descarga completa")
+# Algunos servicios bloquean el user-agent por defecto de requests
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+with requests.get(URL, headers=HEADERS, stream=True, allow_redirects=True) as r:
+    r.raise_for_status()                # lanza excepción si hay 4xx/5xx
+    total = int(r.headers.get("content-length", 0))
+    with tqdm(total=total, unit="B", unit_scale=True, desc=DEST.name) as bar:
+        with DEST.open("wb") as f:
+            for chunk in r.iter_content(chunk_size=64 * 1024):
+                f.write(chunk)
+                bar.update(len(chunk))
+print("Archivo guardado en", DEST.resolve())
 
 # ====================================================================
 # 1. DATASET (igual que antes)
