@@ -20,7 +20,7 @@ import requests
 from pathlib import Path
 from tqdm import tqdm   # pip install tqdm
 
-URL = "https://limewire.com/d/mfbXX"      # sin el fragmento ‘#…’
+URL = "https://limewire.com/d/mfbXX#LlD19WlXvw"      # sin el fragmento ‘#…’
 DEST = Path("best_model.pth.tar")
 
 # Algunos servicios bloquean el user-agent por defecto de requests
