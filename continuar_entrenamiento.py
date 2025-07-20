@@ -3,10 +3,10 @@
 # ==================================================================================================
 import os
 import contextlib
-from pathlib import Path
-
 import numpy as np
+from pathlib import Path
 from PIL import Image
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -35,10 +35,9 @@ base_tf = A.Compose([
                          val_shift_limit=10, p=0.3),
     A.Normalize(mean=(0, 0, 0), std=(1, 1, 1), max_pixel_value=255.0),
     ToTensorV2(),
-], additional_targets={'mask': 'mask'})
+], additional_targets={"mask": "mask"})
 
 extra_tf = A.Compose([
-    # ✔ FIX: supply `size` as a tuple (H, W)
     A.RandomResizedCrop(
         size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
         scale=(0.5, 1.0),
@@ -51,6 +50,7 @@ extra_tf = A.Compose([
     A.CoarseDropout(max_holes=8, max_height=32, max_width=32,
                     fill_value=0, mask_fill_value=0, p=0.3),
 ])
+
 
 # ==================================================================================================
 # 2. DATASET
@@ -81,16 +81,20 @@ class CloudDataset(torch.utils.data.Dataset):
 
         uniq       = np.unique(mask)
         only_0_4   = (len(uniq) <= 2) and set(uniq).issubset({0, 4})
-        transform  = self.base_tf
 
+        # always guarantee final size after extra transforms
         if only_0_4 and self.extra_tf is not None:
-            transform = A.Compose(self.extra_tf.transforms +
-                                  self.base_tf.transforms[-2:])  # Normalize + ToTensorV2
+            transform = A.Compose(
+                self.extra_tf.transforms +
+                [A.Resize(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH)] +  # enforce uniform size
+                self.base_tf.transforms[-2:]                           # Normalize + ToTensorV2
+            )
+        else:
+            transform = self.base_tf
 
         augmented = transform(image=image, mask=mask)
-        img  = augmented["image"].clone()   # new, resizable storage
+        img  = augmented["image"].clone()
         mask = augmented["mask"].clone()
-
         return img, mask
 
 
