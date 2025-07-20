@@ -15,6 +15,36 @@ from model2 import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation
 from config import Config
 
+import requests
+
+# URL original con fragmento (token de cliente)
+url_con_fragmento = "https://limewire.com/d/mfbXX#LlD19WlXvw"
+# Quitamos el fragmento para la petición HTTP
+url = url_con_fragmento.split('#')[0]
+
+# Hacemos la petición en modo 'stream' para iterar por bloques
+with requests.get(url, stream=True) as r:
+    r.raise_for_status()  # para lanzar excepción si hay error en la descarga
+    # Intentamos extraer un nombre de archivo desde headers, si existe
+    filename = None
+    cd = r.headers.get('content-disposition')
+    if cd:
+        # ej. content-disposition: attachment; filename="nombre.ext"
+        import re
+        m = re.search(r'filename="(.+)"', cd)
+        if m:
+            filename = m.group(1)
+    if not filename:
+        # si no hay nombre en headers, le ponemos uno genérico
+        filename = "descarga.bin"
+
+    # Abrimos un archivo local en modo binario
+    with open(filename, 'wb') as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:  # filtra keep-alive chunks
+                f.write(chunk)
+
+print(f"Archivo guardado como: {filename}")
 
 # ================================================================================
 # 1. DATASET
