@@ -38,9 +38,9 @@ base_tf = A.Compose([
 ], additional_targets={'mask': 'mask'})
 
 extra_tf = A.Compose([
-    A.RandomResizedCrop(                     # ← FIX: use keyword args or size tuple
-        height=Config.IMAGE_HEIGHT,
-        width=Config.IMAGE_WIDTH,
+    # ✔ FIX: supply `size` as a tuple (H, W)
+    A.RandomResizedCrop(
+        size=(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH),
         scale=(0.5, 1.0),
         ratio=(0.8, 1.2),
         p=0.6,
@@ -51,7 +51,6 @@ extra_tf = A.Compose([
     A.CoarseDropout(max_holes=8, max_height=32, max_width=32,
                     fill_value=0, mask_fill_value=0, p=0.3),
 ])
-
 
 # ==================================================================================================
 # 2. DATASET
