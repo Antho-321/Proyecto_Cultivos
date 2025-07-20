@@ -37,7 +37,7 @@ with requests.get(url, stream=True) as r:
             filename = m.group(1)
     if not filename:
         # si no hay nombre en headers, le ponemos uno genérico
-        filename = "descarga.bin"
+        filename = "best_model.pth.tar"
 
     # Abrimos un archivo local en modo binario
     with open(filename, 'wb') as f:
