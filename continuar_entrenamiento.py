@@ -88,7 +88,10 @@ class CloudDataset(torch.utils.data.Dataset):
                                   self.base_tf.transforms[-2:])  # Normalize + ToTensorV2
 
         augmented = transform(image=image, mask=mask)
-        return augmented["image"], augmented["mask"]
+        img  = augmented["image"].clone()   # new, resizable storage
+        mask = augmented["mask"].clone()
+
+        return img, mask
 
 
 # ==================================================================================================
