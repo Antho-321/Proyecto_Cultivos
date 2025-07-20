@@ -1,5 +1,5 @@
 # ==================================================================================================
-# 0. IMPORTS Y DESCARGA DEL MODELO PRE-ENTRENADO
+# 0. IMPORTS
 # ==================================================================================================
 import os
 import contextlib
@@ -21,6 +21,7 @@ from model2 import CloudDeepLabV3Plus
 from utils import imprimir_distribucion_clases_post_augmentation
 from config import Config
 
+
 # ==================================================================================================
 # 1. TRANSFORMACIONES
 # ==================================================================================================
@@ -29,19 +30,21 @@ base_tf = A.Compose([
     A.Rotate(limit=35, p=0.7),
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.3),
-    # photometric
     A.RandomBrightnessContrast(p=0.4),
     A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=15,
                          val_shift_limit=10, p=0.3),
-    # normalización + tensor
     A.Normalize(mean=(0, 0, 0), std=(1, 1, 1), max_pixel_value=255.0),
     ToTensorV2(),
 ], additional_targets={'mask': 'mask'})
 
 extra_tf = A.Compose([
-    # sólo para máscaras binarias {0,4}
-    A.RandomResizedCrop(Config.IMAGE_HEIGHT, Config.IMAGE_WIDTH,
-                        scale=(0.5, 1.0), ratio=(0.8, 1.2), p=0.6),
+    A.RandomResizedCrop(                     # ← FIX: use keyword args or size tuple
+        height=Config.IMAGE_HEIGHT,
+        width=Config.IMAGE_WIDTH,
+        scale=(0.5, 1.0),
+        ratio=(0.8, 1.2),
+        p=0.6,
+    ),
     A.ElasticTransform(alpha=40, sigma=50, alpha_affine=20, p=0.4),
     A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.3),
     A.GaussianBlur(blur_limit=3, p=0.25),
@@ -63,8 +66,7 @@ class CloudDataset(torch.utils.data.Dataset):
         self.images = [f for f in os.listdir(image_dir)
                        if f.lower().endswith(self._IMG_EXTENSIONS)]
 
-    def __len__(self) -> int:
-        return len(self.images)
+    def __len__(self): return len(self.images)
 
     def _mask_path_from_image_name(self, image_filename: str) -> str:
         stem = image_filename.rsplit(".", 1)[0]
@@ -83,9 +85,8 @@ class CloudDataset(torch.utils.data.Dataset):
         transform  = self.base_tf
 
         if only_0_4 and self.extra_tf is not None:
-            # evita duplicar Normalize + ToTensorV2:
             transform = A.Compose(self.extra_tf.transforms +
-                                  self.base_tf.transforms[-2:])
+                                  self.base_tf.transforms[-2:])  # Normalize + ToTensorV2
 
         augmented = transform(image=image, mask=mask)
         return augmented["image"], augmented["mask"]
@@ -162,8 +163,9 @@ def main(resume: bool = True):
     val_loader   = DataLoader(val_ds,   batch_size=Config.BATCH_SIZE, shuffle=False,
                               num_workers=Config.NUM_WORKERS, pin_memory=Config.PIN_MEMORY)
 
-    imprimir_distribucion_clases_post_augmentation(train_loader, 6,
-        "Distribución de clases en ENTRENAMIENTO (post-aug)")
+    imprimir_distribucion_clases_post_augmentation(
+        train_loader, 6, "Distribución de clases en ENTRENAMIENTO (post-aug)"
+    )
 
     model     = CloudDeepLabV3Plus(num_classes=6).to(Config.DEVICE)
     torch._inductor.config.triton.cudagraphs = True
