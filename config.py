@@ -13,7 +13,7 @@ class Config:
     LEARNING_RATE = 1e-4
     WEIGHT_DECAY = 1e-5
     BATCH_SIZE = 8
-    NUM_EPOCHS = 460
+    NUM_EPOCHS = 560
     NUM_WORKERS = 2
     
     IMAGE_HEIGHT = 256
